@@ -114,6 +114,9 @@ async function spawnPiJson(
         cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
+        // Marker so routing.ts gates skip dispatcher-spawned sub-agents
+        // (OpenCode sub-agents ran plugin-free; this restores that behavior).
+        env: { ...process.env, GLITCH_SUBAGENT: "1" },
       });
       let buffer = "";
 

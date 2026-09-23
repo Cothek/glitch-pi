@@ -77,6 +77,15 @@ async function checkBranchBeforeLaunch() {
   const current = branch.stdout.trim();
   if (current === 'main') return;
 
+  // Develop-only repo: no local main and no origin/main — skip the prompt
+  // entirely instead of offering a switch that can only fail.
+  const localMain = runGit('git', ['rev-parse', '--verify', 'main'], { cwd: ROOT_DIR, timeout: 5000 });
+  const originMain = runGit('git', ['rev-parse', '--verify', 'origin/main'], { cwd: ROOT_DIR, timeout: 5000 });
+  if (!localMain.success && !originMain.success) {
+    log(DARK_GRAY, '  develop-only repo (no main branch) — skipping main check');
+    return;
+  }
+
   log(YELLOW, '');
   log(YELLOW, `  !! Currently on branch '${current}', not 'main'`);
   log(YELLOW, '  Glitch is designed to run from the main branch for stability.');
@@ -211,6 +220,15 @@ const DELIVERIES = [
   { id: 'safe', name: 'Safe', desc: 'minimal config for fixing broken setup' },
 ];
 
+// Pi-only fork guard (Phase 4): OpenCode organs were stripped from this repo.
+// Only offer OpenCode-based deliveries when the binary actually exists;
+// otherwise Pi is the sole delivery and saved OpenCode prefs are ignored.
+const isWin = process.platform === 'win32';
+const OpenCodeAvailable = existsSync(join(ROOT_DIR, 'opencode', isWin ? 'opencode.exe' : 'opencode'));
+const AVAILABLE_DELIVERIES = OpenCodeAvailable
+  ? DELIVERIES
+  : DELIVERIES.filter(d => d.id === 'pi');
+
 const MODELS = [
   { id: 'paid', name: 'Paid', desc: 'recommended' },
   { id: 'free', name: 'Free', desc: 'all agents use free models only' },
@@ -248,7 +266,7 @@ async function showGlitchModeMenu(savedDeliveryId) {
   log(MAGENTA, '');
 
   if (savedDeliveryId) {
-    const saved = DELIVERIES.find(d => d.id === savedDeliveryId);
+    const saved = AVAILABLE_DELIVERIES.find(d => d.id === savedDeliveryId);
     if (saved) {
       log(CYAN, ` Last Glitch mode: ${saved.name}`);
       log(DARK_GRAY, ' Press Enter to keep it, or pick a different Glitch mode:');
@@ -256,7 +274,7 @@ async function showGlitchModeMenu(savedDeliveryId) {
     }
   }
 
-  DELIVERIES.forEach((delivery, i) => {
+  AVAILABLE_DELIVERIES.forEach((delivery, i) => {
     const marker = delivery.id === savedDeliveryId ? ' *' : '';
     log(CYAN, `  [${i + 1}] ${delivery.name}${marker}`);
     log(DARK_GRAY, `       ${delivery.desc}`);
@@ -264,18 +282,18 @@ async function showGlitchModeMenu(savedDeliveryId) {
   });
 
   const prompt = savedDeliveryId
-    ? `Glitch mode (1-${DELIVERIES.length}, Enter for saved): `
-    : `Glitch mode (1-${DELIVERIES.length}): `;
+    ? `Glitch mode (1-${AVAILABLE_DELIVERIES.length}, Enter for saved): `
+    : `Glitch mode (1-${AVAILABLE_DELIVERIES.length}): `;
 
   while (true) {
     const selection = await askQuestion(prompt);
     const raw = selection.trim();
     if (raw === '' && savedDeliveryId) return savedDeliveryId;
     const num = parseInt(raw, 10);
-    if (!isNaN(num) && num >= 1 && num <= DELIVERIES.length) {
-      return DELIVERIES[num - 1].id;
+    if (!isNaN(num) && num >= 1 && num <= AVAILABLE_DELIVERIES.length) {
+      return AVAILABLE_DELIVERIES[num - 1].id;
     }
-    log(RED, `  Invalid selection. Please enter a number 1-${DELIVERIES.length}${savedDeliveryId ? ' or press Enter to keep the saved mode' : ''}.`);
+    log(RED, `  Invalid selection. Please enter a number 1-${AVAILABLE_DELIVERIES.length}${savedDeliveryId ? ' or press Enter to keep the saved mode' : ''}.`);
   }
 }
 
@@ -349,6 +367,29 @@ function runScript(scriptName, extraArgs = []) {
 }
 
 async function main() {
+  // ---- Help: before anything interactive (branch prompt, menus) ----
+  const args = process.argv.slice(2);
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(`
+  Glitch AI - Unified Launcher
+
+  Usage: node scripts/launch-unified.mjs [options]
+
+  Options:
+    --help, -h       Show this help
+    --mode <key>     Skip menu, launch specific mode directly
+                     Combined format: <glitch-mode>-<tier>  (e.g. normal-paid, web-free)
+                     Safe mode: safe                       (no tier)
+                     Pi mode:   pi                         (no tier)
+                     Old format: <tier>                    (assumes normal mode)
+                     Tiers: paid, free, local
+    --reset          Clear saved preference and show menu
+
+  The launcher remembers your last choice. Next time, just press Enter.
+    `);
+    process.exit(0);
+  }
+
   // ---- Branch check: FIRST thing, before repo updates ----
   await checkBranchBeforeLaunch();
 
@@ -425,28 +466,7 @@ async function main() {
     }
   }
 
-  const args = process.argv.slice(2);
-
-  if (args.includes('--help') || args.includes('-h')) {
-    console.log(`
-  Glitch AI - Unified Launcher
-
-  Usage: node scripts/launch-unified.mjs [options]
-
-  Options:
-    --help, -h       Show this help
-    --mode <key>     Skip menu, launch specific mode directly
-                     Combined format: <glitch-mode>-<tier>  (e.g. normal-paid, web-free)
-                     Safe mode: safe                       (no tier)
-                     Pi mode:   pi                         (no tier)
-                     Old format: <tier>                    (assumes normal mode)
-                     Tiers: paid, free, local
-    --reset          Clear saved preference and show menu
-
-  The launcher remembers your last choice. Next time, just press Enter.
-    `);
-    process.exit(0);
-  }
+  // ---- Check if user profile needs GitHub sync setup ----
 
   if (args.includes('--reset')) {
     if (existsSync(PrefFile)) {
@@ -459,6 +479,13 @@ async function main() {
   const modeIdx = args.indexOf('--mode');
   if (modeIdx !== -1 && modeIdx < args.length - 1) {
     modeId = normalizeMode(args[modeIdx + 1]);
+  }
+
+  // Explicit --mode guard: OpenCode-based modes need the opencode binary
+  // (otherwise launch.mjs bootstraps a fresh OpenCode download). Redirect to Pi.
+  if (modeId && modeId !== 'pi' && !OpenCodeAvailable) {
+    log(YELLOW, `  OpenCode not present in this fork — redirecting '${modeId}' to Pi.`);
+    modeId = 'pi';
   }
 
   if (!modeId) {
@@ -480,8 +507,18 @@ async function main() {
       }
     }
 
-    // Level 1: Glitch mode
-    const deliveryId = await showGlitchModeMenu(savedDelivery);
+    // Ignore saved modes pointing at stripped deliveries (OpenCode archived
+    // in this fork) so a stale pref can't dead-end the launcher into a
+    // bootstrap download.
+    if (savedDelivery && !AVAILABLE_DELIVERIES.some(d => d.id === savedDelivery)) {
+      log(DARK_YELLOW, `  Saved mode '${savedMode}' unavailable (OpenCode not present) — defaulting to Pi.`);
+      savedDelivery = null;
+    }
+
+    // Level 1: Glitch mode (skip the menu when only one delivery is available)
+    const deliveryId = AVAILABLE_DELIVERIES.length === 1
+      ? AVAILABLE_DELIVERIES[0].id
+      : await showGlitchModeMenu(savedDelivery);
 
     // Safe / Pi are deliveries with no tier — skip the model menu entirely.
     if (deliveryId === 'safe' || deliveryId === 'pi') {

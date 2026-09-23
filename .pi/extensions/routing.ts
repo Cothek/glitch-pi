@@ -24,6 +24,14 @@
  *   3. Review Gate: git commit when pendingReview && lastCode > lastReview.
  *      Bypass: --no-verify.
  *
+ * GATE MODES (2026-09-23 fixes)
+ *   - REPO_ROOT walks up from cwd to the nearest .git/.pi (sessions started
+ *     in subdirectories like data/node resolved plan/marker paths wrong).
+ *   - Dispatcher-spawned sub-agents (GLITCH_SUBAGENT=1) skip the primary's
+ *     gates — matches the OpenCode design where sub-agents ran plugin-free.
+ *   - Primary glitch-omni mode (user/agent-mode.json "mode": "glitch-omni")
+ *     gets warn-only gates, same as the omni sub-agent.
+ *
  * REVIEW PASS MARKER
  *   On reviewer task result with PASS verdict → run scripts/write-review-pass.mjs
  *   (same canonical writer as OpenCode; keeps marker format in one place).
@@ -34,18 +42,43 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 
-// --- Paths (relative to process.cwd() = glitch-pi root when launched there) ---
-const REPO_ROOT = process.cwd();
+// --- Paths (resolve repo root by walking up from cwd to the nearest .git/.pi) ---
+function resolveRepoRoot(): string {
+  let dir = process.cwd();
+  while (true) {
+    if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".pi"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return process.cwd();
+    dir = parent;
+  }
+}
+const REPO_ROOT = resolveRepoRoot();
 const REVIEW_PASS_SCRIPT = join(REPO_ROOT, "scripts", "write-review-pass.mjs");
 const MARKER_PATH = join(REPO_ROOT, "data", ".review-pass.json");
 const PLAN_MARKER_PATH = join(REPO_ROOT, "data", "plans", "current-plan.md");
+const AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
 
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const DISPATCH_WINDOW_MS = 120_000; // 120s
+
+// --- Primary agent mode (set by scripts/switch-agent.mjs, read at load) ---
+function readAgentMode(): string {
+  try {
+    if (!existsSync(AGENT_MODE_PATH)) return "glitch";
+    let text = readFileSync(AGENT_MODE_PATH, "utf-8");
+    // PowerShell Set-Content writes a UTF-8 BOM — strip it before parsing.
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    const raw = JSON.parse(text);
+    if (typeof raw?.mode === "string" && raw.mode) return raw.mode;
+  } catch { /* ignore */ }
+  return "glitch";
+}
+const AGENT_MODE = readAgentMode();
+const isOmniPrimary = AGENT_MODE === "glitch-omni";
 
 // --- Detection sets (verbatim from OpenCode plugins) ---
 
@@ -264,8 +297,13 @@ export default function (pi: ExtensionAPI) {
     "tool_call",
     async (event: ToolCallEvent): Promise<ToolCallEventResult | undefined> => {
       try {
+        // Sub-agent sessions (dispatcher-spawned, GLITCH_SUBAGENT=1) run without
+        // the primary's workflow gates — matches the OpenCode design where
+        // sub-agents were plugin-free.
+        if (process.env.GLITCH_SUBAGENT === "1") return undefined;
+
         const agentName = extractAgentName((event as any).input);
-        const isGlitchOmni = agentName === "glitch-omni";
+        const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimary;
 
         // --- dispatch tracking on task-like custom tools ---
         if (event.toolName === "task" || event.toolName === "dispatch") {

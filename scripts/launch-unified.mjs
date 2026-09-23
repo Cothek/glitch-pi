@@ -169,8 +169,11 @@ function normalizeMode(mode) {
   // Old server mode -> normal-paid
   if (mode === 'serve' || mode === 'server') return 'normal-paid';
 
-  // Safe is now a delivery (not a tier). Accept bare 'safe' or legacy 'normal-safe'/'web-safe'.
+  // Safe is a delivery (not a tier). Accept bare 'safe' or legacy 'normal-safe'/'web-safe'.
   if (mode === 'safe' || mode === 'normal-safe' || mode === 'web-safe') return 'safe';
+
+  // Pi is a delivery with no tier (Phase 4 migration path).
+  if (mode === 'pi') return 'pi';
 
   // Already in combined format
   if (mode.includes('-')) {
@@ -204,6 +207,7 @@ function saveMode(mode) {
 const DELIVERIES = [
   { id: 'normal', name: 'Terminal (TUI)', desc: 'terminal interface' },
   { id: 'web', name: 'Web', desc: 'web server' },
+  { id: 'pi', name: 'Pi', desc: 'Pi CLI (migrated — gitnexus + pi stack + tunnel)' },
   { id: 'safe', name: 'Safe', desc: 'minimal config for fixing broken setup' },
 ];
 
@@ -221,13 +225,15 @@ const SCRIPT_MAP = {
   'web-free': { script: 'launch-free.mjs', args: ['--serve'] },
   'web-local': { script: 'launch-local.mjs', args: ['--serve'] },
   'safe': { script: 'launch-safe.mjs', args: [] },
+  // Pi is a delivery with no model tier (like safe) — Phase 4 migration path.
+  'pi': { script: 'launch-pi.mjs', args: [] },
 };
 
 function getModeLabel(combinedKey) {
-  // Safe is a delivery with no tier — handle it before splitting.
-  if (combinedKey === 'safe') {
-    const safe = DELIVERIES.find(d => d.id === 'safe');
-    return safe ? safe.name : combinedKey;
+  // Safe / Pi are deliveries with no tier — handle before splitting.
+  if (combinedKey === 'safe' || combinedKey === 'pi') {
+    const d = DELIVERIES.find(x => x.id === combinedKey);
+    return d ? d.name : combinedKey;
   }
   const [deliveryId, modelId] = combinedKey.split('-');
   const delivery = DELIVERIES.find(d => d.id === deliveryId);
@@ -432,6 +438,7 @@ async function main() {
     --mode <key>     Skip menu, launch specific mode directly
                      Combined format: <glitch-mode>-<tier>  (e.g. normal-paid, web-free)
                      Safe mode: safe                       (no tier)
+                     Pi mode:   pi                         (no tier)
                      Old format: <tier>                    (assumes normal mode)
                      Tiers: paid, free, local
     --reset          Clear saved preference and show menu
@@ -461,8 +468,8 @@ async function main() {
     let savedModel = null;
     if (savedMode) {
       // Safe is a single-word delivery (no tier) — handle before splitting.
-      if (savedMode === 'safe') {
-        savedDelivery = 'safe';
+      if (savedMode === 'safe' || savedMode === 'pi') {
+        savedDelivery = savedMode;
         savedModel = null;
       } else {
         const parts = savedMode.split('-');
@@ -476,9 +483,9 @@ async function main() {
     // Level 1: Glitch mode
     const deliveryId = await showGlitchModeMenu(savedDelivery);
 
-    // Safe is a delivery with no tier — skip the model menu entirely.
-    if (deliveryId === 'safe') {
-      modeId = 'safe';
+    // Safe / Pi are deliveries with no tier — skip the model menu entirely.
+    if (deliveryId === 'safe' || deliveryId === 'pi') {
+      modeId = deliveryId;
     } else {
       // Level 2: Model tier (use saved model only if delivery didn't change)
       const modelDefault = deliveryId === savedDelivery ? savedModel : null;

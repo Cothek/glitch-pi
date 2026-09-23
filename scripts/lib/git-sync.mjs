@@ -112,6 +112,15 @@ function hasUpstream(cwd, branch) {
 }
 
 /**
+ * Check if a local branch exists (silent — no fatal noise on missing refs).
+ * @returns {boolean}
+ */
+function branchExists(cwd, branch) {
+  const r = run('git', ['rev-parse', '--verify', '--quiet', branch], { cwd, timeout: 5000 });
+  return r.success;
+}
+
+/**
  * Fetch all branches from origin.
  * @returns {boolean}
  */
@@ -171,7 +180,7 @@ function switchToMain(cwd, currentBranch) {
     log(C.YELLOW, '  Local changes detected, stashing...');
     run('git', ['stash', 'push', '-m', `glitch-auto-stash: ${currentBranch}`], { cwd, timeout: 15000 });
   }
-  const mainExists = run('git', ['rev-parse', '--verify', 'main'], { cwd, timeout: 5000 });
+  const mainExists = run('git', ['rev-parse', '--verify', '--quiet', 'main'], { cwd, timeout: 5000 });
   if (!mainExists.success) {
     run('git', ['remote', 'set-branches', 'origin', '*'], { cwd, timeout: 10000 });
     run('git', ['fetch', 'origin', 'main'], { cwd, timeout: 30000 });
@@ -467,7 +476,7 @@ export async function checkRepoUpdates(options = {}) {
 
   // 7. Check main status for reference (only if on a different branch)
   let mainBehind = 0;
-  if (branch !== 'main' && hasUpstream(cwd, 'main')) {
+  if (branch !== 'main' && branchExists(cwd, 'main') && hasUpstream(cwd, 'main')) {
     const mainBA = getBehindAhead(cwd, 'main');
     if (mainBA) mainBehind = mainBA.behind;
   }

@@ -184,25 +184,47 @@ function resolvePiCmd() {
   return null;
 }
 
-function launchPiCli(extraArgs) {
+// Preferred: spawn node + cli.js directly with array args (no shell).
+// A shell spawn of pi.cmd breaks on paths containing spaces — cmd.exe
+// splits "E:\Glitch AI\..." and 'E:\Glitch' is not recognized.
+function resolvePiInvocation() {
+  const cliJs = join(PI_ROOT, 'data', 'node', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'bundle', 'cli.js');
+  const localNode = isWin
+    ? join(PI_ROOT, 'data', 'node', 'node.exe')
+    : join(PI_ROOT, 'data', 'node', 'node');
+  if (existsSync(cliJs)) {
+    if (existsSync(localNode)) return { command: localNode, args: [cliJs], desc: cliJs };
+    if (process.execPath) return { command: process.execPath, args: [cliJs], desc: `${process.execPath} ${cliJs}` };
+  }
   const piBin = resolvePiCmd();
-  if (!piBin) {
+  if (piBin) {
+    if (isWin) {
+      // Fallback: run pi.cmd through cmd.exe; Node quotes the path arg
+      // (spaces-safe) and /s /c preserve the quoted command.
+      return { command: 'cmd.exe', args: ['/d', '/s', '/c', piBin], desc: piBin };
+    }
+    return { command: piBin, args: [], desc: piBin };
+  }
+  return null;
+}
+
+function launchPiCli(extraArgs) {
+  const inv = resolvePiInvocation();
+  if (!inv) {
     log(RED, `  ERROR: pi CLI not found under ${PI_ROOT}\\data\\node\\`);
     log(YELLOW, '  Set GLITCH_PI_ROOT or install Pi into glitch-pi.');
     process.exit(1);
   }
-  log(CYAN, `  Starting Pi (${piBin})...`);
+  log(CYAN, `  Starting Pi (${inv.desc})...`);
   log('');
   return new Promise((resolvePromise) => {
-    // Windows: .cmd/.bat must go through a shell (Node EINVAL without it).
-    const spawnOpts = {
+    const child = spawn(inv.command, [...inv.args, ...extraArgs], {
       cwd: PI_ROOT,
       stdio: 'inherit',
       env: process.env,
       windowsHide: false,
-      ...(isWin && /\.(cmd|bat)$/i.test(piBin) ? { shell: true } : {}),
-    };
-    const child = spawn(piBin, extraArgs, spawnOpts);
+      shell: false,
+    });
     child.on('error', (err) => {
       log(RED, `  Pi failed to start: ${err.message}`);
       process.exit(1);

@@ -79,8 +79,8 @@ async function checkBranchBeforeLaunch() {
 
   // Develop-only repo: no local main and no origin/main — skip the prompt
   // entirely instead of offering a switch that can only fail.
-  const localMain = runGit('git', ['rev-parse', '--verify', 'main'], { cwd: ROOT_DIR, timeout: 5000 });
-  const originMain = runGit('git', ['rev-parse', '--verify', 'origin/main'], { cwd: ROOT_DIR, timeout: 5000 });
+  const localMain = runGit('git', ['rev-parse', '--verify', '--quiet', 'main'], { cwd: ROOT_DIR, timeout: 5000 });
+  const originMain = runGit('git', ['rev-parse', '--verify', '--quiet', 'origin/main'], { cwd: ROOT_DIR, timeout: 5000 });
   if (!localMain.success && !originMain.success) {
     log(DARK_GRAY, '  develop-only repo (no main branch) — skipping main check');
     return;

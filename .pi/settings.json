@@ -2,7 +2,6 @@
   "extensions": [
     "+.pi/extensions/mulahazah.ts",
     "+.pi/extensions/stuck-detector.ts",
-    "+.pi/extensions/blast-radius.ts",
     "+.pi/extensions/routing.ts",
     "+.pi/extensions/dispatcher.ts",
     "+.pi/extensions/memory-tools.ts"

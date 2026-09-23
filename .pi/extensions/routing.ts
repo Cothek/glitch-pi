@@ -126,7 +126,7 @@ function isGitOperation(command: string): boolean {
 
 function isReadOnlyBashCommand(command: string): boolean {
   const normalized = command.trim().toLowerCase();
-  return READ_ONLY_BASH_COMMANDS.some((cmd) => normalized.startsWith(cmd));
+  return [...READ_ONLY_BASH_COMMANDS].some((cmd) => normalized.startsWith(cmd));
 }
 
 function isDestructiveBashCommand(command: string): boolean {

@@ -53,14 +53,9 @@ function runGrep(term: string, dir: string): string[] {
 }
 
 export default function (pi: ExtensionAPI) {
-    // Prefer cwd, fall back to glitch-ai (where better-sqlite3/@huggingface deps live)
-  let dir = process.cwd();
-  const fallbackRoot = "E:/Glitch AI/glitch-ai";
-  const scriptInCwd = join(dir, "glitch-memorycore", "plugins", "embed-search", "search-memory.mjs");
-  const scriptInFallback = join(fallbackRoot, "glitch-memorycore", "plugins", "embed-search", "search-memory.mjs");
-  if (!existsSync(scriptInCwd) || !existsSync(join(dir, "glitch-memorycore", "plugins", "embed-search", "memory-search.db"))) {
-    if (existsSync(scriptInFallback)) dir = fallbackRoot;
-  }
+    // Canonical memory lives in glitch-ai (single source of truth — avoids copy drift).
+  // glitch-pi is the harness; memory data + search deps stay in glitch-ai.
+  const dir = "E:/Glitch AI/glitch-ai";
 
   // --- recall ---
   pi.registerTool({

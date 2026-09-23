@@ -24,7 +24,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, AgentMessage } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { discoverAgents, type AgentConfig, type AgentScope } from "./dispatcher-agents.ts";
+import { discoverAgents, type AgentConfig, type AgentScope } from "../lib/dispatcher-agents.ts";
 
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 

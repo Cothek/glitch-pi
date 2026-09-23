@@ -507,6 +507,25 @@ async function main() {
   logToFile(`Launching ${getModeLabel(modeId)}`);
   log('');
 
+  // GitNexus index sync (Phase 1): detached so it never blocks startup.
+  // Keeps blast-radius hook + GitNexus MCP querying a fresh index.
+  try {
+    const gitnexusSync = join(SCRIPT_DIR, 'gitnexus-sync.mjs');
+    if (existsSync(gitnexusSync)) {
+      const child = spawn(process.execPath, [gitnexusSync], {
+        cwd: ROOT_DIR,
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      log(DARK_GRAY, '  GitNexus index sync started in background.');
+      logToFile('GitNexus index sync spawned (detached)');
+    }
+  } catch (e) {
+    log(YELLOW, `  GitNexus sync spawn failed (non-fatal): ${e.message}`);
+    logToFile(`WARN gitnexus-sync spawn failed: ${e.message}`);
+  }
+
   const result = runScript(config.script, config.args);
   if (!result.success) {
     process.exit(result.error?.status || 1);

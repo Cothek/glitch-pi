@@ -1,0 +1,7 @@
+{
+  "extensions": [
+    "+.pi/extensions/mulahazah.ts",
+    "+.pi/extensions/stuck-detector.ts",
+    "+.pi/extensions/blast-radius.ts"
+  ]
+}

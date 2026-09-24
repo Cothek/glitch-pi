@@ -1,23 +1,17 @@
 /**
  * agent-switcher — pi-web-ui plugin (client entry) — SELF-CONTAINED, ZERO IMPORTS
  *
- * Why no imports: the host serves plugin files only from
- * /plugins/<id>/client/*. A relative import of a sibling SDK directory gets
- * URL-normalized into /plugins/<id>/sdk/… , misses that route, falls into the
- * SPA fallback and comes back as text/html — and a module graph rejects
- * non-JS, killing the ENTIRE entry module (no CSS, no handlers, "plugin does
- * not handle this action"). Keeping this file dependency-free removes that
- * whole failure class; the two SDK helpers it used are inlined below.
+ * Self-contained: the host serves plugin files only from /plugins/<id>/client/*.
+ * A ../sdk import lands on the SPA fallback and fails the whole module.
  *
- * Action names: the host dispatcher looks up registry keys
- * `<pluginId>:<action>` then `<action>` for the exact action string the ITEM
- * carries. The server item uses "agent-switcher:menu". We register BOTH
- * "agent-switcher:menu" (chip click → dropdown) and "agent-switcher:switch"
- * (legacy / select-style items; with a value → direct switch), so a mismatch
- * between server item and client registration can never dead-end again.
+ * REGISTRATION: exactly once per page lifetime, and only when the host bridge
+ * exists. Previous revisions registered the same handlers up to 6 times
+ * (import + poll retry + tab mount); the host dispatches to EVERY registered
+ * handler, so one chip click toggled the menu open/closed 2-3 times in a row
+ * ("nothing happens").
  *
- * Styling: the chip is cloned from the host's native `.chip` (same surface,
- * border, hover, icon slot, caret) and the popup clones `.dd-menu`.
+ * The chip is styled to the host's .chip rules (size, colors, border, hover);
+ * the popup clones .dd-menu / .dd-header / .dd-item.
  */
 
 // --- inlined SDK helper (was ./sdk/index.mjs) --------------------------------
@@ -37,62 +31,78 @@ const API_BASE = "/plugins-api/agent-switcher";
 const BUTTON_SELECTOR = 'button.composer-plugin-action[aria-label^="Agent:"]';
 const OPEN_BODY_CLASS = "agent-switcher-menu-open";
 
-// --- diagnostics (never throws; also proves the module executed) ------------
+// --- diagnostics (never throws; also proves the module executed) -------------
 const diag = (globalThis.__agentSwitcherClient = globalThis.__agentSwitcherClient ?? {
 	registered: [],
 	errors: [],
-	version: "0.3.0",
+	version: "0.4.0",
 	importedAt: new Date().toISOString(),
 });
 
-function registerHandlers(scope) {
-	const ok = (name, fn) => {
-		try {
-			const off = onUiAction(name, fn);
-			diag.registered.push(`${name} @ ${scope}${typeof off === "function" ? "" : " (no-op: bridge missing)"}`);
-		} catch (err) {
-			diag.errors.push(`register(${name}@${scope}): ${err?.message ?? err}`);
-		}
-	};
-	const openMenu = () => {
+/**
+ * Register at most once, and only once the bridge exists. The dispatcher runs
+ * every registered handler for an action, so duplicate registration turns a
+ * single click into multiple toggles (the menu opens and closes instantly).
+ */
+function registerOnce(scope) {
+	if (globalThis.__agentSwitcherBound) return;
+	if (typeof window === "undefined") return;
+	const bridge = window.__piWebUiHost;
+	if (!bridge || typeof bridge.onUiAction !== "function") return; // poll retry handles this
+	globalThis.__agentSwitcherBound = true;
+
+	const toggleMenu = () => {
 		const button = document.querySelector(BUTTON_SELECTOR);
-		if (button) openMenuNearButton(button);
+		if (button) toggleMenuNearButton(button);
 	};
-	ok(ACTION_MENU, () => openMenu());
-	ok(ACTION_SWITCH, (_itemId, value) => {
-		if (typeof value === "string" && value) void requestSwitch(value);
-		else openMenu();
-	});
+	try {
+		bridge.onUiAction(ACTION_MENU, toggleMenu);
+		diag.registered.push(`${ACTION_MENU} (once@${scope})`);
+	} catch (err) {
+		diag.errors.push(`${ACTION_MENU}: ${err?.message ?? err}`);
+	}
+	try {
+		bridge.onUiAction(ACTION_SWITCH, (_itemId, value) => {
+			if (typeof value === "string" && value) void requestSwitch(value);
+			else toggleMenu();
+		});
+		diag.registered.push(`${ACTION_SWITCH} (once@${scope})`);
+	} catch (err) {
+		diag.errors.push(`${ACTION_SWITCH}: ${err?.message ?? err}`);
+	}
 }
 
-registerHandlers("import");
+// At import the bridge is usually there; poll briefly as a slow-boot fallback.
+registerOnce("import");
 if (typeof window !== "undefined") {
 	let tries = 0;
 	const retry = () => {
+		if (globalThis.__agentSwitcherBound) return;
 		const bridge = window.__piWebUiHost;
-		if (bridge && typeof bridge.onUiAction === "function") return registerHandlers("poll");
-		if (tries++ < 50) setTimeout(retry, 200);
+		if (bridge && typeof bridge.onUiAction === "function") registerOnce("poll");
+		else if (tries++ < 100) setTimeout(retry, 300); // ~30s budget for slow bridges
 	};
 	retry();
 }
 
-// --- chip styling: clone of the host's effective composer chip rules ---------
+// --- chip styling: clone of the host's effective composer chip rules ----------
 if (typeof document !== "undefined" && document.head && !document.getElementById("agent-switcher-style")) {
 	const style = document.createElement("style");
 	style.id = "agent-switcher-style";
 	style.textContent = [
+		/* chip surface — identical to the host .chip rules the model/thinking chips use */
 		`button.composer-plugin-action[aria-label^="Agent:"]{`,
 		`-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;`,
 		`height:28px;border:1px solid var(--border);background:var(--chip-bg,var(--bg-elev2));`,
-		`cursor:pointer;white-space:nowrap;border-radius:8px;align-items:center;gap:4px;`,
-		`padding:3px 8px;transition:border-color .15s,background .15s;display:inline-flex;`,
-		`min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;`,
-		`color:var(--text-faint);font-size:11px}`,
+		`color:var(--text);cursor:pointer;white-space:nowrap;border-radius:8px;`,
+		`align-items:center;gap:4px;padding:3px 8px;font-size:12px;`,
+		`transition:border-color .15s,background .15s;display:inline-flex;min-width:0}`,
 		`button.composer-plugin-action[aria-label^="Agent:"]:hover{border-color:var(--accent);background:var(--accent-soft)}`,
 		`button.composer-plugin-action[aria-label^="Agent:"]::before{content:"\\1F916";font-size:11px;line-height:1}`,
 		`button.composer-plugin-action[aria-label^="Agent:"]::after{content:"\\25BE";color:var(--text-faint);margin-left:2px;transition:transform .15s;font-size:10px;line-height:1}`,
 		`body.${OPEN_BODY_CLASS} button.composer-plugin-action[aria-label^="Agent:"]::after{transform:rotate(180deg)}`,
-		`.agent-switcher-menu{background:var(--menu-bg,var(--bg-elev2));border:1px solid var(--border);z-index:60;`,
+		/* dropdown — exact clones of host .dd-menu / .dd-header / .dd-item */
+		`.agent-switcher-menu{background:var(--menu-bg,var(--bg-elev2));border:1px solid var(--border);z-index:1000;`,
 		`border-radius:10px;min-width:340px;max-width:480px;max-height:min(360px,100vh - 240px);`,
 		`padding:6px;position:fixed;overflow-y:auto;box-shadow:0 12px 40px #00000080}`,
 		`.agent-switcher-menu-header{letter-spacing:.6px;text-transform:uppercase;color:var(--text-faint);padding:6px 10px 4px;font-size:11px;font-weight:700}`,
@@ -106,14 +116,14 @@ if (typeof document !== "undefined" && document.head && !document.getElementById
 	document.head.appendChild(style);
 }
 
-// --- dropdown (dd-menu clone, opens above the chip) --------------------------
+// --- dropdown (dd-menu clone, opens above the chip like the native menus) ----
 let openMenu = null;
 
 function closeMenu() {
 	if (openMenu) openMenu.close();
 }
 
-function openMenuNearButton(button) {
+function toggleMenuNearButton(button) {
 	if (openMenu) {
 		closeMenu();
 		return;
@@ -177,16 +187,16 @@ function openMenuNearButton(button) {
 			if (active) {
 				const check = document.createElement("span");
 				check.className = "agent-switcher-menu-check";
-				check.textContent = "\\2713";
+				check.textContent = "✓";
 				item.appendChild(check);
 			}
 			item.addEventListener("click", async () => {
 				const result = await requestSwitch(mode.id);
 				close();
-				if (!result?.ok) {
+				if (!result.ok) {
 					const note = document.createElement("div");
 					note.className = "agent-switcher-menu-note";
-					note.textContent = `Switch failed: ${result?.error ?? "unknown error"}`;
+					note.textContent = `Switch failed: ${result.error ?? "unknown error"}`;
 					note.style.color = "var(--red)";
 					document.body.appendChild(note);
 					setTimeout(() => note.remove(), 4000);
@@ -200,7 +210,7 @@ function openMenuNearButton(button) {
 	void render();
 }
 
-// --- HTTP helpers -------------------------------------------------------------
+// --- HTTP helpers --------------------------------------------------------------
 async function fetchState() {
 	try {
 		const res = await fetch(`${API_BASE}/state`);
@@ -224,10 +234,10 @@ async function requestSwitch(mode) {
 	}
 }
 
-// --- Agent tab -----------------------------------------------------------------
+// --- Agent tab (larger surface; registration is globally guarded) --------------
 export default {
 	mount(container) {
-		registerHandlers("mount");
+		registerOnce("mount");
 		const root = document.createElement("div");
 		root.style.padding = "16px";
 		root.style.font = "13px/1.5 system-ui, sans-serif";

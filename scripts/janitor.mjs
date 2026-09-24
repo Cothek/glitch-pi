@@ -208,6 +208,48 @@ export function runJanitor({ base, apply = false } = {}) {
   return report;
 }
 
+// ── Memory encoding check ──────────────────────────────────────────────────
+// Memory files (user/**/*.md) are written by several processes. A write in a
+// non-UTF-8 encoding (editor or shell on a non-UTF-8 codepage) turns em dashes,
+// bullets and checkmarks into U+FFFD; any later read-as-utf8 + whole-file
+// rewrite (compaction-diary heartbeat, janitor truncation) bakes the damage in
+// permanently. Detect it on every run so it cannot accumulate silently again.
+function checkMemoryEncoding(userDir) {
+  const issues = [];
+  if (!existsSync(userDir)) return issues;
+
+  const walk = (dir, depth) => {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === '.git' || entry.name === 'node_modules') continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, depth + 1);
+        continue;
+      }
+      if (!entry.name.endsWith('.md')) continue;
+      try {
+        // Buffer -> toString('utf8') flags BOTH real U+FFFD characters and
+        // bytes that are not valid UTF-8 at all.
+        const text = readFileSync(full).toString('utf8');
+        const count = (text.match(/\uFFFD/g) || []).length;
+        if (count > 0) issues.push({ file: full, count });
+      } catch {
+        // unreadable file - skip
+      }
+    }
+  };
+
+  walk(userDir, 0);
+  return issues;
+}
+
 // ── CLI entrypoint ─────────────────────────────────────────────────────────
 
 function main() {
@@ -217,12 +259,24 @@ function main() {
   const totalTruncated = report.logsTruncated;
   const totalBytes = report.bytesReclaimed;
 
+  // Memory encoding drift (never silent, never auto-fixed here).
+  // baseDir is the repo root; the memory profile lives at <repo>/user.
+  const encodingIssues = checkMemoryEncoding(join(baseDir, 'user'));
+
   // Exit silently when nothing to do
-  if (totalRemoved === 0 && totalTruncated === 0) {
+  if (totalRemoved === 0 && totalTruncated === 0 && encodingIssues.length === 0) {
     process.exit(0);
   }
 
   console.log(`[janitor] ${isApply ? 'APPLY' : 'DRY-RUN'} — base: ${baseDir}`);
+
+  if (encodingIssues.length > 0) {
+    console.log(`  Memory encoding: ${encodingIssues.length} file(s) contain U+FFFD / invalid UTF-8`);
+    for (const issue of encodingIssues) {
+      console.log(`    ${issue.count} x ${issue.file}`);
+    }
+    console.log('    Repair: replace U+FFFD with "-" in those files and re-run.');
+  }
 
   if (report.flagsDeleted > 0) {
     console.log(`  Stale flags: ${report.flagsDeleted} deleted, ${report.flagsKept} kept`);

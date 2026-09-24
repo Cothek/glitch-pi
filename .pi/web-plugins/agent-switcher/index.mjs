@@ -134,12 +134,8 @@ export default definePlugin({
 				action: ACTION,
 				hint: "Switch the primary agent mode",
 				value: modes.some((m) => m.id === current) ? current : modes[0].id,
-				options: selectOptions(
-					modes.map((m) => ({
-						value: m.id,
-						label: m.description ? `${m.id} — ${m.description}` : m.id,
-					})),
-				),
+				// Terse labels: bare mode ids (Troy's preference) — descriptions live in the Agent tab.
+				options: selectOptions(modes.map((m) => ({ value: m.id, label: m.id }))),
 			});
 		}
 

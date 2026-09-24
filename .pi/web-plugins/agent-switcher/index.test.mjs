@@ -102,9 +102,9 @@ describe("agent-switcher plugin", () => {
 		assert.equal(item.value, "glitch-omni");
 		const values = item.options.map((o) => o.value);
 		assert.deepEqual(values, ["glitch", "glitch-lightweight", "glitch-omni"]);
-		// description labels come from frontmatter where present
+		// terse labels: bare mode ids in the select (descriptions stay in the tab)
 		const omni = item.options.find((o) => o.value === "glitch-omni");
-		assert.match(omni.label, /Direct execution/);
+		assert.equal(omni.label, "glitch-omni");
 	});
 
 	it("switches via onMessage: delivers /agent <mode> to the active conversation", async () => {

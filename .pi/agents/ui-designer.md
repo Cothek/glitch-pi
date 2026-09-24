@@ -2,7 +2,7 @@
 name: ui-designer
 description: "Senior UI designer specializing in modern React interfaces with shadcn/ui, Radix primitives, and Tailwind CSS v4. Visual design, component creation, layout, styling, responsive, or UX improvements. <example> User: Make the dashboard look professional Agent: Using ui-designer for visual design...."
 tools: read, edit, bash, find, grep, ls, webfetch, question, todowrite, skill
-model: opencode/mimo-v2.5-free
+model: commandcode/Qwen/Qwen3.6-Plus
 ---
 
 

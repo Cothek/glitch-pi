@@ -2,7 +2,7 @@
 name: memory-paid
 description: "Paid fallback memory writer agent. Writes and updates Glitch memory files only (user/*.md). Use when free memory agent fails."
 tools: read, write, ls, find, edit, bash, skill
-model: opencode-go/qwen3.6-plus
+model: commandcode/Qwen/Qwen3.6-Plus
 ---
 
 

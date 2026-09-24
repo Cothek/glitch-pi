@@ -2,6 +2,7 @@
 name: vision-alt
 description: "Alternative image and visual content analysis agent. Fallback when @vision fails with model-level errors (NVIDIA DEGRADED function, quota exhaustion, model not found). Uses a different underlying model than @vision. <example> User: Why does this UI look off? [screenshot] Agent: Using vision-al..."
 tools: read, find, ls, webfetch
+model: nvidia/meta/llama-3.2-90b-vision-instruct
 ---
 
 

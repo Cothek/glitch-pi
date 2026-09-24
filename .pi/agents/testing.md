@@ -2,7 +2,7 @@
 name: testing
 description: "Senior QA engineer specializing in test generation, coverage analysis, and test-driven development (TDD). Writes unit, integration, and E2E tests for JavaScript/TypeScript projects using Vitest, Jest, and Playwright. <example> User: Write tests for the auth module Agent: Using testing for comp..."
 tools: read, edit, bash, find, grep, ls, webfetch, question, todowrite, skill
-model: opencode/mimo-v2.5-free
+model: commandcode/z-ai/glm-5.3-flash
 ---
 
 

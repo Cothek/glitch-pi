@@ -123,3 +123,6 @@ opencode/opencode.exe.old.*
 
 # Quarantine dir (redundant with data/ above, explicit for documentation)
 data/quarantine/
+
+# Pi session scratch (glitch-pi local)
+.pi-tmp/

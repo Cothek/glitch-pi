@@ -131,5 +131,5 @@ data/quarantine/
 # (pi reads AGENTS.md). It reappears on disk after a changed-index run - expected.
 CLAUDE.md
 
-# agent-models plugin: pre-write backups of .pi/agents/*.md (generated at runtime)
-.pi/agent-models/backups/
+# agent-models plugin runtime data: pre-write backups + the generated cost table
+.pi/agent-models/

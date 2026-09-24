@@ -45,12 +45,16 @@ import { definePlugin } from "./sdk/index.mjs";
  */
 const IMPORT_TAG = `${Date.now().toString(36)}`;
 const resolver = await import(new URL(`./resolver.mjs?v=${IMPORT_TAG}`, import.meta.url).href);
-const { buildReport, formatReportTable, parseAgentFile, setModelInFrontmatter } = resolver;
+const { buildReport, formatCostShort, formatCostTitle, formatReportTable, parseAgentFile, setModelInFrontmatter } = resolver;
 
 const AGENTS_DIR = ".pi/agents";
 /** Backups live INSIDE the workspace on purpose: cross-directory writes would
  *  need a separate user directory grant, workspace writes do not. */
 const BACKUP_DIR = ".pi/agent-models/backups";
+/** Price table written by scripts/agent-model-costs.mjs. Also workspace-relative,
+ *  for the same reason: the real prices live in <agent-dir>/models*.json, which a
+ *  plugin may not read without a directory grant. */
+const COSTS_PATH = ".pi/agent-models/costs.json";
 /** Report cache: cheap to rebuild, but /state is polled by the tab. */
 const STATE_TTL_MS = 5000;
 
@@ -79,6 +83,39 @@ async function readCatalog(host) {
 	}
 }
 
+/**
+ * Price table, best effort. Missing file is not an error: the picker then shows
+ * "n/a" everywhere and a hint to generate it. Labels are computed HERE and shipped
+ * in the payload so the client and the CLI cannot format the same number two ways.
+ */
+async function readCosts(host) {
+	try {
+		const doc = JSON.parse(await host.fs.readText(COSTS_PATH));
+		const table = doc && typeof doc.costs === "object" && doc.costs ? doc.costs : {};
+		const costs = {};
+		for (const [id, cost] of Object.entries(table)) {
+			costs[id] = {
+				in: typeof cost?.in === "number" ? cost.in : null,
+				out: typeof cost?.out === "number" ? cost.out : null,
+				source: cost?.source ?? null,
+				short: formatCostShort(cost),
+				title: formatCostTitle(cost),
+			};
+		}
+		return {
+			costs,
+			meta: {
+				path: COSTS_PATH,
+				generatedAt: typeof doc?.generatedAt === "string" ? doc.generatedAt : null,
+				sources: Array.isArray(doc?.sources) ? doc.sources : [],
+				summary: doc?.summary ?? null,
+			},
+		};
+	} catch {
+		return { costs: {}, meta: { path: COSTS_PATH, missing: true, hint: "run: node scripts/agent-model-costs.mjs" } };
+	}
+}
+
 export default definePlugin({
 	async activate(host) {
 		const cleanup = [];
@@ -91,6 +128,7 @@ export default definePlugin({
 			const files = await listAgentFiles(host);
 			const catalog = await readCatalog(host);
 			catalogSize = catalog.size;
+			const priceData = await readCosts(host);
 			const agents = [];
 			const unreadable = [];
 			for (const name of files) {
@@ -109,6 +147,14 @@ export default definePlugin({
 			report.unreadable = unreadable;
 			// The picker needs the full list; 500-odd ids is a small payload locally.
 			report.catalog = [...catalog].sort();
+			report.costs = priceData.costs;
+			report.costMeta = priceData.meta;
+			// Per-row cost of the CURRENT pin, for the row chip and the CLI table.
+			for (const row of report.rows) {
+				const cost = row.pin ? priceData.costs[row.pin] : null;
+				row.costShort = cost?.short ?? null;
+				row.costTitle = cost?.title ?? null;
+			}
 			return report;
 		}
 

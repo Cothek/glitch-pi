@@ -19,6 +19,8 @@ import { createMockHost } from "./sdk/index.mjs";
 import {
 	buildReport,
 	classifyModelPin,
+	formatCostShort,
+	formatCostTitle,
 	formatReportTable,
 	lintAgent,
 	parseAgentFile,
@@ -256,6 +258,120 @@ describe("plugin: /state route", () => {
 	it("registers the /agent-models slash command", () => {
 		const cmd = host.mock.commands.find((c) => c.name === "agent-models");
 		assert.ok(cmd, "/agent-models command should be registered");
+	});
+});
+
+describe("resolver: cost labels", () => {
+	it("calls an all-zero cost free", () => {
+		assert.equal(formatCostShort({ in: 0, out: 0, source: "models.json" }), "free");
+	});
+
+	it("prints USD per million tokens compactly", () => {
+		assert.equal(formatCostShort({ in: 0.25, out: 12.5 }), "$0.25/$12.5");
+		assert.equal(formatCostShort({ in: 10, out: 50 }), "$10/$50");
+		assert.equal(formatCostShort({ in: 0.005, out: 0.005 }), "$0.005/$0.005");
+	});
+
+	it("says n/a when a provider publishes nothing", () => {
+		assert.equal(formatCostShort(null), "n/a");
+		assert.equal(formatCostShort(undefined), "n/a");
+		assert.match(formatCostTitle(null), /no pricing data/);
+	});
+
+	it("names the source and the cache prices in the hover text", () => {
+		const title = formatCostTitle({ in: 0.25, out: 12.5, cacheRead: 0.1, source: "models-store.json" });
+		assert.match(title, /input \$0\.25 \/ output \$12\.5/);
+		assert.match(title, /cache read \$0\.1/);
+		assert.match(title, /source: models-store\.json/);
+		assert.match(formatCostTitle({ in: 0, out: 0 }), /free endpoints/);
+	});
+
+	it("omits the COST column when no row has a price", () => {
+		const report = buildReport([parseAgentFile(VISION_NO_PIN, "vision.md")], CATALOG, "test");
+		assert.ok(!formatReportTable(report).includes("COST"));
+	});
+
+	it("adds the COST column when rows carry prices", () => {
+		const report = buildReport([parseAgentFile(TYPO_PIN, "testing.md")], CATALOG, "test");
+		report.rows[0].costShort = "$1/$2";
+		assert.match(formatReportTable(report), /COST/);
+		assert.match(formatReportTable(report), /\$1\/\$2/);
+	});
+});
+
+describe("plugin: cost table in the payload", () => {
+	async function hostWith(costsDoc) {
+		const { readdirSync, readFileSync } = await import("node:fs");
+		const root = fixtureWorkspace();
+		const dir = join(root, ".pi", "agents");
+		writeFileSync(
+			join(dir, "priced.md"),
+			`---\nname: priced\ndescription: "d"\ntools: read\nmodel: openrouter/test/model\n---\n\nbody\n`,
+			"utf-8",
+		);
+		return createMockHost({
+			cwd: root,
+			fs: {
+				list: async () => readdirSync(dir, { withFileTypes: true }).map((e) => ({ name: e.name, type: e.isDirectory() ? "dir" : "file" })),
+				readText: async (rel) => {
+					if (rel === ".pi/agent-models/costs.json") {
+						if (!costsDoc) throw new Error("ENOENT costs.json");
+						return JSON.stringify(costsDoc);
+					}
+					return readFileSync(join(dir, rel.split("/").pop()), "utf-8");
+				},
+			},
+			models: {
+				list: async () => [...CATALOG, "openrouter/test/model"].map((id) => ({ id, provider: id.split("/")[0] })),
+			},
+		});
+	}
+
+	function stateRoute(host) {
+		return host.mock.routes.find((r) => r.method === "GET" && r.path === "/state");
+	}
+
+	function call(route, url = "/state") {
+		return new Promise((resolve) => {
+			route.handler({ url, headers: {}, body: undefined }, {
+				writeHead() {},
+				end(body) {
+					resolve(JSON.parse(body));
+				},
+			});
+		});
+	}
+
+	it("labels each model and each row from the generated table", async () => {
+		const host = await hostWith({
+			generatedAt: "2026-09-24T21:00:00Z",
+			summary: { total: 2, priced: 1, free: 1, manual: 0 },
+			costs: {
+				"openrouter/test/model": { in: 1, out: 2, source: "models-store.json" },
+				"nvidia/nvidia/nemotron-3.5-lightning-30b-a3b": { in: 0, out: 0, source: "models.json" },
+			},
+		});
+		await plugin.activate(host);
+		const payload = await call(stateRoute(host));
+
+		assert.equal(payload.costs["openrouter/test/model"].short, "$1/$2");
+		assert.equal(payload.costs["nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"].short, "free");
+		assert.match(payload.costs["openrouter/test/model"].title, /per million tokens/);
+		const priced = payload.rows.find((r) => r.name === "priced");
+		assert.equal(priced.costShort, "$1/$2");
+		assert.equal(payload.costMeta.summary.free, 1);
+		assert.equal(payload.costMeta.missing, undefined);
+	});
+
+	it("degrades to n/a with a hint when no table exists", async () => {
+		const host = await hostWith(null);
+		await plugin.activate(host);
+		const payload = await call(stateRoute(host));
+		assert.deepEqual(payload.costs, {});
+		assert.equal(payload.costMeta.missing, true);
+		assert.match(payload.costMeta.hint, /agent-model-costs\.mjs/);
+		const priced = payload.rows.find((r) => r.name === "priced");
+		assert.equal(priced.costShort, null, "no price known -> no chip, not a fake number");
 	});
 });
 

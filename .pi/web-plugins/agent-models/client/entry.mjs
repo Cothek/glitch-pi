@@ -101,10 +101,16 @@ const STYLE_CSS = `
 .am-note.am-warn{color:var(--amber)}
 .am-saved{padding:0 10px 8px;font-size:11px;color:var(--green);font-family:var(--mono, monospace);word-break:break-all}
 .am-picker{border-top:1px solid var(--border-soft);padding:8px 10px;display:flex;flex-direction:column;gap:6px}
-.am-picker-input{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;outline:none;padding:6px 9px;font-size:12px;font-family:var(--mono, monospace)}
+.am-picker-input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;outline:none;padding:6px 9px;font-size:12px;font-family:var(--mono, monospace)}
 .am-picker-input:focus{border-color:var(--accent)}
-.am-picker-head{display:flex;gap:8px;align-items:center}
+.am-picker-head{display:flex;gap:8px;align-items:center;width:100%}
 .am-picker-count{color:var(--text-faint);font-size:11px;flex:none}
+.am-option-cost{margin-left:auto;flex:none;color:var(--text-faint);font-size:10.5px;font-family:var(--mono, monospace);padding-left:10px}
+.am-option.am-current .am-option-cost{color:var(--accent)}
+.am-cost{font-family:var(--mono, monospace);font-size:10.5px;color:var(--text-faint);border:1px solid var(--border-soft);border-radius:5px;padding:0 5px;flex:none;margin-left:6px}
+.am-cost.am-free{color:var(--green);border-color:var(--green)}
+.am-cost.am-paid{color:var(--amber);border-color:var(--amber)}
+.am-cost-note{color:var(--text-faint);font-size:10.5px}
 .am-options{max-height:220px;overflow-y:auto;border:1px solid var(--border-soft);border-radius:7px;background:var(--bg);display:flex;flex-direction:column}
 .am-option{text-align:left;background:0 0;border:none;border-bottom:1px solid var(--border-soft);color:var(--text-dim);cursor:pointer;padding:5px 9px;font-size:11.5px;font-family:var(--mono, monospace);display:flex;gap:8px;align-items:center;min-width:0}
 .am-option:last-child{border-bottom:none}
@@ -174,6 +180,14 @@ function matchesFilter(row, filter) {
 	if (filter === "all") return true;
 	if (filter === "problems") return row.severity > 0 || row.warnings.length > 0;
 	return row.status === filter;
+}
+
+/** A cost chip: green for free, amber for priced, faint for unknown. */
+function costChipNode(short, title) {
+	const cls = short === "free" ? "am-cost am-free" : String(short).startsWith("$") ? "am-cost am-paid" : "am-cost";
+	const chip = el("span", cls, short);
+	if (title) chip.title = title;
+	return chip;
 }
 
 /**
@@ -352,12 +366,29 @@ function createInstance(container, ctx) {
 				btn.setAttribute("data-am-option", model);
 				if (model === row.pin) btn.className = "am-option am-current";
 				btn.appendChild(el("span", "am-option-label", model));
+				const cost = state.report?.costs?.[model];
+				const costChip = el("span", "am-option-cost", cost?.short ?? "n/a");
+				costChip.setAttribute("data-am-cost", cost?.short ?? "n/a");
+				if (cost?.title) costChip.title = cost.title;
+				btn.appendChild(costChip);
 				if (model === row.pin) btn.appendChild(el("span", "am-option-mark", "✓"));
 				btn.addEventListener("click", () => void applyModel(row.name, model));
 				options.appendChild(btn);
 			}
 		}
 		wrap.appendChild(options);
+
+		// Say what the numbers mean, and how to fill them in when a provider is silent.
+		const costMeta = state.report?.costMeta ?? {};
+		wrap.appendChild(
+			el(
+				"div",
+				"am-cost-note",
+				costMeta.missing
+					? "no cost table yet - run: node scripts/agent-model-costs.mjs"
+					: "costs are USD per million tokens (input/output). n/a = the provider publishes no pricing.",
+			),
+		);
 
 		if (saving) wrap.appendChild(el("div", "am-note", `saving ${row.name}...`));
 		const hint = el("div", "am-note", "Click a model to apply it. The file is edited in place and backed up first. Escape closes.");
@@ -422,6 +453,7 @@ function createInstance(container, ctx) {
 		const eff = el("span", "am-model", row.effective ?? row.effectiveLabel);
 		eff.title = row.effective ?? row.why;
 		models.appendChild(eff);
+		if (row.costShort) models.appendChild(costChipNode(row.costShort, row.costTitle));
 		toggle.appendChild(models);
 
 		if (row.warnings.length) {
@@ -482,7 +514,15 @@ function createInstance(container, ctx) {
 
 			const c = state.report.counts;
 			sub.textContent = `${c.total} agents | ${c.ok} ok | ${c.dropped} dead | ${c.unresolved} unresolved | ${c.inherit} inherit`;
-			sub.title = state.report.catalogSource ?? "";
+			const costMeta = state.report.costMeta ?? {};
+			if (costMeta.summary) {
+				sub.textContent += ` | cost: ${costMeta.summary.total} known (${costMeta.summary.priced} priced, ${costMeta.summary.free} free)`;
+			} else if (costMeta.missing) {
+				sub.textContent += " | cost: no table";
+			}
+			sub.title = [state.report.catalogSource ?? "", costMeta.missing ? costMeta.hint : "", costMeta.generatedAt ? `costs generated ${costMeta.generatedAt}` : ""]
+				.filter(Boolean)
+				.join(" | ");
 
 			const rows = (state.report.rows ?? []).filter((r) => matchesFilter(r, state.filter));
 			if (!rows.length) {

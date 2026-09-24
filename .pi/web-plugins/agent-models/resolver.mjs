@@ -299,12 +299,52 @@ export function setModelInFrontmatter(rawText, model) {
 	return { ok: true, changed: true, previous, text: bom + lines.join(eol), reason: null };
 }
 
+/**
+ * Money, compactly: 0.25 stays 0.25, 10 stays 10, 12.5 stays 12.5, 0.005 keeps
+ * three decimals instead of rounding to a meaningless 0.01.
+ */
+function money(n) {
+	if (typeof n !== "number" || !Number.isFinite(n)) return "?";
+	return Number(n)
+		.toFixed(3)
+		.replace(/0+$/, "")
+		.replace(/\.$/, "");
+}
+
+/**
+ * Cost label for the picker, in the 3 states the data actually has:
+ *   free     - every field is 0 (the NVIDIA endpoints really are free)
+ *   n/a      - the provider publishes no pricing anywhere on this machine
+ *   $in/$out - USD per million tokens, the unit both config files use
+ *
+ * Formatting lives here (server side) and ships inside the payload, so the client
+ * cannot drift from the CLI.
+ */
+export function formatCostShort(cost) {
+	if (!cost) return "n/a";
+	if (cost.in === 0 && cost.out === 0) return "free";
+	return `$${money(cost.in)}/$${money(cost.out)}`;
+}
+
+/** Hover text: what the numbers mean and where they came from. */
+export function formatCostTitle(cost) {
+	if (!cost) return "no pricing data for this provider (add it to .pi/agent-models/prices.json)";
+	if (cost.in === 0 && cost.out === 0) return "free endpoints (every cost field is 0)";
+	const parts = [`input $${money(cost.in)} / output $${money(cost.out)} USD per million tokens`];
+	if (typeof cost.cacheRead === "number") parts.push(`cache read $${money(cost.cacheRead)}`);
+	if (typeof cost.cacheWrite === "number") parts.push(`cache write $${money(cost.cacheWrite)}`);
+	if (cost.source) parts.push(`source: ${cost.source}`);
+	return parts.join(" | ");
+}
+
 /** Fixed-width text table for the CLI and the `/agent-models` slash command. */
 export function formatReportTable(report) {
-	const header = ["AGENT", "PINNED MODEL", "EFFECTIVE", "STATUS", "NOTE"];
+	const withCost = report.rows.some((r) => r.costShort);
+	const header = ["AGENT", "PINNED MODEL", ...(withCost ? ["COST"] : []), "EFFECTIVE", "STATUS", "NOTE"];
 	const cells = report.rows.map((r) => [
 		r.name,
 		r.pin ?? "(none)",
+		...(withCost ? [r.costShort ?? "n/a"] : []),
 		r.effective ?? r.effectiveLabel,
 		r.statusLabel,
 		r.warnings.length ? r.warnings.join("; ") : r.why,

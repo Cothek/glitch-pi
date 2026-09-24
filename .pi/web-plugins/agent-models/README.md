@@ -34,6 +34,42 @@ Live example when this was built: 10 agents, 2 pins OK, **6 dead pins**, 2 inher
 
 Warnings are separate and structural: `skill("...")` in the body without the `skill` tool, a sub-agent body that instructs `task()` dispatch, a frontmatter name that differs from the file name, a missing tools allowlist.
 
+## Costs in the picker
+
+Every option carries a cost chip, and so does each row (the price of its current pin):
+
+| Chip | Meaning |
+|---|---|
+| `free` (green) | every cost field is 0. The NVIDIA endpoints really are free. |
+| `$0.8/$1.6` (amber) | input / output in **USD per million tokens**. Hover shows cache read/write prices and the source file. |
+| `n/a` (grey) | the provider publishes no pricing anywhere on this machine. |
+
+The header line adds the coverage, e.g. `cost: 448 known (372 priced, 76 free)`.
+
+### Where the numbers come from, and the honest gap
+
+The host API a plugin gets (`host.models.list()`) carries id/provider/vision only, and the real prices live in `<agent-dir>/models.json` and `models-store.json`, which are **outside the workspace**. A plugin may not read those without a directory grant, so the prices are collected by a script and dropped into the workspace:
+
+```
+node scripts/agent-model-costs.mjs
+```
+
+That writes `.pi/agent-models/costs.json` (gitignored, runtime data) with a generation timestamp, which the panel and the CLI both read. Nothing prompts for permissions.
+
+Coverage on this machine, stated plainly:
+
+- `openrouter` - 392 models with real prices
+- `nvidia` - 56 models, every field 0 = free
+- `commandcode` - **59 models with no pricing data anywhere.** The config lists only id, name and context window, so those rows say `n/a` and no amount of processing invents a number.
+
+To fill that gap, write the prices you know into `.pi/agent-models/prices.json`; manual entries win over everything else:
+
+```json
+{ "commandcode/Qwen/Qwen3.6-Plus": { "in": 0.4, "out": 2.0 } }
+```
+
+Re-run the generator after editing, and the panel picks it up on the next refresh. The CLI (`node scripts/agent-models.mjs`) shows the same labels in a COST column, so the two surfaces cannot disagree about a price.
+
 ## Data sources
 
 - **agents**: `host.fs.list(".pi/agents")` + `readText` (workspace-relative, `fs:read`). Project scope only - user-scope agents in `<agent-dir>/agents/` are outside the workspace and would need an access grant, so they are not silently included.

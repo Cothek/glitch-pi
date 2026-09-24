@@ -83,7 +83,9 @@ function registeredSelect(host) {
 	const reg = host.mock.calls("ui.register")[0];
 	assert.ok(reg, "ui.register should have been called");
 	const item = Array.isArray(reg.args[0]) ? reg.args[0][0] : reg.args[0];
-	assert.equal(item.kind, "select");
+	// composer control is now an action button (client renders dd-menu clone)
+	assert.equal(item.kind, "action");
+	assert.equal(item.action, "agent-switcher:menu");
 	return item;
 }
 
@@ -94,17 +96,14 @@ describe("agent-switcher plugin", () => {
 		root = fixtureWorkspace();
 	});
 
-	it("registers a composer select with all profiles and the current mode", async () => {
+	it("registers a composer action chip with the current mode label", async () => {
 		const { host } = makeHost(root);
 		await plugin.activate(host);
 		const item = registeredSelect(host);
 		assert.equal(item.slot, "composer.actions");
-		assert.equal(item.value, "glitch-omni");
-		const values = item.options.map((o) => o.value);
-		assert.deepEqual(values, ["glitch", "glitch-lightweight", "glitch-omni"]);
-		// terse labels: bare mode ids in the select (descriptions stay in the tab)
-		const omni = item.options.find((o) => o.value === "glitch-omni");
-		assert.equal(omni.label, "glitch-omni");
+		// label mirrors the thinking chip: "Agent: <mode>"; menu is client-rendered
+		assert.equal(item.label, "Agent: glitch-omni");
+		assert.equal(item.options, undefined);
 	});
 
 	it("switches via onMessage: delivers /agent <mode> to the active conversation", async () => {
@@ -168,13 +167,13 @@ describe("agent-switcher plugin", () => {
 	it("re-syncs the select value when the marker changes on conversation switch", async () => {
 		const { host } = makeHost(root);
 		await plugin.activate(host);
-		// simulate an external switch writing the marker
+		// simulate an external switch writing the marker -> label updates
 		writeFileSync(join(root, "user", "agent-mode.json"), JSON.stringify({ mode: "glitch" }), "utf-8");
 		host.mock.emit("onConversationChanged");
 		await new Promise((r) => setTimeout(r, 20));
 		const update = host.mock.calls("ui.update").at(-1);
 		assert.ok(update, "ui.update should have been called");
-		assert.equal(update.args[1]?.value, "glitch");
+		assert.equal(update.args[1]?.label, "Agent: glitch");
 	});
 
 	it("hides the select when the workspace has no profiles", async () => {

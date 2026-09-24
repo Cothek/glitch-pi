@@ -24,12 +24,15 @@
  * and re-discovers profiles on workspace/cwd change.
  */
 
-import { definePlugin, selectOptions } from "./sdk/index.mjs";
+import { definePlugin } from "./sdk/index.mjs";
 
 const PROFILES_DIR = ".pi/agent-profiles";
 const MODE_FILE = "user/agent-mode.json";
 const ITEM_ID = "agent-mode";
-const ACTION = "agent-switcher:switch";
+/** Composer button action — the client opens a dd-menu clone styled like the thinking chip. */
+const ACTION_MENU = "agent-switcher:menu";
+/** Tab panel message action. */
+const ACTION_SWITCH = "agent-switcher:switch";
 
 /** Pull `description:` out of a profile's frontmatter head (first ~2KB). */
 function parseDescription(head) {
@@ -126,17 +129,26 @@ export default definePlugin({
 				host.log("no .pi/agent-profiles/*.md in this workspace — select hidden");
 				return;
 			}
+			// kind "action": a composer button. The client bundle restyles it like the
+			// native thinking chip and opens a dd-menu clone on click. (kind "select"
+			// renders a native <select> whose OS menu can't be styled to match.)
 			unregisterUi = host.ui.register({
 				slot: "composer.actions",
 				id: ITEM_ID,
-				label: "Agent",
-				kind: "select",
-				action: ACTION,
+				label: current && modes.some((m) => m.id === current) ? `Agent: ${current}` : `Agent: ${modes[0].id}`,
+				kind: "action",
+				action: ACTION_MENU,
 				hint: "Switch the primary agent mode",
-				value: modes.some((m) => m.id === current) ? current : modes[0].id,
-				// Terse labels: bare mode ids (Troy's preference) — descriptions live in the Agent tab.
-				options: selectOptions(modes.map((m) => ({ value: m.id, label: m.id }))),
 			});
+		}
+
+		/** Keep the composer button label in sync with the marker. */
+		function syncLabel(mode) {
+			try {
+				host.ui.update(ITEM_ID, { label: `Agent: ${mode}` });
+			} catch {
+				/* UI item may be gone after a reload */
+			}
 		}
 
 		/** Deliver the switch command to the active conversation. */
@@ -154,11 +166,7 @@ export default definePlugin({
 			const res = await host.prompt(convId, { text: `/agent ${mode}` });
 			if (res?.ok) {
 				current = mode;
-				try {
-					host.ui.update(ITEM_ID, { value: mode });
-				} catch {
-					/* UI item may be gone after a reload */
-				}
+				syncLabel(mode);
 				host.notify("info", `Agent switched to ${mode}`, `Agent switched to ${mode}`);
 				return { ok: true, mode };
 			}
@@ -171,7 +179,7 @@ export default definePlugin({
 			// Tab panel messages (ctx.send path)
 		cleanup.push(
 			host.onMessage(async (payload) => {
-				if (payload?.action === "switch" && typeof payload?.value === "string") {
+				if ((payload?.action === ACTION_SWITCH || payload?.action === "switch") && typeof payload?.value === "string") {
 					const result = await switchMode(payload.value.trim());
 					if (!result.ok) host.notify("error", `agent-switcher: ${result.error}`, `agent-switcher: ${result.error}`);
 				}
@@ -208,11 +216,7 @@ export default definePlugin({
 					const marker = await readCurrent(host);
 					if (marker && marker !== current) {
 						current = marker;
-						try {
-							host.ui.update(ITEM_ID, { value: marker });
-						} catch {
-							/* ignore */
-						}
+						syncLabel(marker);
 					}
 				})();
 			}),

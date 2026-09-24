@@ -1,9 +1,10 @@
 /**
  * agent-switcher plugin — unit tests via the SDK's createMockHost.
  *
- * Runs against a fixture workspace (built in a temp dir) so the fs override
- * exercises the real discovery path: profiles listing, frontmatter parsing,
- * mode-marker reading, switch delivery, and the HTTP route contract.
+ * The switch is marker-based: switchMode() writes user/agent-mode.json and
+ * stages .pi/SYSTEM.md through host.fs (the pi extension reconciles from the
+ * marker each turn). No host.prompt()/conversation id is involved — that path
+ * proved ambiguous with several attached clients ("unknown conversation: c1").
  *
  * Run: node --test index.test.mjs
  */
@@ -13,7 +14,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EventEmitter } from "node:events";
 import plugin from "./index.mjs";
 import { createMockHost } from "./sdk/index.mjs";
 
@@ -24,27 +24,23 @@ function fixtureWorkspace() {
 	mkdirSync(profiles, { recursive: true });
 	writeFileSync(
 		join(profiles, "glitch.md"),
-		"---\ndescription: Full Glitch - dispatch-first workflow\n---\n\n# Glitch\nBody...",
+		"---\ndescription: Full Glitch - dispatch-first workflow\n---\n\n# Glitch\nBody one...",
 		"utf-8",
 	);
 	writeFileSync(
 		join(profiles, "glitch-omni.md"),
-		"---\ndescription: Direct execution - no dispatching\n---\n\n# Glitch Omni\nBody...",
+		"---\ndescription: Direct execution - no dispatching\n---\n\n# Glitch Omni\nBody two...",
 		"utf-8",
 	);
 	writeFileSync(join(profiles, "glitch-lightweight.md"), "# Glitch Lightweight\n(no frontmatter)", "utf-8");
 	mkdirSync(join(root, "user"), { recursive: true });
-	writeFileSync(
-		join(root, "user", "agent-mode.json"),
-		JSON.stringify({ mode: "glitch-omni" }),
-		"utf-8",
-	);
+	writeFileSync(join(root, "user", "agent-mode.json"), JSON.stringify({ mode: "glitch-omni" }), "utf-8");
 	return root;
 }
 
 /** Workspace-relative fs implementation over the fixture root. */
 function fixtureFs(root) {
-	const abs = (rel) => join(root, String(rel ?? "").replace(/^[/\\]+/, ""));
+	const abs = (rel) => join(root, String(rel ?? "").replace(/^[/\\]+/, "").replace(/\//g, "\\"));
 	return {
 		async list(relDir = ".") {
 			const dir = abs(relDir);
@@ -57,6 +53,9 @@ function fixtureFs(root) {
 		async readText(relPath, _maxBytes) {
 			return readFileSync(abs(relPath), "utf-8");
 		},
+		async write(relPath, data) {
+			writeFileSync(abs(relPath), typeof data === "string" ? data : Buffer.from(data));
+		},
 		async stat(relPath) {
 			const s = statSync(abs(relPath));
 			return { name: relPath, type: s.isDirectory() ? "dir" : "file", size: s.size, mtime: s.mtimeMs };
@@ -65,25 +64,26 @@ function fixtureFs(root) {
 }
 
 function makeHost(root, overrides = {}) {
-	const promptCalls = [];
 	const host = createMockHost({
 		cwd: root,
 		fs: fixtureFs(root),
-		getActiveConversation: () => ({ conversationId: "conv-1", title: "t" }),
-		prompt: async (conversationId, req) => {
-			promptCalls.push({ conversationId, text: req?.text });
-			return { ok: true };
-		},
 		...overrides,
 	});
-	return { host, promptCalls };
+	return { host };
 }
 
-function registeredSelect(host) {
+function readMarker(root) {
+	try {
+		return JSON.parse(readFileSync(join(root, "user", "agent-mode.json"), "utf-8"));
+	} catch {
+		return null;
+	}
+}
+
+function registeredChip(host) {
 	const reg = host.mock.calls("ui.register")[0];
 	assert.ok(reg, "ui.register should have been called");
 	const item = Array.isArray(reg.args[0]) ? reg.args[0][0] : reg.args[0];
-	// composer control is now an action button (client renders dd-menu clone)
 	assert.equal(item.kind, "action");
 	assert.equal(item.action, "agent-switcher:menu");
 	return item;
@@ -99,34 +99,46 @@ describe("agent-switcher plugin", () => {
 	it("registers a composer action chip with the current mode label", async () => {
 		const { host } = makeHost(root);
 		await plugin.activate(host);
-		const item = registeredSelect(host);
+		const item = registeredChip(host);
 		assert.equal(item.slot, "composer.actions");
-		// label mirrors the thinking chip: "Agent: <mode>"; menu is client-rendered
 		assert.equal(item.label, "Agent: glitch-omni");
 		assert.equal(item.options, undefined);
 	});
 
-	it("switches via onMessage: delivers /agent <mode> to the active conversation", async () => {
-		const { host, promptCalls } = makeHost(root);
+	it("ignores a profile body's frontmatter and exposes the prompt text", async () => {
+		const { host } = makeHost(root);
 		await plugin.activate(host);
-		host.mock.emit("onMessage", { action: "switch", value: "glitch" }, "client-1");
-		await new Promise((r) => setTimeout(r, 20)); // switchMode is async void
-		assert.equal(promptCalls.length, 1);
-		assert.equal(promptCalls[0].conversationId, "conv-1");
-		assert.equal(promptCalls[0].text, "/agent glitch");
+		const state = { modes: (await plugin.activate(host)) ?? null };
+		void state;
+		// switch to glitch and check the staged SYSTEM.md is the frontmatter-free body
+		host.mock.emit("onMessage", { action: "agent-switcher:switch", value: "glitch" }, "c1");
+		await new Promise((r) => setTimeout(r, 30));
+		const staged = readFileSync(join(root, ".pi", "SYSTEM.md"), "utf-8");
+		assert.ok(staged.startsWith("# Glitch"), `staged SYSTEM.md should start with the body, got: ${staged.slice(0, 40)}`);
+		assert.ok(!staged.includes("description:"), "frontmatter must be stripped");
 	});
 
-	it("rejects unknown modes without prompting", async () => {
-		const { host, promptCalls } = makeHost(root);
+	it("switches by writing the marker + staging SYSTEM.md (onMessage path)", async () => {
+		const { host } = makeHost(root);
 		await plugin.activate(host);
-		host.mock.emit("onMessage", { action: "switch", value: "nonexistent" }, "client-1");
-		await new Promise((r) => setTimeout(r, 20));
-		assert.equal(promptCalls.length, 0);
+		host.mock.emit("onMessage", { action: "agent-switcher:switch", value: "glitch-lightweight" }, "c1");
+		await new Promise((r) => setTimeout(r, 30));
+		const marker = readMarker(root);
+		assert.equal(marker?.mode, "glitch-lightweight");
+		assert.equal(marker?.previous_mode, "glitch-omni");
+	});
+
+	it("rejects unknown modes and leaves the marker untouched", async () => {
+		const { host } = makeHost(root);
+		await plugin.activate(host);
+		host.mock.emit("onMessage", { action: "agent-switcher:switch", value: "nonexistent" }, "c1");
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(readMarker(root)?.mode, "glitch-omni");
 		assert.ok(host.logs.some((l) => l.text.includes("unknown mode")), "should log the rejection");
 	});
 
 	it("exposes POST /switch and GET /state routes with the right contract", async () => {
-		const { host, promptCalls } = makeHost(root);
+		const { host } = makeHost(root);
 		await plugin.activate(host);
 
 		const post = host.mock.routes.find((r) => r.method === "POST" && r.path === "/switch");
@@ -134,49 +146,46 @@ describe("agent-switcher plugin", () => {
 		assert.ok(post, "POST /switch route registered");
 		assert.ok(getState, "GET /state route registered");
 
-		// fake req/res pair
-		const req = new EventEmitter();
+		// The host mounts plugin routes behind express.json(): the body is
+		// pre-parsed at req.body, so the handler must NOT read the stream.
 		const res = {
 			status: 0,
 			body: "",
-			writeHead(status, headers) {
+			writeHead(status) {
 				this.status = status;
-				this.headers = headers;
 			},
 			end(body) {
 				this.body = body;
 			},
 		};
-		const sent = (async () => {
-			await post.handler(req, res);
-		})();
-		req.emit("data", JSON.stringify({ mode: "glitch-lightweight" }));
-		req.emit("end");
-		await sent;
+		await post.handler({ body: { mode: "glitch" }, url: "/switch" }, res);
 		assert.equal(res.status, 200);
 		assert.equal(JSON.parse(res.body).ok, true);
-		assert.equal(promptCalls[0]?.text, "/agent glitch-lightweight");
+		assert.equal(readMarker(root)?.mode, "glitch");
+
+		// query-string fallback (callers that cannot send a JSON body)
+		await post.handler({ body: {}, url: "/switch?mode=glitch-omni" }, res);
+		assert.equal(readMarker(root)?.mode, "glitch-omni");
 
 		const res2 = { status: 0, body: "", writeHead(s) { this.status = s; }, end(b) { this.body = b; } };
-		await getState.handler(new EventEmitter(), res2);
+		await getState.handler({ body: {}, url: "/state" }, res2);
 		const state = JSON.parse(res2.body);
 		assert.equal(state.current, "glitch-omni");
 		assert.equal(state.modes.length, 3);
 	});
 
-	it("re-syncs the select value when the marker changes on conversation switch", async () => {
+	it("re-syncs the chip label when the marker changes on conversation switch", async () => {
 		const { host } = makeHost(root);
 		await plugin.activate(host);
-		// simulate an external switch writing the marker -> label updates
 		writeFileSync(join(root, "user", "agent-mode.json"), JSON.stringify({ mode: "glitch" }), "utf-8");
 		host.mock.emit("onConversationChanged");
-		await new Promise((r) => setTimeout(r, 20));
+		await new Promise((r) => setTimeout(r, 30));
 		const update = host.mock.calls("ui.update").at(-1);
 		assert.ok(update, "ui.update should have been called");
 		assert.equal(update.args[1]?.label, "Agent: glitch");
 	});
 
-	it("hides the select when the workspace has no profiles", async () => {
+	it("hides the chip when the workspace has no profiles", async () => {
 		const emptyRoot = mkdtempSync(join(tmpdir(), "agent-switcher-empty-"));
 		const { host } = makeHost(emptyRoot);
 		await plugin.activate(host);

@@ -34,13 +34,16 @@ const ACTION_MENU = "agent-switcher:menu";
 /** Tab panel message action. */
 const ACTION_SWITCH = "agent-switcher:switch";
 
-/** Pull `description:` out of a profile's frontmatter head (first ~2KB). */
-function parseDescription(head) {
-	if (!head.startsWith("---")) return undefined;
-	const end = head.indexOf("\n---", 3);
-	if (end === -1) return undefined;
-	const m = head.slice(3, end).match(/^description:\s*(.+)$/m);
-	return m ? m[1].trim() : undefined;
+/** Split a profile into { description (frontmatter), body (prompt text) }. */
+function parseProfile(raw) {
+	const text = stripBom(raw);
+	if (!text.startsWith("---")) return { description: undefined, body: text.trim() };
+	const end = text.indexOf("\n---", 3);
+	if (end === -1) return { description: undefined, body: text.trim() };
+	const header = text.slice(3, end);
+	const m = header.match(/^description:\s*(.+)$/m);
+	const body = text.slice(text.indexOf("\n", end + 1) + 1).trim();
+	return { description: m ? m[1].trim() : undefined, body };
 }
 
 /** Strip a possible UTF-8 BOM (PowerShell-written markers). */
@@ -59,14 +62,17 @@ async function readModes(host) {
 	const modes = [];
 	for (const entry of entries) {
 		if (entry.type !== "file" || !entry.name.endsWith(".md")) continue;
+		// Full read: the body is needed to stage .pi/SYSTEM.md on a switch.
 		let description;
+		let body;
 		try {
-			const head = await host.fs.readText(`${PROFILES_DIR}/${entry.name}`, 2048);
-			description = parseDescription(head);
+			const parsed = parseProfile(await host.fs.readText(`${PROFILES_DIR}/${entry.name}`));
+			description = parsed.description;
+			body = parsed.body;
 		} catch {
-			/* no frontmatter — id-only label */
+			/* unreadable profile — id-only label */
 		}
-		modes.push({ id: entry.name.replace(/\.md$/, ""), description });
+		modes.push({ id: entry.name.replace(/\.md$/, ""), description, body });
 	}
 	modes.sort((a, b) => a.id.localeCompare(b.id));
 	return modes;
@@ -81,23 +87,22 @@ async function readCurrent(host) {
 	}
 }
 
-/** Read a JSON body off a raw Node request (plugin routes get req/res as-is). */
-function readBody(req) {
-	return new Promise((resolve, reject) => {
-		let data = "";
-		req.on("data", (chunk) => {
-			data += chunk;
-			if (data.length > 8192) reject(new Error("body too large"));
-		});
-		req.on("end", () => {
-			try {
-				resolve(data ? JSON.parse(data) : {});
-			} catch (err) {
-				reject(err);
-			}
-		});
-		req.on("error", reject);
-	});
+/**
+ * Read the request payload. The host mounts plugin routes behind express.json(),
+ * so the body is ALREADY parsed and the stream is consumed — reading it with
+ * req.on('data')/('end') hangs forever (the host's mount point even warns about
+ * this). Use req.body, with a query-string fallback for callers that cannot
+ * send a JSON body.
+ */
+function readPayload(req) {
+	const body = req && typeof req.body === "object" && req.body !== null ? req.body : {};
+	let fromQuery = "";
+	try {
+		fromQuery = new URL(String(req?.url ?? "/"), "http://localhost").searchParams.get("mode") ?? "";
+	} catch {
+		fromQuery = "";
+	}
+	return { mode: String(body.mode ?? fromQuery ?? "").trim() };
 }
 
 function json(res, status, payload) {
@@ -112,10 +117,13 @@ export default definePlugin({
 		let current = null;
 		let unregisterUi = null;
 		const cleanup = [];
+		const profilesById = new Map();
 
-		/** (Re)discover modes + current marker, then (re)register the select. */
+		/** (Re)discover modes + current marker, then (re)register the composer chip. */
 		async function sync() {
 			modes = await readModes(host);
+			profilesById.clear();
+			for (const m of modes) profilesById.set(m.id, m);
 			current = await readCurrent(host);
 			if (unregisterUi) {
 				try {
@@ -151,29 +159,48 @@ export default definePlugin({
 			}
 		}
 
-		/** Deliver the switch command to the active conversation. */
+		/**
+		 * Switch the mode by writing the marker (user/agent-mode.json) and staging
+		 * .pi/SYSTEM.md. The pi extension (glitch-pi/.pi/extensions/agent-switcher.ts)
+		 * reconciles from the marker at the start of the next turn, so this needs no
+		 * conversation id — host.prompt()/getActiveConversation() proved ambiguous
+		 * with several attached clients ("unknown conversation: c1").
+		 */
 		async function switchMode(mode) {
 			if (!mode || !modes.some((m) => m.id === mode)) {
 				host.log("warn", `switch rejected: unknown mode "${mode}" (available: ${modes.map((m) => m.id).join(", ") || "none"})`);
 				return { ok: false, error: `unknown mode "${mode}" (available: ${modes.map((m) => m.id).join(", ") || "none"})` };
 			}
-			const conv = typeof host.getActiveConversation === "function" ? host.getActiveConversation() : null;
-			const convId = conv?.conversationId;
-			if (!convId) {
-				host.log("warn", "switch rejected: no active conversation");
-				return { ok: false, error: "no active conversation — open a chat first" };
-			}
-			const res = await host.prompt(convId, { text: `/agent ${mode}` });
-			if (res?.ok) {
+			try {
+				const previous = current;
+				await host.fs.write(
+					MODE_FILE,
+					JSON.stringify(
+						{
+							mode,
+							...(previous && previous !== mode ? { previous_mode: previous } : {}),
+							switched_at: new Date().toISOString(),
+							via: "pi-web-ui-plugin:/agents",
+							note: "pi extension agent-switcher.ts reconciles from this marker each turn.",
+						},
+						null,
+						2,
+					),
+				);
+				// Stage the profile so a restart lands in the same mode (body only).
+				const profile = profilesById.get(mode);
+				if (profile?.body) {
+					await host.fs.write(".pi/SYSTEM.md", profile.body);
+				}
 				current = mode;
 				syncLabel(mode);
 				host.notify("info", `Agent switched to ${mode}`, `Agent switched to ${mode}`);
 				return { ok: true, mode };
+			} catch (err) {
+				const message = err?.message ?? String(err);
+				host.log("error", `switch failed: ${message}`);
+				return { ok: false, error: message };
 			}
-			return {
-				ok: false,
-				error: res?.error ?? "prompt delivery failed (agent may be streaming — try again when idle)",
-			};
 		}
 
 			// Tab panel messages (ctx.send path)
@@ -190,8 +217,8 @@ export default definePlugin({
 		cleanup.push(
 			host.route("POST", "/switch", async (req, res) => {
 				try {
-					const body = await readBody(req);
-					const result = await switchMode(String(body?.mode ?? "").trim());
+					const payload = readPayload(req);
+					const result = await switchMode(payload.mode);
 					json(res, result.ok ? 200 : 400, result);
 				} catch (err) {
 					json(res, 500, { ok: false, error: err?.message ?? String(err) });
@@ -222,6 +249,25 @@ export default definePlugin({
 			}),
 		);
 		cleanup.push(host.onCwdChange(() => void sync()));
+
+		// Slash-picker fallback that needs NO client bundle: /agents [mode]
+		// (runs server-side, so it works even if the browser bundle misbehaves).
+		cleanup.push(
+			host.registerCommand({
+				name: "agents",
+				description: "Switch the primary agent mode (glitch | glitch-omni | glitch-lightweight)",
+				argumentHint: "<mode>",
+				async run(args) {
+					const mode = String(args ?? "").trim();
+					if (!mode) {
+						const marker = await readCurrent(host);
+						return `Agent modes: ${modes.map((m) => m.id).join(", ") || "(none)"}. Current: ${marker ?? "unknown"}. Usage: /agents <mode>`;
+					}
+					const result = await switchMode(mode);
+					return result.ok ? `Agent switched to ${mode}` : `Switch failed: ${result.error}`;
+				},
+			}),
+		);
 
 		await sync();
 		host.log("activated — modes:", modes.map((m) => m.id).join(", ") || "(none)");

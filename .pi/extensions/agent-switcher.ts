@@ -330,7 +330,26 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 
 	// ---- System prompt swap (every turn) --------------------------------------
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
+		// Reconcile with the shared marker first: the pi-web-ui plugin switches by
+		// writing user/agent-mode.json (it has no reliable way to reach a specific
+		// conversation), so pick that up here and adopt the profile for this turn.
+		try {
+			const marker = readModeFile(join(repoRoot, "user", "agent-mode.json"));
+			if (marker && marker !== activeModeId && profileById(marker)) {
+				activeModeId = marker;
+				announcedMode = marker; // the UI already notified; keep the transcript clean
+				try {
+					ctx.ui.setStatus("agent", `agent:${marker}`);
+				} catch {
+					/* status is cosmetic */
+				}
+				pi.appendEntry("agent-mode-state", { mode: marker });
+			}
+		} catch {
+			/* marker unreadable — keep the current mode */
+		}
+
 		const profile = activeModeId ? profileById(activeModeId) : undefined;
 		if (!profile) return;
 

@@ -1,76 +1,70 @@
 /**
- * agent-switcher — pi-web-ui plugin (client entry)
+ * agent-switcher — pi-web-ui plugin (client entry) — SELF-CONTAINED, ZERO IMPORTS
  *
- * Styling goal: the composer control must look EXACTLY like the native model /
- * thinking chips (host `.chip` trigger + `.dd-menu` popup). The host only
- * renders plugin composer items as a native <select> (kind:"select", whose OS
- * popup is unstyleable) or a plain button (kind:"action"). So this bundle:
- *   - turns the button into a chip clone via injected scoped CSS;
- *   - on click, opens a custom fixed-position dropdown cloned from dd-menu.
+ * Why no imports: the host serves plugin files only from
+ * /plugins/<id>/client/*. A relative import of a sibling SDK directory gets
+ * URL-normalized into /plugins/<id>/sdk/… , misses that route, falls into the
+ * SPA fallback and comes back as text/html — and a module graph rejects
+ * non-JS, killing the ENTIRE entry module (no CSS, no handlers, "plugin does
+ * not handle this action"). Keeping this file dependency-free removes that
+ * whole failure class; the two SDK helpers it used are inlined below.
  *
- * REGISTRATION ROBUSTNESS — the failure we saw ("The plugin does not handle
- * this action (version mismatch?)") means the host's client-side action
- * registry had no handler for our action. Causes: stale cached bundle, bridge
- * not ready at import, or the tab not opened. Defense in depth:
- *   1. register INSIDE mount() (plugin-scoped, guaranteed context);
- *   2. register at import if the bridge is already there (this is inside the
- *      host's wa(pluginId) scope — registration lands under pluginId:action,
- *      matched first by the dispatcher);
- *   3. poll briefly for a late bridge (registration lands bare, still matched
- *      by the dispatcher's second key check);
- *   4. handle BOTH action names: "agent-switcher:menu" (chip) and legacy
- *      "agent-switcher:switch" (older registered select transitions).
+ * Action names: the host dispatcher looks up registry keys
+ * `<pluginId>:<action>` then `<action>` for the exact action string the ITEM
+ * carries. The server item uses "agent-switcher:menu". We register BOTH
+ * "agent-switcher:menu" (chip click → dropdown) and "agent-switcher:switch"
+ * (legacy / select-style items; with a value → direct switch), so a mismatch
+ * between server item and client registration can never dead-end again.
  *
- * SDK NOTE: the shared SDK must live at client/sdk/ — the host only serves
- * /plugins/<id>/client/* (a "../sdk" import gets URL-normalized to
- * /plugins/<id>/sdk/…, falls into the SPA fallback, and comes back as
- * text/html → the whole module graph fails to load). Plugin-root sdk/ is
- * kept in place for the Node unit tests (file:// imports are relative there).
- *
- * Diagnostics: sets window.__agentSwitcherClient = {registered:[...], errors}
- * so a quick browser-console check (`window.__agentSwitcherClient`) proves
- * the bundle ran. The injected <style id="agent-switcher-style"> tag is also
- * a visible marker in the DOM (document.getElementById("agent-switcher-style")).
+ * Styling: the chip is cloned from the host's native `.chip` (same surface,
+ * border, hover, icon slot, caret) and the popup clones `.dd-menu`.
  */
 
-import { onUiAction } from "./sdk/index.mjs";
+// --- inlined SDK helper (was ./sdk/index.mjs) --------------------------------
+function onUiAction(action, handler) {
+	try {
+		const bridge = globalThis.window?.__piWebUiHost;
+		if (bridge && typeof bridge.onUiAction === "function") return bridge.onUiAction(action, handler);
+	} catch {
+		/* bridge not ready / non-browser */
+	}
+	return () => {};
+}
 
-const ACTION = "agent-switcher:switch";
+const ACTION_MENU = "agent-switcher:menu";
+const ACTION_SWITCH = "agent-switcher:switch";
 const API_BASE = "/plugins-api/agent-switcher";
 const BUTTON_SELECTOR = 'button.composer-plugin-action[aria-label^="Agent:"]';
 const OPEN_BODY_CLASS = "agent-switcher-menu-open";
 
-// --- Tiny fault-proof diag store (never throws, no DOM needed) --------------
-const diag =
-	(globalThis.__agentSwitcherClient = globalThis.__agentSwitcherClient ?? {
-		registered: [],
-		errors: [],
-		version: "0.2.0",
-		importedAt: new Date().toISOString(),
-	});
+// --- diagnostics (never throws; also proves the module executed) ------------
+const diag = (globalThis.__agentSwitcherClient = globalThis.__agentSwitcherClient ?? {
+	registered: [],
+	errors: [],
+	version: "0.3.0",
+	importedAt: new Date().toISOString(),
+});
 
 function registerHandlers(scope) {
-	try {
-		const off = onUiAction(ACTION, (_itemId, value) => {
-			if (typeof value === "string" && value) {
-				void requestSwitch(value);
-			} else {
-				const button = document.querySelector(BUTTON_SELECTOR);
-				if (button) openMenuNearButton(button);
-			}
-		});
-		if (typeof off === "function") {
-			diag.registered.push(`${ACTION} @ ${scope}`);
-		} else {
-			diag.registered.push(`${ACTION} @ ${scope} (no-op: bridge missing)`);
+	const ok = (name, fn) => {
+		try {
+			const off = onUiAction(name, fn);
+			diag.registered.push(`${name} @ ${scope}${typeof off === "function" ? "" : " (no-op: bridge missing)"}`);
+		} catch (err) {
+			diag.errors.push(`register(${name}@${scope}): ${err?.message ?? err}`);
 		}
-	} catch (err) {
-		diag.errors.push(`register(${scope}): ${err?.message ?? err}`);
-	}
+	};
+	const openMenu = () => {
+		const button = document.querySelector(BUTTON_SELECTOR);
+		if (button) openMenuNearButton(button);
+	};
+	ok(ACTION_MENU, () => openMenu());
+	ok(ACTION_SWITCH, (_itemId, value) => {
+		if (typeof value === "string" && value) void requestSwitch(value);
+		else openMenu();
+	});
 }
 
-// Import-time registration (runs inside the host's plugin scope when the
-// bundle is imported) + short late-bridge polling as a second chance.
 registerHandlers("import");
 if (typeof window !== "undefined") {
 	let tries = 0;
@@ -82,26 +76,22 @@ if (typeof window !== "undefined") {
 	retry();
 }
 
-// --- Composer chip → native chip look (scoped CSS clone of host .chip) -------
+// --- chip styling: clone of the host's effective composer chip rules ---------
 if (typeof document !== "undefined" && document.head && !document.getElementById("agent-switcher-style")) {
 	const style = document.createElement("style");
 	style.id = "agent-switcher-style";
 	style.textContent = [
-		// chip surface — cloned from the host's effective composer chip rules
 		`button.composer-plugin-action[aria-label^="Agent:"]{`,
 		`-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;`,
 		`height:28px;border:1px solid var(--border);background:var(--chip-bg,var(--bg-elev2));`,
-		`color:var(--text);cursor:pointer;white-space:nowrap;border-radius:8px;`,
-		`align-items:center;gap:4px;padding:3px 8px;font-size:12px;`,
-		`transition:border-color .15s,background .15s;display:inline-flex;`,
-		`min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis}`,
-		// icon + label + hover + caret, matching the model/thinking chips
+		`cursor:pointer;white-space:nowrap;border-radius:8px;align-items:center;gap:4px;`,
+		`padding:3px 8px;transition:border-color .15s,background .15s;display:inline-flex;`,
+		`min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;`,
+		`color:var(--text-faint);font-size:11px}`,
 		`button.composer-plugin-action[aria-label^="Agent:"]:hover{border-color:var(--accent);background:var(--accent-soft)}`,
 		`button.composer-plugin-action[aria-label^="Agent:"]::before{content:"\\1F916";font-size:11px;line-height:1}`,
-		`button.composer-plugin-action[aria-label^="Agent:"]{color:var(--text-faint);font-size:11px}`,
 		`button.composer-plugin-action[aria-label^="Agent:"]::after{content:"\\25BE";color:var(--text-faint);margin-left:2px;transition:transform .15s;font-size:10px;line-height:1}`,
 		`body.${OPEN_BODY_CLASS} button.composer-plugin-action[aria-label^="Agent:"]::after{transform:rotate(180deg)}`,
-		// dropdown menu — cloned from host .dd-menu / .dd-header / .dd-item
 		`.agent-switcher-menu{background:var(--menu-bg,var(--bg-elev2));border:1px solid var(--border);z-index:60;`,
 		`border-radius:10px;min-width:340px;max-width:480px;max-height:min(360px,100vh - 240px);`,
 		`padding:6px;position:fixed;overflow-y:auto;box-shadow:0 12px 40px #00000080}`,
@@ -116,7 +106,7 @@ if (typeof document !== "undefined" && document.head && !document.getElementById
 	document.head.appendChild(style);
 }
 
-// --- Dropdown menu (dd-menu clone) ------------------------------------------
+// --- dropdown (dd-menu clone, opens above the chip) --------------------------
 let openMenu = null;
 
 function closeMenu() {
@@ -125,7 +115,7 @@ function closeMenu() {
 
 function openMenuNearButton(button) {
 	if (openMenu) {
-		closeMenu(); // second click toggles closed, like the native chips
+		closeMenu();
 		return;
 	}
 	const root = document.createElement("div");
@@ -156,7 +146,6 @@ function openMenuNearButton(button) {
 	window.addEventListener("resize", close);
 	window.addEventListener("scroll", close, true);
 
-	// dd-up: opens above the chip, left-aligned (same as the thinking menu)
 	const rect = button.getBoundingClientRect();
 	root.style.left = `${Math.max(8, rect.left)}px`;
 	root.style.bottom = `${window.innerHeight - rect.top + 6}px`;
@@ -183,7 +172,7 @@ function openMenuNearButton(button) {
 			item.className = `agent-switcher-menu-item${active ? " active" : ""}`;
 			item.setAttribute("role", "menuitem");
 			const name = document.createElement("span");
-			name.textContent = mode.id; // terse ids only (Troy preference)
+			name.textContent = mode.id;
 			item.appendChild(name);
 			if (active) {
 				const check = document.createElement("span");
@@ -211,7 +200,7 @@ function openMenuNearButton(button) {
 	void render();
 }
 
-// --- HTTP helpers ------------------------------------------------------------
+// --- HTTP helpers -------------------------------------------------------------
 async function fetchState() {
 	try {
 		const res = await fetch(`${API_BASE}/state`);
@@ -235,9 +224,9 @@ async function requestSwitch(mode) {
 	}
 }
 
-// --- Agent tab (server-side onMessage path; also re-registers the action) ----
+// --- Agent tab -----------------------------------------------------------------
 export default {
-	mount(container, ctx) {
+	mount(container) {
 		registerHandlers("mount");
 		const root = document.createElement("div");
 		root.style.padding = "16px";
@@ -290,7 +279,7 @@ export default {
 			}
 			root.appendChild(list);
 			const hint = document.createElement("div");
-			hint.textContent = "Also: the Agent chip next to the chat input, /agent <mode> in the chat box, or just ask.";
+			hint.textContent = "Also: the Agent chip next to the chat input, /agents <mode> in the chat box, or just ask.";
 			hint.style.marginTop = "12px";
 			hint.style.color = "var(--text-dim)";
 			root.appendChild(hint);

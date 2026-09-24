@@ -30,7 +30,16 @@ Source lives in the repo at `.pi/web-plugins/agent-switcher/`. Install (or updat
 Copy-Item -Recurse -Force "E:\Glitch AI\glitch-pi\.pi\web-plugins\agent-switcher" "$HOME\.pi-web\plugins\agent-switcher"
 ```
 
-Then refresh the browser (the server hot-loads plugins on attach; if it isn't running, they load on next start).
+Then, **depending on what changed**:
+
+- **Brand-new plugin id** → just refresh the browser (the server discovers new ids on attach).
+- **Changed code of an already-loaded plugin** (this case) → a browser refresh is NOT enough: the server loads each plugin id once per process (`ensureLoaded` skips ids already in `loaded`). Changed code needs a plugin reload — Settings → UI plugins → rescan/reload, or restart the server. The reload also bumps the plugin epoch, which is what makes browsers re-fetch `client/entry.mjs`.
+
+Diagnostics without a browser: the plugin routes are reachable from loopback with no auth, e.g.
+
+```powershell
+curl.exe -s http://127.0.0.1:8787/plugins-api/agent-switcher/state
+```
 
 ## Tests
 

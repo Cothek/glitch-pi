@@ -11,11 +11,12 @@
 // Basic auth is guarding it). Network failure / 5xx / no cloudflared = warn but
 // still launch local Pi (remote access is non-blocking for CLI use).
 
-import { existsSync, readFileSync, appendFileSync, mkdirSync, writeFileSync, openSync } from 'fs';
+import { existsSync, readFileSync, appendFileSync, mkdirSync, writeFileSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync, spawn } from 'child_process';
 import { createInterface } from 'readline';
+import { ensureTunnel, isCloudflaredRunning, tunnelHost } from './lib/tunnel.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -49,6 +50,12 @@ function log(color, msg) {
   } catch {
     // best-effort
   }
+}
+
+// Level-based logger adapter for scripts/lib/tunnel.mjs (info|ok|warn|dim).
+const TUNNEL_LOG_COLORS = { info: CYAN, ok: DARK_GREEN, warn: YELLOW, dim: DARK_GRAY };
+function tunnelLog(msg, level = 'info') {
+  log(TUNNEL_LOG_COLORS[level] || CYAN, `  ${msg}`);
 }
 
 function run(cmd, args, opts = {}) {
@@ -205,112 +212,7 @@ function startPiStack() {
   return { webUi, authProxy };
 }
 
-// ---- 3a. Tunnel ensure (auto-start, skip-if-alive) ----
-// The tunnel is owned by the mainline glitch-ai repo: cloudflared.exe and
-// config/cloudflared-config.yml live there (one Cloudflare tunnel serves the
-// glitch / trader / pi hostnames). When Pi runs standalone from glitch-pi,
-// resolve those assets via the sibling directory. Env overrides for custom
-// layouts: GLITCH_TUNNEL_BIN, GLITCH_TUNNEL_CONFIG.
-function resolveTunnelAsset(explicit, relPath) {
-  const candidates = [
-    explicit,
-    join(ROOT_DIR, relPath),
-    join(dirname(ROOT_DIR), 'glitch-ai', relPath),
-  ].filter(Boolean);
-  for (const c of candidates) if (existsSync(c)) return c;
-  return null;
-}
-
-function tunnelHost() {
-  try {
-    const domainFile = join(ROOT_DIR, 'data', 'cloudflare-domain.txt');
-    if (existsSync(domainFile)) {
-      const d = readFileSync(domainFile, 'utf-8').trim();
-      if (d) return d;
-    }
-  } catch {}
-  return 'pi.cothekdesigns.com';
-}
-
-function isCloudflaredRunning() {
-  // Fast path: PID file written by a previous ensureTunnel() spawn.
-  try {
-    const pidFile = join(ROOT_DIR, 'data', 'cloudflared-auto.pid');
-    if (existsSync(pidFile)) {
-      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
-      if (!isNaN(pid) && pid > 0) {
-        try { process.kill(pid, 0); return true; } catch {}
-      }
-    }
-  } catch {}
-  // Image-name scan (also covers tunnels started by server mode / other tools).
-  try {
-    if (isWin) {
-      const out = execFileSync('tasklist', ['/NH', '/FI', 'IMAGENAME eq cloudflared.exe'], {
-        encoding: 'utf-8',
-        timeout: 5000,
-      });
-      return out.includes('cloudflared.exe');
-    }
-    execFileSync('pgrep', ['-x', 'cloudflared'], { encoding: 'utf-8', timeout: 5000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function ensureTunnel() {
-  if (isCloudflaredRunning()) {
-    log(DARK_GREEN, '  cloudflared already running — leaving tunnel as-is');
-    return;
-  }
-  const bin = resolveTunnelAsset(process.env.GLITCH_TUNNEL_BIN, isWin ? 'cloudflared.exe' : 'cloudflared');
-  const cfg = resolveTunnelAsset(process.env.GLITCH_TUNNEL_CONFIG, join('config', 'cloudflared-config.yml'));
-  if (!bin || !cfg) {
-    log(YELLOW, '  cloudflared binary or tunnel config not found — auto-start skipped');
-    log(DARK_GRAY, '  (expected in sibling glitch-ai; set GLITCH_TUNNEL_BIN / GLITCH_TUNNEL_CONFIG)');
-    return;
-  }
-  log(CYAN, '  Starting Cloudflare Tunnel (detached)...');
-  try {
-    const logDir = join(ROOT_DIR, 'data', 'logs');
-    mkdirSync(logDir, { recursive: true });
-    const outFd = openSync(join(logDir, 'cloudflared-tunnel.out.log'), 'a');
-    const errFd = openSync(join(logDir, 'cloudflared-tunnel.err.log'), 'a');
-    const child = spawn(bin, ['tunnel', '--config', cfg, 'run'], {
-      detached: true,
-      stdio: ['ignore', outFd, errFd],
-      windowsHide: true,
-    });
-    child.unref();
-    try {
-      writeFileSync(join(ROOT_DIR, 'data', 'cloudflared-auto.pid'), String(child.pid), 'utf-8');
-    } catch {}
-    log(DARK_GRAY, `  cloudflared spawned (PID ${child.pid}) — waiting for tunnel...`);
-    const host = tunnelHost();
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    for (let attempt = 0; attempt < 4; attempt++) {
-      await sleep(3000);
-      try {
-        const r = run(
-          isWin ? 'curl.exe' : 'curl',
-          ['-sS', '-o', isWin ? 'NUL' : '/dev/null', '-w', '%{http_code}', '--max-time', '5', `https://${host}/`],
-          { timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] },
-        );
-        const code = (r.stdout || '').trim();
-        if (code === '401' || code === '403' || code === '200') {
-          log(DARK_GREEN, `  tunnel remote: HTTP ${code} (OK)`);
-          return;
-        }
-      } catch {}
-    }
-    log(YELLOW, '  tunnel not answering yet — verifyTunnel() will report the final status');
-  } catch (e) {
-    log(YELLOW, `  tunnel auto-start failed: ${e.message || e}`);
-  }
-}
-
-// ---- 3b. Tunnel verify (non-blocking warn) ----
+// ---- 3. Tunnel verify (non-blocking warn) ----
 function verifyTunnel() {
   // cloudflared process
   const cloudflaredUp = isCloudflaredRunning();
@@ -454,7 +356,7 @@ async function main() {
 
   startGitnexusSync();
   startPiStack();
-  await ensureTunnel();
+  await ensureTunnel(tunnelLog);
   verifyTunnel();
 
   if (stackOnly) {

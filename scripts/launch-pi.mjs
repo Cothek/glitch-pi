@@ -4,17 +4,18 @@
 // Sequence (order matters):
 //   1. gitnexus-sync   — detached background index refresh (never blocks)
 //   2. start-pi-stack  — pi-web-ui :8787 + auth-proxy :4103 (skip-if-alive)
-//   3. tunnel verify   — cloudflared process + https://pi.cothekdesigns.com reachability
+//   3. tunnel ensure   — auto-start cloudflared detached (skip-if-alive), then verify
 //   4. pi              — spawn Pi CLI in glitch-pi workspace
 //
 // Tunnel verify treats HTTP 401/403 from the auth proxy as SUCCESS (stack is up,
 // Basic auth is guarding it). Network failure / 5xx / no cloudflared = warn but
 // still launch local Pi (remote access is non-blocking for CLI use).
 
-import { existsSync, readFileSync, appendFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, appendFileSync, mkdirSync, writeFileSync, openSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync, spawn } from 'child_process';
+import { createInterface } from 'readline';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -77,6 +78,86 @@ function pwsh(args, opts = {}) {
   return run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', ...args], opts);
 }
 
+// ---- Pi interface choice (TUI vs Web) ----
+// Stored alongside launch-unified.mjs's last_mode in user/launch-preference.json.
+const PI_PREF_FILE = join(ROOT_DIR, 'user', 'launch-preference.json');
+
+function readPiPref() {
+  try {
+    let content = readFileSync(PI_PREF_FILE, 'utf-8');
+    if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+function getSavedPiMode() {
+  const pref = readPiPref();
+  const m = pref && pref.last_pi_mode;
+  return m === 'tui' || m === 'web' ? m : null;
+}
+
+function savePiMode(mode) {
+  try {
+    const pref = readPiPref() || {};
+    pref.last_pi_mode = mode;
+    pref.saved_at = new Date().toISOString();
+    mkdirSync(dirname(PI_PREF_FILE), { recursive: true });
+    writeFileSync(PI_PREF_FILE, JSON.stringify(pref, null, 2), 'utf-8');
+  } catch {
+    // best-effort — saving a preference must never block the launch
+  }
+}
+
+function askPiQuestion(query) {
+  return new Promise((resolvePromise) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(query, (answer) => {
+      rl.close();
+      resolvePromise(answer);
+    });
+  });
+}
+
+async function showPiModeMenu(savedMode) {
+  log(MAGENTA, '');
+  log(MAGENTA, ' Pi interface');
+  log(MAGENTA, '');
+
+  const options = [
+    { id: 'tui', name: 'TUI', desc: 'terminal Pi CLI in this window (stack still runs for remote access)' },
+    { id: 'web', name: 'Web', desc: 'pi-web-ui in the browser (stack runs, no TUI here)' },
+  ];
+
+  if (savedMode) {
+    const saved = options.find(o => o.id === savedMode);
+    log(CYAN, ` Last Pi interface: ${saved ? saved.name : savedMode}`);
+    log(DARK_GRAY, ' Press Enter to keep it, or pick a different interface:');
+    log('');
+  }
+
+  options.forEach((o, i) => {
+    const marker = o.id === savedMode ? ' *' : '';
+    log(CYAN, `  [${i + 1}] ${o.name}${marker}`);
+    log(DARK_GRAY, `       ${o.desc}`);
+    log('');
+  });
+
+  const prompt = savedMode
+    ? `Pi interface (1-${options.length}, Enter for saved): `
+    : `Pi interface (1-${options.length}): `;
+
+  while (true) {
+    const selection = await askPiQuestion(prompt);
+    const raw = selection.trim();
+    if (raw === '' && savedMode) return savedMode;
+    const num = parseInt(raw, 10);
+    if (!isNaN(num) && num >= 1 && num <= options.length) return options[num - 1].id;
+    log(RED, `  Invalid selection. Enter 1-${options.length}${savedMode ? ' or press Enter to keep the saved interface' : ''}.`);
+  }
+}
+
 // ---- 1. GitNexus sync (detached, same pattern as launch.mjs) ----
 function startGitnexusSync() {
   try {
@@ -124,32 +205,121 @@ function startPiStack() {
   return { webUi, authProxy };
 }
 
-// ---- 3. Tunnel verify (non-blocking warn) ----
-function verifyTunnel() {
-  // cloudflared process
-  let cloudflaredUp = false;
+// ---- 3a. Tunnel ensure (auto-start, skip-if-alive) ----
+// The tunnel is owned by the mainline glitch-ai repo: cloudflared.exe and
+// config/cloudflared-config.yml live there (one Cloudflare tunnel serves the
+// glitch / trader / pi hostnames). When Pi runs standalone from glitch-pi,
+// resolve those assets via the sibling directory. Env overrides for custom
+// layouts: GLITCH_TUNNEL_BIN, GLITCH_TUNNEL_CONFIG.
+function resolveTunnelAsset(explicit, relPath) {
+  const candidates = [
+    explicit,
+    join(ROOT_DIR, relPath),
+    join(dirname(ROOT_DIR), 'glitch-ai', relPath),
+  ].filter(Boolean);
+  for (const c of candidates) if (existsSync(c)) return c;
+  return null;
+}
+
+function tunnelHost() {
+  try {
+    const domainFile = join(ROOT_DIR, 'data', 'cloudflare-domain.txt');
+    if (existsSync(domainFile)) {
+      const d = readFileSync(domainFile, 'utf-8').trim();
+      if (d) return d;
+    }
+  } catch {}
+  return 'pi.cothekdesigns.com';
+}
+
+function isCloudflaredRunning() {
+  // Fast path: PID file written by a previous ensureTunnel() spawn.
+  try {
+    const pidFile = join(ROOT_DIR, 'data', 'cloudflared-auto.pid');
+    if (existsSync(pidFile)) {
+      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+      if (!isNaN(pid) && pid > 0) {
+        try { process.kill(pid, 0); return true; } catch {}
+      }
+    }
+  } catch {}
+  // Image-name scan (also covers tunnels started by server mode / other tools).
   try {
     if (isWin) {
       const out = execFileSync('tasklist', ['/NH', '/FI', 'IMAGENAME eq cloudflared.exe'], {
         encoding: 'utf-8',
         timeout: 5000,
       });
-      cloudflaredUp = out.includes('cloudflared.exe');
+      return out.includes('cloudflared.exe');
     }
+    execFileSync('pgrep', ['-x', 'cloudflared'], { encoding: 'utf-8', timeout: 5000 });
+    return true;
   } catch {
-    cloudflaredUp = false;
+    return false;
   }
+}
+
+async function ensureTunnel() {
+  if (isCloudflaredRunning()) {
+    log(DARK_GREEN, '  cloudflared already running — leaving tunnel as-is');
+    return;
+  }
+  const bin = resolveTunnelAsset(process.env.GLITCH_TUNNEL_BIN, isWin ? 'cloudflared.exe' : 'cloudflared');
+  const cfg = resolveTunnelAsset(process.env.GLITCH_TUNNEL_CONFIG, join('config', 'cloudflared-config.yml'));
+  if (!bin || !cfg) {
+    log(YELLOW, '  cloudflared binary or tunnel config not found — auto-start skipped');
+    log(DARK_GRAY, '  (expected in sibling glitch-ai; set GLITCH_TUNNEL_BIN / GLITCH_TUNNEL_CONFIG)');
+    return;
+  }
+  log(CYAN, '  Starting Cloudflare Tunnel (detached)...');
+  try {
+    const logDir = join(ROOT_DIR, 'data', 'logs');
+    mkdirSync(logDir, { recursive: true });
+    const outFd = openSync(join(logDir, 'cloudflared-tunnel.out.log'), 'a');
+    const errFd = openSync(join(logDir, 'cloudflared-tunnel.err.log'), 'a');
+    const child = spawn(bin, ['tunnel', '--config', cfg, 'run'], {
+      detached: true,
+      stdio: ['ignore', outFd, errFd],
+      windowsHide: true,
+    });
+    child.unref();
+    try {
+      writeFileSync(join(ROOT_DIR, 'data', 'cloudflared-auto.pid'), String(child.pid), 'utf-8');
+    } catch {}
+    log(DARK_GRAY, `  cloudflared spawned (PID ${child.pid}) — waiting for tunnel...`);
+    const host = tunnelHost();
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await sleep(3000);
+      try {
+        const r = run(
+          isWin ? 'curl.exe' : 'curl',
+          ['-sS', '-o', isWin ? 'NUL' : '/dev/null', '-w', '%{http_code}', '--max-time', '5', `https://${host}/`],
+          { timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] },
+        );
+        const code = (r.stdout || '').trim();
+        if (code === '401' || code === '403' || code === '200') {
+          log(DARK_GREEN, `  tunnel remote: HTTP ${code} (OK)`);
+          return;
+        }
+      } catch {}
+    }
+    log(YELLOW, '  tunnel not answering yet — verifyTunnel() will report the final status');
+  } catch (e) {
+    log(YELLOW, `  tunnel auto-start failed: ${e.message || e}`);
+  }
+}
+
+// ---- 3b. Tunnel verify (non-blocking warn) ----
+function verifyTunnel() {
+  // cloudflared process
+  const cloudflaredUp = isCloudflaredRunning();
   log(cloudflaredUp ? DARK_GREEN : YELLOW, `  cloudflared process: ${cloudflaredUp ? 'UP' : 'DOWN'}`);
 
   // Remote URL: 401/403 = auth proxy answering through tunnel = SUCCESS
   let remote = 'unreachable';
   try {
-    const domainFile = join(ROOT_DIR, 'data', 'cloudflare-domain.txt');
-    let host = 'pi.cothekdesigns.com';
-    if (existsSync(domainFile)) {
-      const d = readFileSync(domainFile, 'utf-8').trim();
-      if (d) host = d;
-    }
+    const host = tunnelHost();
     const r = run(
       isWin ? 'curl.exe' : 'curl',
       ['-sS', '-o', isWin ? 'NUL' : '/dev/null', '-w', '%{http_code}', '--max-time', '8', `https://${host}/`],
@@ -167,7 +337,8 @@ function verifyTunnel() {
   const remoteOk = remote.includes('(OK)');
   log(remoteOk ? DARK_GREEN : YELLOW, `  tunnel remote: ${remote}`);
   if (!cloudflaredUp || !remoteOk) {
-    log(DARK_YELLOW, '  Tunnel degraded — local Pi still launches. Run scripts\\setup-tunnel.ps1 to repair.');
+    log(DARK_YELLOW, '  Tunnel degraded — local Pi still launches.');
+    log(DARK_GRAY, '  Check data\\logs\\cloudflared-tunnel.err.log or re-run: node scripts\\launch-pi.mjs --stack-only');
   }
 }
 
@@ -245,8 +416,12 @@ async function main() {
 
   Options:
     --help, -h     Show this help
-    --stack-only   Start gitnexus-sync + pi stack + tunnel verify, then exit
+    --stack-only   Start gitnexus-sync + pi stack + tunnel auto-start, then exit
                    (does not spawn the Pi CLI)
+    --tui          Skip the interface menu - launch the terminal Pi CLI
+    --web          Skip the interface menu - run pi-web-ui only (no TUI)
+
+  The interface menu (TUI vs Web) remembers your last choice — press Enter to keep it.
 
   Sequence: gitnexus-sync -> start-pi-stack -> tunnel verify -> pi
   Workspace: ${PI_ROOT}
@@ -255,6 +430,8 @@ async function main() {
     process.exit(0);
   }
   const stackOnly = args.includes('--stack-only');
+  const wantTui = args.includes('--tui');
+  const wantWeb = args.includes('--web');
 
   log(MAGENTA, '');
   log(MAGENTA, ' Glitch AI - Pi Mode');
@@ -265,8 +442,19 @@ async function main() {
     process.exit(1);
   }
 
+  // Interface choice: explicit flag > saved preference > interactive menu.
+  // Non-TTY (automation) falls back to the saved choice, then TUI.
+  let piMode = null;
+  if (wantTui) piMode = 'tui';
+  else if (wantWeb) piMode = 'web';
+  else if (process.stdin.isTTY) piMode = await showPiModeMenu(getSavedPiMode());
+  else piMode = getSavedPiMode() || 'tui';
+  savePiMode(piMode);
+  log(DARK_GRAY, `  Pi interface: ${piMode}`);
+
   startGitnexusSync();
   startPiStack();
+  await ensureTunnel();
   verifyTunnel();
 
   if (stackOnly) {
@@ -274,7 +462,16 @@ async function main() {
     process.exit(0);
   }
 
-  const code = await launchPiCli(args.filter((a) => a !== '--stack-only'));
+  if (piMode === 'web') {
+    log(GREEN, '  Pi is running in Web mode.');
+    log(CYAN, '  Local:  http://localhost:8787');
+    log(DARK_GRAY, '  Remote: https://pi.cothekdesigns.com  (auth via .server-password)');
+    log(DARK_GRAY, '  Stop it from the web UI (/pi-web-ui:quit) or by killing the :8787 listener.');
+    log(MAGENTA, '');
+    process.exit(0);
+  }
+
+  const code = await launchPiCli(args.filter((a) => a !== '--stack-only' && a !== '--tui' && a !== '--web'));
   log(MAGENTA, '');
   log(MAGENTA, ' Pi session ended.');
   process.exit(code);

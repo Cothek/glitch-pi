@@ -49,6 +49,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { Key } from "@earendil-works/pi-tui";
 
 // ---------------------------------------------------------------------------
@@ -345,6 +347,47 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 		}
 	});
 
+	// ---- Model-callable switch tool (works in every UI, incl. web UI) ----------
+	// Registered after profile discovery so the enum lists real modes. Lets the
+	// user just ask in chat: "switch to glitch omni".
+	function registerSwitchTool() {
+		if (profiles.length === 0) return;
+		pi.registerTool({
+			name: "switch_agent",
+			label: "Switch Agent",
+			description:
+				"Switch the primary agent mode for this session (mid-session, no restart). " +
+				"Use when the user asks to change agent, persona, or mode. " +
+				"The new mode's full profile takes over from the next turn.",
+			promptSnippet: "Switch the primary agent mode (glitch / glitch-omni / glitch-lightweight)",
+			parameters: Type.Object({
+				mode: StringEnum(profiles.map((p) => p.id), {
+					description: "Target agent mode id",
+				}),
+			}),
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				const mode = String((params as { mode?: string }).mode ?? "").trim();
+				const profile = profileById(mode);
+				if (!profile) {
+					throw new Error(`Unknown mode "${mode}". Available: ${profiles.map((p) => p.id).join(", ")}`);
+				}
+				await switchTo(mode, ctx);
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Agent mode switched to ${mode}` +
+								(profile.config.description ? ` (${profile.config.description})` : "") +
+								". The new mode is active from the next turn; continue the current work without repeating completed steps.",
+						},
+					],
+					details: { mode },
+				};
+			},
+		});
+	}
+
 	// ---- Session lifecycle -----------------------------------------------------
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -373,5 +416,6 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 			announcedMode = mode; // don't announce on restore — prompt patch is enough
 		}
 		setStatus(ctx);
+		registerSwitchTool();
 	});
 }

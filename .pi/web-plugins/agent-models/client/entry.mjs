@@ -59,12 +59,18 @@ const STATUS_COLOR = {
 	inherit: "var(--text-faint)",
 };
 
-function injectStyles() {
-	if (typeof document === "undefined" || !document.head) return;
-	if (document.getElementById(STYLE_ID)) return;
-	const style = document.createElement("style");
-	style.id = STYLE_ID;
-	style.textContent = `
+/**
+ * The stylesheet is a module constant so injectStyles() can compare it by CONTENT.
+ *
+ * The style ELEMENT outlives a mount: it is appended to <head> and stays there
+ * across remounts, plugin reloads and SPA navigation. An id-only "already
+ * injected?" check therefore kept the FIRST deploy's CSS for the life of the page,
+ * and every later stylesheet change was silently ignored - new DOM, stale CSS.
+ * That is exactly how a bug looked here: the row toggle was full-bleed in the
+ * markup but rendered 11px inset with the host's default button padding (1px 6px),
+ * because the old .am-row padding rule was still the only one that existed.
+ */
+const STYLE_CSS = `
 .am-wrap{font:13px/1.5 var(--sans, system-ui, sans-serif);color:var(--text);padding:12px;display:flex;flex-direction:column;gap:10px;height:100%;box-sizing:border-box;min-height:0}
 .am-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .am-title{font-weight:600}
@@ -77,20 +83,24 @@ function injectStyles() {
 .am-btn.am-primary{border-color:var(--accent);color:var(--text)}
 .am-filters{display:flex;gap:6px;flex-wrap:wrap}
 .am-list{display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;min-height:0}
-.am-row{border:1px solid var(--border-soft);border-radius:8px;padding:8px 10px;background:var(--bg-elev2);display:flex;flex-direction:column;gap:3px}
+.am-row{border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2);display:flex;flex-direction:column;overflow:hidden}
 .am-row.am-open{border-color:var(--accent)}
+.am-row-toggle{display:flex;flex-direction:column;gap:3px;text-align:left;width:100%;padding:8px 10px;margin:0;box-sizing:border-box;background:0 0;border:none;color:var(--text);font:inherit;cursor:pointer}
+.am-row-toggle:hover{background:var(--bg-elev)}
+.am-row-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .am-row-top{display:flex;align-items:center;gap:8px}
 .am-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .am-badge{font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;border:1px solid currentColor;border-radius:5px;padding:1px 5px;flex:none}
-.am-actions{margin-left:auto;display:flex;gap:6px;align-items:center;flex:none}
+.am-caret{color:var(--text-faint);margin-left:auto;font-size:10px;line-height:1;flex:none;transition:transform .15s}
+.am-row.am-open .am-caret{transform:rotate(180deg)}
 .am-models{font-family:var(--mono, monospace);font-size:11px;color:var(--text-dim);display:flex;align-items:baseline;gap:6px;min-width:0}
 .am-arrow{color:var(--text-faint);flex:none}
 .am-model{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .am-model.am-pin{color:var(--text-faint)}
 .am-note{font-size:11px;color:var(--text-faint)}
 .am-note.am-warn{color:var(--amber)}
-.am-saved{font-size:11px;color:var(--green);font-family:var(--mono, monospace);word-break:break-all}
-.am-picker{margin-top:6px;border-top:1px solid var(--border-soft);padding-top:8px;display:flex;flex-direction:column;gap:6px}
+.am-saved{padding:0 10px 8px;font-size:11px;color:var(--green);font-family:var(--mono, monospace);word-break:break-all}
+.am-picker{border-top:1px solid var(--border-soft);padding:8px 10px;display:flex;flex-direction:column;gap:6px}
 .am-picker-input{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;outline:none;padding:6px 9px;font-size:12px;font-family:var(--mono, monospace)}
 .am-picker-input:focus{border-color:var(--accent)}
 .am-picker-head{display:flex;gap:8px;align-items:center}
@@ -109,7 +119,16 @@ function injectStyles() {
 .am-error{border:1px solid var(--red);background:var(--red-soft, transparent);border-radius:8px;padding:10px;font-size:12px;color:var(--text)}
 .am-diag{border-top:1px solid var(--border-soft);padding-top:6px;color:var(--text-faint);font-family:var(--mono, monospace);font-size:10px;word-break:break-all}
 `;
-	document.head.appendChild(style);
+
+function injectStyles() {
+	if (typeof document === "undefined" || !document.head) return;
+	let style = document.getElementById(STYLE_ID);
+	if (!style) {
+		style = document.createElement("style");
+		style.id = STYLE_ID;
+		document.head.appendChild(style);
+	}
+	if (style.textContent !== STYLE_CSS) style.textContent = STYLE_CSS;
 }
 
 function el(tag, cls, text) {
@@ -376,29 +395,24 @@ function createInstance(container, ctx) {
 		// without guessing at DOM order.
 		wrap.setAttribute("data-am-agent", row.name);
 		wrap.setAttribute("data-am-status", row.status);
+
+		// The WHOLE row toggles the picker (no separate Change button). It is a real
+		// <button> rather than a div with a click handler, so focus, Enter/Space and
+		// screen readers work for free. The picker is a SIBLING of this button, never
+		// a child: nesting its option buttons inside would be invalid HTML.
+		const toggle = el("button", "am-row-toggle");
+		toggle.type = "button";
+		toggle.setAttribute("data-am-action", "pick");
+		toggle.setAttribute("aria-expanded", String(open));
+		toggle.title = open ? `Close the model picker for ${row.name}` : `Change the model for ${row.name}`;
+
 		const top = el("div", "am-row-top");
 		top.appendChild(el("div", "am-name", row.name));
 		const badge = el("span", "am-badge", row.statusLabel);
 		badge.style.color = STATUS_COLOR[row.status] ?? "var(--text-dim)";
 		top.appendChild(badge);
-
-		const actions = el("div", "am-actions");
-		const change = el("button", "am-btn", open ? "Close" : "Change");
-		change.type = "button";
-		change.setAttribute("data-am-action", "pick");
-		change.setAttribute("aria-expanded", String(open));
-		change.addEventListener("click", () => {
-			state.openFor = open ? null : row.name;
-			state.query = "";
-			state.pickerError = null;
-			state.savedNote = null;
-			state.diag.lastAction = open ? "picker:close" : `picker:${row.name}`;
-			state.diag.lastAt = new Date().toLocaleTimeString();
-			render();
-			if (!open) reopenFocus(row.name);
-		});
-		actions.appendChild(change);
-		top.appendChild(actions);
+		top.appendChild(el("span", "am-caret", "▾"));
+		toggle.appendChild(top);
 
 		const models = el("div", "am-models");
 		const pin = el("span", "am-model am-pin", row.pin ?? "(no pin)");
@@ -408,13 +422,26 @@ function createInstance(container, ctx) {
 		const eff = el("span", "am-model", row.effective ?? row.effectiveLabel);
 		eff.title = row.effective ?? row.why;
 		models.appendChild(eff);
+		toggle.appendChild(models);
 
-		wrap.append(top, models);
 		if (row.warnings.length) {
-			for (const warning of row.warnings) wrap.appendChild(el("div", "am-note am-warn", `warning: ${warning}`));
+			for (const warning of row.warnings) toggle.appendChild(el("div", "am-note am-warn", `warning: ${warning}`));
 		} else if (row.status !== "ok") {
-			wrap.appendChild(el("div", "am-note", row.why));
+			toggle.appendChild(el("div", "am-note", row.why));
 		}
+
+		toggle.addEventListener("click", () => {
+			state.openFor = open ? null : row.name;
+			state.query = "";
+			state.pickerError = null;
+			state.savedNote = null;
+			state.diag.lastAction = open ? "row:collapse" : `row:expand:${row.name}`;
+			state.diag.lastAt = new Date().toLocaleTimeString();
+			render();
+			if (!open) reopenFocus(row.name);
+		});
+
+		wrap.appendChild(toggle);
 		if (state.savedNote?.agent === row.name) wrap.appendChild(el("div", "am-saved", state.savedNote.text));
 		if (open) wrap.appendChild(pickerNode(row));
 		return wrap;

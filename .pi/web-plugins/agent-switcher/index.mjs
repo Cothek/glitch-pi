@@ -288,7 +288,28 @@ export default definePlugin({
 			}),
 		);
 
+		// Re-sync whenever a browser attaches (covers a startup where the workspace
+		// was not readable yet — the symptom was a missing chip right after a
+		// server restart), and retry a few times if discovery came up empty.
+		cleanup.push(
+			host.onAttach(() => {
+				void sync();
+			}),
+		);
+
 		await sync();
+		if (!modes.length) {
+			// Workspace not ready at boot (or no profiles yet): retry briefly so the
+			// chip still appears without another restart.
+			let attempt = 0;
+			const retry = setInterval(() => {
+				attempt++;
+				void sync().then(() => {
+					if (modes.length > 0 || attempt >= 5) clearInterval(retry);
+				});
+			}, 2000);
+			retry.unref?.();
+		}
 		host.log("activated — modes:", modes.map((m) => m.id).join(", ") || "(none)");
 
 		return () => {

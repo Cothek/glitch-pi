@@ -1,17 +1,19 @@
 /**
- * agent-switcher — pi-web-ui plugin (client entry) — SELF-CONTAINED, ZERO IMPORTS
+ * agent-switcher — pi-web-ui plugin (client entry) — v0.6 FINAL
  *
- * Self-contained: the host serves plugin files only from /plugins/<id>/client/*.
- * A ../sdk import lands on the SPA fallback and fails the whole module.
+ * Zero imports (host only serves /plugins/<id>/client/*; importing ../sdk
+ * lands on the SPA fallback and breaks the module).
  *
- * REGISTRATION: exactly once per page lifetime, and only when the host bridge
- * exists. Previous revisions registered the same handlers up to 6 times
- * (import + poll retry + tab mount); the host dispatches to EVERY registered
- * handler, so one chip click toggled the menu open/closed 2-3 times in a row
- * ("nothing happens").
+ * registerOnce(): exactly one handler binding per page lifetime; binds only
+ * once the host bridge exists and only after the first successful call —
+ * an early no-bridge pass must not lock the flag and skip it forever.
+ * The host dispatcher invokes every handler for an action on each click, so
+ * duplicate registration turns one click into N toggles ("nothing happens").
  *
- * The chip is styled to the host's .chip rules (size, colors, border, hover);
- * the popup clones .dd-menu / .dd-header / .dd-item.
+ * Chip styling copied from the host's native model chip, measured against its
+ * computed values from the live page (h 22, radius 8, font 12, color
+ * var(--text), border 1px solid var(--border), padding 3px 8px) and scoped to
+ * beat the host's own `.inputbox .btn.composer-plugin-action` rule.
  */
 
 // --- inlined SDK helper (was ./sdk/index.mjs) --------------------------------
@@ -29,26 +31,28 @@ const ACTION_MENU = "agent-switcher:menu";
 const ACTION_SWITCH = "agent-switcher:switch";
 const API_BASE = "/plugins-api/agent-switcher";
 const BUTTON_SELECTOR = 'button.composer-plugin-action[aria-label^="Agent:"]';
+const CHIP_SEL = '.inputbox button.composer-plugin-action[aria-label^="Agent:"]';
 const OPEN_BODY_CLASS = "agent-switcher-menu-open";
 
-// --- diagnostics (never throws; also proves the module executed) -------------
+// --- diagnostics (never throws; proves the module executed) -------------------
 const diag = (globalThis.__agentSwitcherClient = globalThis.__agentSwitcherClient ?? {
 	registered: [],
 	errors: [],
-	version: "0.4.0",
+	version: "0.6.0",
 	importedAt: new Date().toISOString(),
 });
 
 /**
- * Register at most once, and only once the bridge exists. The dispatcher runs
- * every registered handler for an action, so duplicate registration turns a
- * single click into multiple toggles (the menu opens and closes instantly).
+ * Register at most once per page lifetime AND only once the bridge exists.
+ * If the bridge is missing we leave a global marker free and let the retry
+ * poll re-enter — setting the flag early was the older "registered but dead
+ * click" failure mode.
  */
 function registerOnce(scope) {
 	if (globalThis.__agentSwitcherBound) return;
 	if (typeof window === "undefined") return;
 	const bridge = window.__piWebUiHost;
-	if (!bridge || typeof bridge.onUiAction !== "function") return; // poll retry handles this
+	if (!bridge || typeof bridge.onUiAction !== "function") return;
 	globalThis.__agentSwitcherBound = true;
 
 	const toggleMenu = () => {
@@ -72,7 +76,6 @@ function registerOnce(scope) {
 	}
 }
 
-// At import the bridge is usually there; poll briefly as a slow-boot fallback.
 registerOnce("import");
 if (typeof window !== "undefined") {
 	let tries = 0;
@@ -80,43 +83,47 @@ if (typeof window !== "undefined") {
 		if (globalThis.__agentSwitcherBound) return;
 		const bridge = window.__piWebUiHost;
 		if (bridge && typeof bridge.onUiAction === "function") registerOnce("poll");
-		else if (tries++ < 100) setTimeout(retry, 300); // ~30s budget for slow bridges
+		else if (tries++ < 100) setTimeout(retry, 300);
 	};
 	retry();
 }
 
-// --- chip styling: clone of the host's effective composer chip rules ----------
+// --- chip styling: identical to the host chip values measured on the live page -
+//   Model chip computed: h 22px, radius 8, font 12px, color var(--text),
+//   border 1px solid var(--border), padding 3px 8px, gap 4, bg var(--chip-bg, var(--bg-elev2))
 if (typeof document !== "undefined" && document.head && !document.getElementById("agent-switcher-style")) {
 	const style = document.createElement("style");
 	style.id = "agent-switcher-style";
 	style.textContent = [
-		/* chip surface — identical to the host .chip rules the model/thinking chips use */
-		`button.composer-plugin-action[aria-label^="Agent:"]{`,
+		`${CHIP_SEL}{`,
 		`-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;`,
-		`height:28px;border:1px solid var(--border);background:var(--chip-bg,var(--bg-elev2));`,
-		`color:var(--text);cursor:pointer;white-space:nowrap;border-radius:8px;`,
-		`align-items:center;gap:4px;padding:3px 8px;font-size:12px;`,
-		`transition:border-color .15s,background .15s;display:inline-flex;min-width:0}`,
-		`button.composer-plugin-action[aria-label^="Agent:"]:hover{border-color:var(--accent);background:var(--accent-soft)}`,
-		`button.composer-plugin-action[aria-label^="Agent:"]::before{content:"\\1F916";font-size:11px;line-height:1}`,
-		`button.composer-plugin-action[aria-label^="Agent:"]::after{content:"\\25BE";color:var(--text-faint);margin-left:2px;transition:transform .15s;font-size:10px;line-height:1}`,
-		`body.${OPEN_BODY_CLASS} button.composer-plugin-action[aria-label^="Agent:"]::after{transform:rotate(180deg)}`,
-		/* dropdown — exact clones of host .dd-menu / .dd-header / .dd-item */
+		`min-width:0;height:22px;flex-shrink:1;`,
+		`border:1px solid var(--border);border-radius:8px;`,
+		`background:var(--chip-bg,var(--bg-elev2));color:var(--text);`,
+		`cursor:pointer;white-space:nowrap;align-items:center;gap:4px;`,
+		`padding:3px 8px;font-size:12px;font-weight:400;line-height:1.4;`,
+		`transition:border-color .15s,background .15s;display:inline-flex;`,
+		`box-sizing:border-box;font-family:inherit;}`,
+		`${CHIP_SEL}:hover{border-color:var(--accent);background:var(--accent-soft)}`,
+		`${CHIP_SEL}::before{content:"\\1F916";font-size:11px;line-height:1;font-family:inherit}`,
+		`${CHIP_SEL}::after{content:"\\25BE";color:var(--text-faint);margin-left:2px;transition:transform .15s;font-size:10px;line-height:1}`,
+		`body.${OPEN_BODY_CLASS} ${CHIP_SEL}::after{transform:rotate(180deg)}`,
+		/* dropdown — exact clones of the host .dd-menu / .dd-header / .dd-item rules */
 		`.agent-switcher-menu{background:var(--menu-bg,var(--bg-elev2));border:1px solid var(--border);z-index:1000;`,
 		`border-radius:10px;min-width:340px;max-width:480px;max-height:min(360px,100vh - 240px);`,
-		`padding:6px;position:fixed;overflow-y:auto;box-shadow:0 12px 40px #00000080}`,
+		`padding:6px;position:fixed;overflow-y:auto;box-shadow:0 12px 40px #00000080;color:var(--text)}`,
 		`.agent-switcher-menu-header{letter-spacing:.6px;text-transform:uppercase;color:var(--text-faint);padding:6px 10px 4px;font-size:11px;font-weight:700}`,
 		`.agent-switcher-menu-item{width:100%;color:var(--text-dim);text-align:left;cursor:pointer;background:0 0;border:none;`,
-		`border-radius:7px;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;font-size:13px;display:flex}`,
+		`border-radius:7px;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;font-size:13px;display:flex;font-family:inherit;line-height:1.4}`,
 		`.agent-switcher-menu-item:hover{background:var(--bg-elev);color:var(--text)}`,
 		`.agent-switcher-menu-item.active{background:var(--accent-soft);color:var(--text)}`,
-		`.agent-switcher-menu-note{color:var(--text-faint);padding:6px 10px 4px;font-size:11px}`,
+		`.agent-switcher-menu-note{color:var(--text-faint);padding:6px 10px 4px;font-size:11px;font-family:inherit}`,
 		`.agent-switcher-menu-check{color:var(--accent);font-weight:700;margin-left:auto}`,
 	].join("\n");
 	document.head.appendChild(style);
 }
 
-// --- dropdown (dd-menu clone, opens above the chip like the native menus) ----
+// --- dropdown (dd-menu clone, opens above the chip like the native menus) -----
 let openMenu = null;
 
 function closeMenu() {
@@ -156,6 +163,7 @@ function toggleMenuNearButton(button) {
 	window.addEventListener("resize", close);
 	window.addEventListener("scroll", close, true);
 
+	// dd-up: opens above the chip, left-aligned (same as the native menus)
 	const rect = button.getBoundingClientRect();
 	root.style.left = `${Math.max(8, rect.left)}px`;
 	root.style.bottom = `${window.innerHeight - rect.top + 6}px`;

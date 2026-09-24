@@ -88,6 +88,40 @@ This starts OpenCode as a web server proxied through Cloudflare Tunnel. No open 
 
 Configure your domain via `.env`: copy `.env.example` to `.env` and set `GLITCH_DOMAIN`.
 
+### Pi Web UI (`pi.cothekdesigns.com`)
+
+Pi web UI mode starts two local layers: `pi-web-ui` on `:8787` and an auth proxy on `:4103` (HTTP Basic auth) that the Cloudflare tunnel points at.
+
+The **login banner prints in the terminal** whenever the stack starts - username, password, local + remote URLs, and a one-click `?auth_token=` link.
+
+Two start modes:
+
+| Mode | Behaviour | Stop it by |
+|---|---|---|
+| **windowed** (default) | One visible PowerShell window runs the whole stack. `pi-web-ui` runs in that window's foreground, the auth proxy is a child on the same console. | Closing the window (or Ctrl+C in it). |
+| **headless** | Both layers start detached with `CREATE_NO_WINDOW` and survive closing every shell. | `scripts\stop-pi-stack.ps1` |
+
+```powershell
+.\scripts\start-pi-stack.ps1                  # detached (survives closing every shell)
+.\scripts\start-pi-stack.ps1 -Windowed        # visible window you close to stop
+.\scripts\start-pi-stack-window.ps1           # same, opens the window directly
+.\scripts\start-pi-stack.ps1 -Status          # check only
+.\scripts\stop-pi-stack.ps1                   # stop both layers, either start mode
+```
+
+```bash
+node scripts/launch-pi.mjs --web --windowed   # force a visible window (remembered)
+node scripts/launch-pi.mjs --web --headless   # force detached (remembered)
+node scripts/show-credentials.mjs             # reprint username / password / login URLs
+node scripts/set-password.mjs                 # rotate the password
+```
+
+Start mode is remembered in `user/launch-preference.json` (`pi_stack_mode`) only when you pass `--windowed` or `--headless`; otherwise a console launch gets a window and a no-console launch (extension, automation) stays detached.
+
+Either mode polls the ports until they really bind, so a slow `pi-web-ui` boot is never reported as a failure.
+
+The password lives in `.server-password` (repo root, gitignored). It is printed to the console only - never written to `data/logs/`.
+
 ## Repository Structure
 
 ```

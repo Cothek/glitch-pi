@@ -21,6 +21,7 @@ import { fileURLToPath } from 'url';
 import { execFileSync, spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { ensureTunnel, isCloudflaredRunning, tunnelHost } from './lib/tunnel.mjs';
+import { printLoginBanner } from './lib/web-auth.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -107,6 +108,28 @@ function getSavedPiMode() {
   const pref = readPiPref();
   const m = pref && pref.last_pi_mode;
   return m === 'tui' || m === 'web' ? m : null;
+}
+
+// How the web stack is started: a visible window you close to stop it, or
+// detached (CREATE_NO_WINDOW) so it outlives every shell. Remembered only when
+// the user picks explicitly via --windowed / --headless.
+function getSavedStackMode() {
+  const pref = readPiPref();
+  const m = pref && pref.pi_stack_mode;
+  return m === 'windowed' || m === 'headless' ? m : null;
+}
+
+// Best-effort patch of user/launch-preference.json. Never throws: a preference
+// write must not block a launch, but it does surface the failure.
+function patchPiPref(patch) {
+  try {
+    const pref = readPiPref() || {};
+    Object.assign(pref, patch, { saved_at: new Date().toISOString() });
+    mkdirSync(dirname(PI_PREF_FILE), { recursive: true });
+    writeFileSync(PI_PREF_FILE, JSON.stringify(pref, null, 2), 'utf-8');
+  } catch (e) {
+    log(DARK_GRAY, `  (stack preference not saved: ${e.message || e})`);
+  }
 }
 
 function savePiMode(mode) {
@@ -199,13 +222,21 @@ function startGitnexusSync() {
 }
 
 // ---- 2. Pi stack (web-ui + auth proxy) ----
-function startPiStack() {
+// windowed = one visible PowerShell window runs the whole stack; closing that
+// window stops it. headless = start-detached.ps1 (CREATE_NO_WINDOW), survives
+// closing every shell. Both wait for the ports to really bind before reporting,
+// so a slow pi-web-ui boot is never logged as a failure.
+function startPiStack({ windowed = false } = {}) {
   const statusScript = join(SCRIPT_DIR, 'start-pi-stack.ps1');
   if (!existsSync(statusScript)) {
     log(YELLOW, '  start-pi-stack.ps1 missing — skipping remote stack');
     return { webUi: false, authProxy: false };
   }
-  const start = pwsh(['-File', statusScript], { timeout: 60000 });
+  const startArgs = ['-File', statusScript];
+  if (windowed) startArgs.push('-Windowed');
+  // Generous: the windowed path waits up to 60s for pi-web-ui + 20s for the
+  // proxy, and the detached path polls the same way.
+  const start = pwsh(startArgs, { timeout: 150000 });
   if (!start.success) {
     log(YELLOW, `  Pi stack start returned non-zero: ${start.stderr || start.error || start.stdout}`);
   }
@@ -328,8 +359,14 @@ async function main() {
                    (does not spawn the Pi CLI)
     --tui          Skip the interface menu - launch the terminal Pi CLI
     --web          Skip the interface menu - run pi-web-ui only (no TUI)
+    --windowed     Run the web stack in a visible window - CLOSE IT to stop the
+                   stack (also remembered for next time)
+    --headless     Run the web stack detached, no window (also remembered)
 
   The interface menu (TUI vs Web) remembers your last choice — press Enter to keep it.
+
+  Web stack default: visible window when launched from a console, detached when
+  launched by an extension/automation (no console to close).
 
   Sequence: gitnexus-sync -> start-pi-stack -> tunnel verify -> pi
   Workspace: ${PI_ROOT}
@@ -340,6 +377,8 @@ async function main() {
   const stackOnly = args.includes('--stack-only');
   const wantTui = args.includes('--tui');
   const wantWeb = args.includes('--web');
+  const wantWindowed = args.includes('--windowed');
+  const wantHeadless = args.includes('--headless');
 
   log(MAGENTA, '');
   log(MAGENTA, ' Glitch AI - Pi Mode');
@@ -373,13 +412,33 @@ async function main() {
   if (modeChosen) savePiMode(piMode);
   if (piMode) log(DARK_GRAY, `  Pi interface: ${piMode}`);
 
+  // How to run the web stack. Explicit flag wins and is remembered (same
+  // contract as the interface mode); otherwise a console launch gets a visible
+  // window Troy can close, and a no-console launch (extension, automation,
+  // cron) stays detached because nobody is there to close a window.
+  let stackMode;
+  let stackModeChosen = false;
+  if (wantWindowed) {
+    stackMode = 'windowed';
+    stackModeChosen = true;
+  } else if (wantHeadless) {
+    stackMode = 'headless';
+    stackModeChosen = true;
+  } else {
+    stackMode = getSavedStackMode() || (process.stdout.isTTY ? 'windowed' : 'headless');
+  }
+  if (stackModeChosen) patchPiPref({ pi_stack_mode: stackMode });
+
   startGitnexusSync();
 
   // Mode separation: the web stack (pi-web-ui :8787 + auth proxy :4103 +
   // Cloudflare tunnel) is started ONLY for Web mode and --stack-only. TUI mode
   // runs the terminal alone — and never touches a stack that is already up.
   if (stackOnly || piMode === 'web') {
-    startPiStack();
+    log(DARK_GRAY, stackMode === 'windowed'
+      ? '  Web stack: visible window (close it to stop the stack)'
+      : '  Web stack: detached, no window (stop with scripts\\stop-pi-stack.ps1)');
+    startPiStack({ windowed: stackMode === 'windowed' });
     await ensureTunnel(tunnelLog);
     verifyTunnel();
   } else {
@@ -388,19 +447,30 @@ async function main() {
 
   if (stackOnly) {
     log(GREEN, '  Stack-only mode complete.');
+    // Console-only login banner (kept out of data/logs/launch-pi.log).
+    printLoginBanner({ color: true });
     process.exit(0);
   }
 
   if (piMode === 'web') {
     log(GREEN, '  Pi is running in Web mode.');
-    log(CYAN, '  Local:  http://localhost:8787');
-    log(DARK_GRAY, '  Remote: https://pi.cothekdesigns.com  (auth via .server-password)');
-    log(DARK_GRAY, '  Stop it from the web UI (/pi-web-ui:quit) or by killing the :8787 listener.');
+    log(CYAN, `  Local:  http://localhost:8787`);
+    log(DARK_GRAY, `  Remote: https://${tunnelHost()}`);
+    // Login banner goes to the console ONLY - never to data/logs/launch-pi.log,
+    // so the password is not duplicated into another plaintext file.
+    printLoginBanner({ color: true });
+    log(DARK_GRAY, '  (credentials printed above; stored in .server-password)');
+    if (stackMode === 'windowed') {
+      log(DARK_GRAY, '  Stop it by CLOSING the Pi web UI window (Ctrl+C in it also works).');
+    } else {
+      log(DARK_GRAY, '  Stop it: scripts\\stop-pi-stack.ps1   (or /pi-web-ui:quit in the web UI)');
+    }
     log(MAGENTA, '');
     process.exit(0);
   }
 
-  const code = await launchPiCli(args.filter((a) => a !== '--stack-only' && a !== '--tui' && a !== '--web'));
+  const code = await launchPiCli(args.filter((a) =>
+    a !== '--stack-only' && a !== '--tui' && a !== '--web' && a !== '--windowed' && a !== '--headless'));
   log(MAGENTA, '');
   log(MAGENTA, ' Pi session ended.');
   process.exit(code);

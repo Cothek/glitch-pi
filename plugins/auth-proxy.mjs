@@ -24,6 +24,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
 const pwFile = resolve(rootDir, '.server-password');
 
+// Login details printed on startup. The username MUST match
+// scripts/lib/web-auth.mjs (AUTH_USERNAME) - that module is the single source
+// of truth for the banner printed by the launchers. This file stays
+// dependency-free on purpose (node builtins only) so the auth gate can never
+// be taken down by a broken import.
+const USERNAME = 'opencode';
+
+// Public hostname for the login URL (data/cloudflare-domain.txt wins, else the
+// known tunnel host). Local helper on purpose - see note above.
+function tunnelHost() {
+  try {
+    const f = resolve(rootDir, 'data', 'cloudflare-domain.txt');
+    const d = readFileSync(f, 'utf-8').trim();
+    if (d) return d;
+  } catch {}
+  return 'pi.cothekdesigns.com';
+}
+
 let password;
 try {
   password = readFileSync(pwFile, 'utf-8').trim();
@@ -31,7 +49,7 @@ try {
   console.error('Error: .server-password not found at', pwFile);
   process.exit(1);
 }
-const authToken = Buffer.from(`opencode:${password}`).toString('base64');
+const authToken = Buffer.from(`${USERNAME}:${password}`).toString('base64');
 const AUTH_COOKIE = `glitch_auth=${authToken}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`;
 
 const PROXY_PORT = parseInt(process.argv[2] || '4101', 10);
@@ -301,5 +319,11 @@ server.listen(PROXY_PORT, () => {
   console.log(`  /models -> http://localhost:4104`);
   console.log(`  /plugins/glitch-ui/ -> http://localhost:4104`);
   console.log(`  Auth: Basic header | ?auth_token= | glitch_auth cookie`);
-  console.log(`  Password: ${password}`);
+  console.log('');
+  console.log(`  === Pi web UI login ===`);
+  console.log(`   Username:  ${USERNAME}`);
+  console.log(`   Password:  ${password}`);
+  console.log(`   Remote:    https://${tunnelHost()}`);
+  console.log(`   Local:     http://localhost:8787  (no auth needed)`);
+  console.log('');
 });

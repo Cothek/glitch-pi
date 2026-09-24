@@ -21,13 +21,19 @@
  *   4. handle BOTH action names: "agent-switcher:menu" (chip) and legacy
  *      "agent-switcher:switch" (older registered select transitions).
  *
+ * SDK NOTE: the shared SDK must live at client/sdk/ — the host only serves
+ * /plugins/<id>/client/* (a "../sdk" import gets URL-normalized to
+ * /plugins/<id>/sdk/…, falls into the SPA fallback, and comes back as
+ * text/html → the whole module graph fails to load). Plugin-root sdk/ is
+ * kept in place for the Node unit tests (file:// imports are relative there).
+ *
  * Diagnostics: sets window.__agentSwitcherClient = {registered:[...], errors}
  * so a quick browser-console check (`window.__agentSwitcherClient`) proves
  * the bundle ran. The injected <style id="agent-switcher-style"> tag is also
  * a visible marker in the DOM (document.getElementById("agent-switcher-style")).
  */
 
-import { onUiAction } from "../sdk/index.mjs";
+import { onUiAction } from "./sdk/index.mjs";
 
 const ACTION = "agent-switcher:switch";
 const API_BASE = "/plugins-api/agent-switcher";

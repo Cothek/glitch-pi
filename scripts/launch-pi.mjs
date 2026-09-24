@@ -2,10 +2,14 @@
 // launch-pi.mjs — Pi CLI launch path (Plan 2 §11 Phase 4).
 //
 // Sequence (order matters):
-//   1. gitnexus-sync   — detached background index refresh (never blocks)
-//   2. start-pi-stack  — pi-web-ui :8787 + auth-proxy :4103 (skip-if-alive)
-//   3. tunnel ensure   — auto-start cloudflared detached (skip-if-alive), then verify
-//   4. pi              — spawn Pi CLI in glitch-pi workspace
+//   1. interface       — TUI or Web (remembers your last pick; Enter reuses it)
+//   2. gitnexus-sync   — detached background index refresh (never blocks)
+//   3. web stack       — ONLY for Web / --stack-only: pi-web-ui :8787 +
+//                        auth-proxy :4103 (skip-if-alive), then tunnel ensure+verify
+//   4. pi              — spawn Pi CLI in glitch-pi workspace (TUI mode only)
+//
+// Mode separation: TUI = terminal only (no web UI, no tunnel). Web = web UI only
+// (no TUI here) plus its tunnel. A stack that is already running is left as-is.
 //
 // Tunnel verify treats HTTP 401/403 from the auth proxy as SUCCESS (stack is up,
 // Basic auth is guarding it). Network failure / 5xx / no cloudflared = warn but
@@ -112,8 +116,10 @@ function savePiMode(mode) {
     pref.saved_at = new Date().toISOString();
     mkdirSync(dirname(PI_PREF_FILE), { recursive: true });
     writeFileSync(PI_PREF_FILE, JSON.stringify(pref, null, 2), 'utf-8');
-  } catch {
-    // best-effort — saving a preference must never block the launch
+  } catch (e) {
+    // Best-effort — saving a preference must never block the launch. But a
+    // SILENT failure would lose the remembered choice, so surface it instead.
+    log(DARK_GRAY, `  (interface preference not saved: ${e.message || e})`);
   }
 }
 
@@ -345,19 +351,40 @@ async function main() {
   }
 
   // Interface choice: explicit flag > saved preference > interactive menu.
-  // Non-TTY (automation) falls back to the saved choice, then TUI.
+  // The saved pick is written ONLY on a real choice (flag or menu answer) —
+  // non-TTY automation falls back to it without persisting, so a scripted run
+  // can never clobber what the user last selected.
   let piMode = null;
-  if (wantTui) piMode = 'tui';
-  else if (wantWeb) piMode = 'web';
-  else if (process.stdin.isTTY) piMode = await showPiModeMenu(getSavedPiMode());
-  else piMode = getSavedPiMode() || 'tui';
-  savePiMode(piMode);
-  log(DARK_GRAY, `  Pi interface: ${piMode}`);
+  let modeChosen = false;
+  if (stackOnly) {
+    // stack-only: no interface, no prompt, no save
+  } else if (wantTui) {
+    piMode = 'tui';
+    modeChosen = true;
+  } else if (wantWeb) {
+    piMode = 'web';
+    modeChosen = true;
+  } else if (process.stdin.isTTY) {
+    piMode = await showPiModeMenu(getSavedPiMode());
+    modeChosen = true;
+  } else {
+    piMode = getSavedPiMode() || 'tui';
+  }
+  if (modeChosen) savePiMode(piMode);
+  if (piMode) log(DARK_GRAY, `  Pi interface: ${piMode}`);
 
   startGitnexusSync();
-  startPiStack();
-  await ensureTunnel(tunnelLog);
-  verifyTunnel();
+
+  // Mode separation: the web stack (pi-web-ui :8787 + auth proxy :4103 +
+  // Cloudflare tunnel) is started ONLY for Web mode and --stack-only. TUI mode
+  // runs the terminal alone — and never touches a stack that is already up.
+  if (stackOnly || piMode === 'web') {
+    startPiStack();
+    await ensureTunnel(tunnelLog);
+    verifyTunnel();
+  } else {
+    log(DARK_GRAY, '  TUI mode — no web UI, no tunnel (choose Web for remote access)');
+  }
 
   if (stackOnly) {
     log(GREEN, '  Stack-only mode complete.');

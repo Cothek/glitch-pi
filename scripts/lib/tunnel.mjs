@@ -23,6 +23,7 @@ import { existsSync, readFileSync, writeFileSync, openSync, mkdirSync, appendFil
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync, spawn } from 'child_process';
+import net from 'net';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -30,6 +31,35 @@ const __dirname = dirname(__filename);
 // is imported by launch-pi.mjs or run directly as a CLI by the extension.
 const ROOT_DIR = resolve(__dirname, '..', '..');
 const isWin = process.platform === 'win32';
+
+// The auth proxy in front of pi-web-ui. The tunnel is only useful when this
+// is listening (pi.cothekdesigns.com routes here; :4103 fronts :8787).
+const AUTH_PROXY_PORT = 4103;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** True when something accepts a TCP connection on 127.0.0.1:<port>. */
+function isPortListening(port, timeoutMs = 1500) {
+  return new Promise((resolvePromise) => {
+    const sock = net.connect({ host: '127.0.0.1', port });
+    const finish = (value) => {
+      try { sock.destroy(); } catch {}
+      resolvePromise(value);
+    };
+    sock.once('connect', () => finish(true));
+    sock.once('error', () => finish(false));
+    sock.setTimeout(timeoutMs, () => finish(false));
+  });
+}
+
+/** Wait up to <timeoutMs> for a port to start listening (stack start races). */
+async function waitForPort(port, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isPortListening(port)) return true;
+    await sleep(500);
+  }
+  return false;
+}
 
 function run(cmd, args, opts = {}) {
   try {
@@ -106,6 +136,13 @@ export async function ensureTunnel(log = (msg) => console.log(msg)) {
     log('cloudflared already running — leaving tunnel as-is', 'ok');
     return;
   }
+  // The tunnel only makes sense with the web stack up: pi.cothekdesigns.com
+  // routes to the auth proxy (:4103), which fronts pi-web-ui (:8787).
+  // TUI-only sessions run no web stack, so they spawn no tunnel to nowhere.
+  if (!(await waitForPort(AUTH_PROXY_PORT))) {
+    log('web stack not running (auth proxy :4103 down) — tunnel not needed, skipping', 'dim');
+    return;
+  }
   const bin = resolveTunnelAsset(process.env.GLITCH_TUNNEL_BIN, isWin ? 'cloudflared.exe' : 'cloudflared');
   const cfg = resolveTunnelAsset(process.env.GLITCH_TUNNEL_CONFIG, join('config', 'cloudflared-config.yml'));
   if (!bin || !cfg) {
@@ -130,7 +167,6 @@ export async function ensureTunnel(log = (msg) => console.log(msg)) {
     } catch {}
     log(`cloudflared spawned (PID ${child.pid}) — waiting for tunnel...`, 'dim');
     const host = tunnelHost();
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     for (let attempt = 0; attempt < 4; attempt++) {
       await sleep(3000);
       try {

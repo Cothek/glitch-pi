@@ -65,6 +65,28 @@ node --test .pi/web-plugins/agent-models/index.test.mjs
 
 15 tests cover the parser (quoting, BOM, bracketed tools, missing frontmatter), every status branch, the lints, the report counts, and the `/state` route payload.
 
+## Mount contract (learned from the first broken deploy)
+
+The host has **two different plugin-view mount paths**, and knowing which one you are in is the difference between a working panel and a mystery:
+
+| Path | Host class | Used by | Behaviour |
+|---|---|---|---|
+| `Ms` | `.plugin-page` | Settings plugin page, right-panel slot tabs | lazily imports the bundle, renders load/mount errors into a red `.plugin-page-error` box |
+| `nm` | `.plugin-view` | **main-area plugin views** (what a pinned topbar tab opens) | calls `entry.module.mount()` **synchronously from the host's already-loaded module map**, with a bare text fallback if the module is missing or mount throws |
+
+The pinned tab itself is not a right-panel entry. The server auto-injects one hidden UI item per plugin (`id "__view"`, kind `view`, `view "plugin:<id>"`, `hidden: true`); pinning unhides it, which renders a `.tb-tab.plugin-tab` whose click does `setView("plugin:<id>")`.
+
+**The failure mode to avoid:** if the plugin is not in the loaded-modules map when the view is active, the host renders `.plugin-view-fallback` — either "插件视图加载中…" forever (not failed) or "插件视图加载失败" with a Retry button. A permanently "loading" pane is indistinguishable from "this plugin is broken", and it produces **no console error and no server log**, so there is nothing to read.
+
+What this plugin does about it:
+
+1. `preload: true` in the manifest, so the client bundle is loaded at startup rather than only on demand.
+2. `mount()` never throws: the body is wrapped, and any failure renders an in-panel `.am-error` with the real message.
+3. Module-level singleton: a second mount tears the first instance down instead of stacking two panels (a stale fetch cannot render into a destroyed instance either, via a generation counter).
+4. An always-visible diagnostic line at the bottom of the panel: `agent-models vX | mounts N | last <action> @ <time> | fetch ok/fail | agents N`. A future "the page does nothing" report carries its own evidence.
+
+If the pane ever shows the host's "loading" fallback again, the client bundle is not reaching the host's module map. Check in this order: `curl -s -o /dev/null -w "%{http_code} %{content_type}" localhost:8787/plugins/agent-models/client/entry.mjs` (expect 200 + `text/javascript`), then reload the plugin (`plugins_reload`) to bump the epoch and force a re-import, then reload the page.
+
 ## Phase 2 (not built)
 
 An inline model picker that writes the `model:` line back to an agent file. That needs `fs:write`, a frontmatter-preserving rewrite (comments, key order), a backup, and validation against the catalog - deliberately left out of phase 1 so the panel cannot damage the roster it reports on.

@@ -29,8 +29,15 @@ const STYLE_ID = "agent-models-style";
 const MOUNT_LABEL = "agent-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
 const PLUGIN_VERSION = "0.2.0";
-/** How many catalog options to render at once (the catalog has ~500 entries). */
-const PICKER_LIMIT = 60;
+/**
+ * Render cap. Deliberately above any realistic catalog size: the catalog is ~500
+ * entries and these are plain DOM rows, not a virtual list.
+ *
+ * Capping this at 60 is exactly what made the picker look like "commandcode only":
+ * ids sort alphabetically and "commandcode/" sorts before "nvidia/" and
+ * "openrouter/", so the visible window was 59 commandcode models plus one nvidia.
+ */
+const PICKER_LIMIT = 600;
 
 /**
  * Instances keyed by their CONTAINER.
@@ -105,13 +112,18 @@ const STYLE_CSS = `
 .am-picker-input:focus{border-color:var(--accent)}
 .am-picker-head{display:flex;gap:8px;align-items:center;width:100%}
 .am-picker-count{color:var(--text-faint);font-size:11px;flex:none}
+.am-providers{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.am-provider{height:24px;padding:0 8px;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--bg-elev2);color:var(--text-dim);cursor:pointer;font-family:var(--mono, monospace);display:inline-flex;align-items:center}
+.am-provider:hover{border-color:var(--accent);color:var(--text)}
+.am-provider[aria-pressed="true"]{border-color:var(--accent);color:var(--text);background:var(--bg-elev)}
+.am-provider-count{color:var(--text-faint);margin-left:5px}
 .am-option-cost{margin-left:auto;flex:none;color:var(--text-faint);font-size:10.5px;font-family:var(--mono, monospace);padding-left:10px}
 .am-option.am-current .am-option-cost{color:var(--accent)}
 .am-cost{font-family:var(--mono, monospace);font-size:10.5px;color:var(--text-faint);border:1px solid var(--border-soft);border-radius:5px;padding:0 5px;flex:none;margin-left:6px}
 .am-cost.am-free{color:var(--green);border-color:var(--green)}
 .am-cost.am-paid{color:var(--amber);border-color:var(--amber)}
 .am-cost-note{color:var(--text-faint);font-size:10.5px}
-.am-options{max-height:220px;overflow-y:auto;border:1px solid var(--border-soft);border-radius:7px;background:var(--bg);display:flex;flex-direction:column}
+.am-options{max-height:min(72vh,780px);overflow-y:auto;overscroll-behavior:contain;border:1px solid var(--border-soft);border-radius:7px;background:var(--bg);display:flex;flex-direction:column}
 .am-option{text-align:left;background:0 0;border:none;border-bottom:1px solid var(--border-soft);color:var(--text-dim);cursor:pointer;padding:5px 9px;font-size:11.5px;font-family:var(--mono, monospace);display:flex;gap:8px;align-items:center;min-width:0}
 .am-option:last-child{border-bottom:none}
 .am-option:hover{background:var(--bg-elev);color:var(--text)}
@@ -200,6 +212,7 @@ function createInstance(container, ctx) {
 		error: null,
 		loading: true,
 		filter: "all",
+		provider: "all",
 		destroyed: false,
 		generation: 0,
 		timer: null,
@@ -217,6 +230,9 @@ function createInstance(container, ctx) {
 			agentCount: 0,
 		},
 	};
+
+	/** Live option-area nodes of the open picker, so filtering can update in place. */
+	let pickerRefs = null;
 
 	const root = el("div", "am-wrap");
 	container.appendChild(root);
@@ -322,15 +338,15 @@ function createInstance(container, ctx) {
 		const headRow = el("div", "am-picker-head");
 		const input = el("input", "am-picker-input");
 		input.type = "search";
-		input.placeholder = "Search models, or leave empty for the first 60";
+		input.placeholder = "Search all providers (name or provider/name), or filter with the chips below";
 		input.value = state.query;
 		input.setAttribute("data-am-action", "search");
 		input.setAttribute("aria-label", `Model for ${row.name}`);
 		input.addEventListener("input", () => {
+			// Update the option list IN PLACE. A full render() here would rebuild every
+			// row (and steal the caret) on each keystroke.
 			state.query = input.value;
-			const focusBack = true;
-			render();
-			if (focusBack) reopenFocus(row.name);
+			renderOptions();
 		});
 		const count = el("div", "am-picker-count");
 		headRow.append(input, count);
@@ -338,44 +354,40 @@ function createInstance(container, ctx) {
 
 		if (state.pickerError) wrap.appendChild(el("div", "am-picker-err", state.pickerError));
 
-		const options = el("div", "am-options");
-		const catalog = Array.isArray(state.report?.catalog) ? state.report.catalog : [];
-		const q = state.query.trim().toLowerCase();
-		const matches = q ? catalog.filter((m) => m.toLowerCase().includes(q)) : catalog;
-		count.textContent = `${matches.length}${matches.length > PICKER_LIMIT ? ` (showing ${PICKER_LIMIT})` : ""}`;
-
-		const saving = state.saving === row.name;
-		const inheritBtn = el("button", "am-option am-inherit");
-		inheritBtn.type = "button";
-		inheritBtn.disabled = saving;
-		inheritBtn.setAttribute("data-am-option", "__inherit__");
-		inheritBtn.appendChild(el("span", "am-option-label", "Inherit (no pin) - follow the main conversation model"));
-		if (!row.pin) inheritBtn.appendChild(el("span", "am-option-mark", "✓"));
-		inheritBtn.addEventListener("click", () => void applyModel(row.name, ""));
-		options.appendChild(inheritBtn);
-
-		if (!catalog.length) {
-			options.appendChild(el("div", "am-empty-opt", "No model catalog available (no provider keys configured)."));
-		} else if (!matches.length) {
-			options.appendChild(el("div", "am-empty-opt", `No model matches "${state.query}".`));
-		} else {
-			for (const model of matches.slice(0, PICKER_LIMIT)) {
-				const btn = el("button", "am-option");
-				btn.type = "button";
-				btn.disabled = saving;
-				btn.setAttribute("data-am-option", model);
-				if (model === row.pin) btn.className = "am-option am-current";
-				btn.appendChild(el("span", "am-option-label", model));
-				const cost = state.report?.costs?.[model];
-				const costChip = el("span", "am-option-cost", cost?.short ?? "n/a");
-				costChip.setAttribute("data-am-cost", cost?.short ?? "n/a");
-				if (cost?.title) costChip.title = cost.title;
-				btn.appendChild(costChip);
-				if (model === row.pin) btn.appendChild(el("span", "am-option-mark", "✓"));
-				btn.addEventListener("click", () => void applyModel(row.name, model));
-				options.appendChild(btn);
-			}
+		// Provider filter chips. The catalog is sorted by id, so without these the
+		// first screenful is whichever provider sorts first (commandcode/), and the
+		// other providers look like they are missing. With ~500 models, clicking a
+		// provider is faster than typing anyway.
+		const providerRow = el("div", "am-providers");
+		const providerCounts = new Map();
+		for (const id of Array.isArray(state.report?.catalog) ? state.report.catalog : []) {
+			const slash = id.indexOf("/");
+			const name = slash > 0 ? id.slice(0, slash) : "(none)";
+			providerCounts.set(name, (providerCounts.get(name) ?? 0) + 1);
 		}
+		const chips = new Map();
+		const addChip = (id, label, n) => {
+			const chip = el("button", "am-provider");
+			chip.type = "button";
+			chip.setAttribute("aria-pressed", String(id === state.provider));
+			chip.setAttribute("data-am-provider", id);
+			chip.appendChild(el("span", undefined, label));
+			if (typeof n === "number") chip.appendChild(el("span", "am-provider-count", String(n)));
+			chip.addEventListener("click", () => {
+				state.provider = id;
+				renderOptions();
+			});
+			chips.set(id, chip);
+			providerRow.appendChild(chip);
+		};
+		const total = [...providerCounts.values()].reduce((n, c) => n + c, 0);
+		addChip("all", "All", total);
+		for (const [name, n] of [...providerCounts.entries()].sort((a, b) => b[1] - a[1])) addChip(name, name, n);
+		wrap.appendChild(providerRow);
+
+		const options = el("div", "am-options");
+		pickerRefs = { agent: row.name, pin: row.pin ?? null, options, count, providers: chips };
+		renderOptions();
 		wrap.appendChild(options);
 
 		// Say what the numbers mean, and how to fill them in when a provider is silent.
@@ -390,10 +402,65 @@ function createInstance(container, ctx) {
 			),
 		);
 
-		if (saving) wrap.appendChild(el("div", "am-note", `saving ${row.name}...`));
+		if (state.saving === row.name) wrap.appendChild(el("div", "am-note", `saving ${row.name}...`));
 		const hint = el("div", "am-note", "Click a model to apply it. The file is edited in place and backed up first. Escape closes.");
 		wrap.appendChild(hint);
 		return wrap;
+	}
+
+	/**
+	 * Fill the option area: called when the picker opens, on every keystroke, and on a
+	 * provider switch. Kept separate from render() so typing does not rebuild the panel.
+	 */
+	function renderOptions() {
+		const refs = pickerRefs;
+		if (!refs || state.destroyed) return;
+		const catalog = Array.isArray(state.report?.catalog) ? state.report.catalog : [];
+		const q = state.query.trim().toLowerCase();
+		let matches = catalog;
+		if (state.provider !== "all") matches = matches.filter((m) => m.startsWith(`${state.provider}/`));
+		if (q) matches = matches.filter((m) => m.toLowerCase().includes(q));
+
+		refs.count.textContent = `${matches.length}${matches.length > PICKER_LIMIT ? ` (showing ${PICKER_LIMIT})` : ""}`;
+		for (const [id, chip] of refs.providers) chip.setAttribute("aria-pressed", String(id === state.provider));
+
+		const saving = state.saving === refs.agent;
+		refs.options.textContent = "";
+
+		const inheritBtn = el("button", "am-option am-inherit");
+		inheritBtn.type = "button";
+		inheritBtn.disabled = saving;
+		inheritBtn.setAttribute("data-am-option", "__inherit__");
+		inheritBtn.appendChild(el("span", "am-option-label", "Inherit (no pin) - follow the main conversation model"));
+		if (!refs.pin) inheritBtn.appendChild(el("span", "am-option-mark", "✓"));
+		inheritBtn.addEventListener("click", () => void applyModel(refs.agent, ""));
+		refs.options.appendChild(inheritBtn);
+
+		if (!catalog.length) {
+			refs.options.appendChild(el("div", "am-empty-opt", "No model catalog available (no provider keys configured)."));
+			return;
+		}
+		if (!matches.length) {
+			const where = state.provider !== "all" ? ` in ${state.provider}` : "";
+			refs.options.appendChild(el("div", "am-empty-opt", `No model matches "${state.query}"${where}.`));
+			return;
+		}
+		for (const model of matches.slice(0, PICKER_LIMIT)) {
+			const btn = el("button", "am-option");
+			btn.type = "button";
+			btn.disabled = saving;
+			btn.setAttribute("data-am-option", model);
+			if (model === refs.pin) btn.className = "am-option am-current";
+			btn.appendChild(el("span", "am-option-label", model));
+			const cost = state.report?.costs?.[model];
+			const costChip = el("span", "am-option-cost", cost?.short ?? "n/a");
+			costChip.setAttribute("data-am-cost", cost?.short ?? "n/a");
+			if (cost?.title) costChip.title = cost.title;
+			btn.appendChild(costChip);
+			if (model === refs.pin) btn.appendChild(el("span", "am-option-mark", "✓"));
+			btn.addEventListener("click", () => void applyModel(refs.agent, model));
+			refs.options.appendChild(btn);
+		}
 	}
 
 	/** Put the caret back in the picker's search box after a re-render. */
@@ -481,6 +548,9 @@ function createInstance(container, ctx) {
 
 	function render() {
 		if (state.destroyed) return;
+		// Every full render rebuilds the open picker (or closes it), so the cached
+		// option nodes must be re-pointed in pickerNode() or dropped entirely.
+		pickerRefs = null;
 		try {
 			for (const [id, btn] of filterButtons) btn.setAttribute("aria-pressed", String(id === state.filter));
 			list.textContent = "";

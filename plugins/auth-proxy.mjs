@@ -324,6 +324,8 @@ server.listen(PROXY_PORT, () => {
   console.log(`   Username:  ${USERNAME}`);
   console.log(`   Password:  ${password}`);
   console.log(`   Remote:    https://${tunnelHost()}`);
-  console.log(`   Local:     http://localhost:8787  (no auth needed)`);
+  // Local URL = our actual upstream (argv[3]), not a hardcoded port - the proxy
+  // is also started on alternate ports by scripts\pi-stack-window.ps1.
+  console.log(`   Local:     ${UPSTREAM_URL.replace(/\/$/, '')}  (no auth needed)`);
   console.log('');
 });

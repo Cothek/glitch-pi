@@ -47,7 +47,7 @@ function Test-Port([int]$Port) {
     [bool](netstat -ano | Select-String ":$Port\s" | Select-String "LISTENING")
 }
 
-try { $Host.UI.RawUI.WindowTitle = "Glitch Pi Web UI :$WebPort - CLOSE THIS WINDOW TO STOP" } catch {}
+try { $Host.UI.RawUI.WindowTitle = "Glitch Pi Web UI :$WebPort (user: opencode) - CLOSE THIS WINDOW TO STOP" } catch {}
 
 Write-Host ""
 Write-Host " ============================================================"
@@ -55,6 +55,7 @@ Write-Host "  Glitch Pi Web UI - this window IS the web UI server"
 Write-Host " ============================================================"
 Write-Host "   web UI     : http://localhost:$WebPort"
 Write-Host "   auth proxy : localhost:$AuthPort -> localhost:$WebPort"
+Write-Host "   login      : username 'opencode' + the password below"
 Write-Host ""
 Write-Host "   Close this window (or press Ctrl+C) to STOP the stack."
 Write-Host ""

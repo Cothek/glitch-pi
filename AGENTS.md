@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **glitch-pi** (4981 symbols, 8162 relationships, 275 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **glitch-pi**. Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -42,3 +42,11 @@ This project is indexed by GitNexus as **glitch-pi** (4981 symbols, 8162 relatio
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Local GitNexus notes (hand-written, outside the generated block, preserved by analyze)
+
+- **Volatile counts are disabled.** `.gitnexusrc` sets `stats: false`, so the block above never carries symbol/edge/flow counts (they churned on every changed-index run). Current counts live in `.gitnexus/meta.json` and the MCP `context` resource. Do not hand-count them back into the block.
+- **FTS is unavailable on this machine.** The LadybugDB FTS extension INSTALLs but `LOAD fts` fails, so analyze skips search-index creation. That is the SAFE state: graph tools (impact/context/detect_changes/query) and BM25-free queries work, only full-text search degrades. Do NOT run `analyze --repair-fts` while LOAD fails: a DB carrying FTS indexes cannot be written incrementally, and the next analyze dies with `COPY failed for File: ... its extension is not loaded`. To re-enable later: unset `GITNEXUS_LBUG_EXTENSION_INSTALL`, confirm analyze/doctor reports FTS usable, then repair.
+- **Analyze policy is pinned** to `GITNEXUS_LBUG_EXTENSION_INSTALL=never` (user env var) so runs are offline, deterministic and cannot create FTS indexes.
+- **A failed analyze self-heals.** It sets `incrementalInProgress`; the next run detects that and forces a full rebuild (~20s) that restores a known-good index. Just re-run it.
+- **`CLAUDE.md` is deleted and gitignored.** Analyze regenerates it for Claude Code, which this repo does not use; it may reappear on disk after a changed-index run. Expected, not a regression.

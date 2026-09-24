@@ -90,7 +90,19 @@ const STYLE_CSS = `
 .am-btn.am-primary{border-color:var(--accent);color:var(--text)}
 .am-filters{display:flex;gap:6px;flex-wrap:wrap}
 .am-list{display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;min-height:0}
-.am-row{border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2);display:flex;flex-direction:column;overflow:hidden}
+/**
+ * flex:none is THE property that prevents "expanding one card squashes the others":
+ * the rows sit in a flex column whose box (flex:1;min-height:0) has a fixed height,
+ * and with the default flex-shrink:1 the container DISTRIBUTES the deficit across
+ * every item instead of scrolling - a 770px expanded row gets allocated ~390px and
+ * clips its own picker (the row is overflow:hidden for the rounded corners), while
+ * the other rows squish and the list never scrolls because scrollHeight never
+ * exceeds clientHeight. Measured live: rowFlexShrink "1", list scrollHeight ===
+ * clientHeight, options box bottom 87px past the list bottom. With flex:none the
+ * items keep their natural height and the container does what overflow-y:auto is
+ * there for: scroll.
+ */
+.am-row{border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2);display:flex;flex-direction:column;overflow:hidden;flex:none}
 .am-row.am-open{border-color:var(--accent)}
 .am-row-toggle{display:flex;flex-direction:column;gap:3px;text-align:left;width:100%;padding:8px 10px;margin:0;box-sizing:border-box;background:0 0;border:none;color:var(--text);font:inherit;cursor:pointer}
 .am-row-toggle:hover{background:var(--bg-elev)}

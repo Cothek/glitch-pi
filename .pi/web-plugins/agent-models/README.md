@@ -82,11 +82,41 @@ What this plugin does about it:
 
 1. `preload: true` in the manifest, so the client bundle is loaded at startup rather than only on demand.
 2. `mount()` never throws: the body is wrapped, and any failure renders an in-panel `.am-error` with the real message.
-3. Module-level singleton: a second mount tears the first instance down instead of stacking two panels (a stale fetch cannot render into a destroyed instance either, via a generation counter).
-4. An always-visible diagnostic line at the bottom of the panel: `agent-models vX | mounts N | last <action> @ <time> | fetch ok/fail | agents N`. A future "the page does nothing" report carries its own evidence.
+3. **One instance per CONTAINER** (a WeakMap keyed by the container element), not a module-level singleton. This matters: the host mounts the same module in more than one place (main view pane, Settings plugin page, right-panel slot tabs), and a global singleton made the second mount tear the first one down - which can empty the very pane the user is looking at. Only a repeat mount in the *same* container replaces the previous instance.
+4. A stale fetch cannot render into a destroyed instance (generation counter).
+5. An always-visible diagnostic line: `agent-models vX | mounts N | visible|hidden|detached | last <action> @ <time> | fetch ok/fail | write <agent> @ <time> | agents N`. The visibility field is deliberate: a panel can be mounted, connected and fetching while sitting in a hidden pane, which looks exactly like a dead page.
 
 If the pane ever shows the host's "loading" fallback again, the client bundle is not reaching the host's module map. Check in this order: `curl -s -o /dev/null -w "%{http_code} %{content_type}" localhost:8787/plugins/agent-models/client/entry.mjs` (expect 200 + `text/javascript`), then reload the plugin (`plugins_reload`) to bump the epoch and force a re-import, then reload the page.
 
-## Phase 2 (not built)
+### Two traps worth remembering
 
-An inline model picker that writes the `model:` line back to an agent file. That needs `fs:write`, a frontmatter-preserving rewrite (comments, key order), a backup, and validation against the catalog - deliberately left out of phase 1 so the panel cannot damage the roster it reports on.
+- **A hidden pane answers reads but cannot be clicked.** The host renders one pane per plugin and hides the inactive ones. Elements in a hidden pane are still in the DOM (so a `querySelector` finds them) but measure 0x0, and clicking them does nothing visible. Address a row only after confirming the view is active; the diag line's `visible` field says which state you are in.
+- **The Change button TOGGLES.** Clicking it while a picker is already open closes it. A verifying script that clicks and then looks for the picker will report "picker did not open" and be wrong - the opened picker was just closed. Check for an existing picker first, and only click when there is none.
+- **Nested server-side imports are cached by the Node ESM loader.** The host cache-busts the plugin ENTRY on every reload, but a static `import "./resolver.mjs"` keeps the old module for the life of the process, so adding an export produced `does not provide an export named 'setModelInFrontmatter'` on a perfectly good file. `index.mjs` imports its helper through a per-activation nonce URL for this reason.
+
+## Changing a model (write path)
+
+The panel can set a model per agent, because that was the whole point of the exercise. Each row has a **Change** button that opens an inline picker: a search box plus the model catalog (grouped by nothing, just `provider/model` ids, searchable, 60 shown at a time), with **Inherit (no pin)** always first. Clicking a model applies it immediately.
+
+Safety, in order:
+
+1. The agent name must match a file actually discovered in `.pi/agents` (and must match `^[A-Za-z0-9._-]+$`), so no path traversal and no invented agents.
+2. The model must exist in the live catalog (`host.models.list()`, the same 507 authenticated models the panel reports). An unknown pin would silently fall back to the main model, which is the exact failure this plugin exists to expose - so it is refused rather than written.
+3. The file is backed up to `.pi/agent-models/backups/<agent>-<ISO>.md` (workspace-relative on purpose: a cross-directory write would need a separate user directory grant) BEFORE the first byte changes.
+4. `setModelInFrontmatter()` rewrites only the `model:` line. Comments, key order, blank lines, the body, the BOM and the file's own line endings all survive. Picking **Inherit** removes the line.
+
+`POST /plugins-api/agent-models/set-model` accepts `{ agent, model }` (`model: null` = inherit) and returns `{ ok, agent, model, previous, changed, reason, backup, report }`, where `report` is the refreshed roster so the UI updates in one round trip. The manifest therefore requests `fs:write`; the plugin could not write a byte without it.
+
+## Verified end to end (2026-09-24)
+
+Driven through the real UI in the running web UI, not from curl:
+
+- opened the Agent Models view, clicked **Change** on `reviewer`, picker rendered (61 options), searched, clicked `commandcode/z-ai/glm-5.3-flash`
+- row flipped `DEAD PIN` -> `OK`, counts went `2 ok / 6 dead` -> `3 ok / 5 dead`, panel showed `saved: opencode/mimo-v2.5-free -> commandcode/z-ai/glm-5.3-flash | backup reviewer-2026-09-24T21-42-30-602Z.md`
+- diag line recorded `last set-model:reviewer` and `write reviewer @ 4:42:30 PM`
+- on disk: `.pi/agents/reviewer.md` line 5 = `model: commandcode/z-ai/glm-5.3-flash` (everything else untouched), and `.pi/agent-models/backups/reviewer-2026-09-24T21-42-30-602Z.md` holds the original `opencode/mimo-v2.5-free`
+- `node scripts/agent-models.mjs` agrees: `3 pinned OK | 5 dead pins | 0 unresolved | 2 inherit`
+
+## Not built
+
+Bulk actions (repin every dead pin in one go) and a provider/key editor. The picker covers one agent at a time by design.

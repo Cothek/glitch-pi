@@ -17,17 +17,40 @@
  *
  * SURFACES
  *   1. right-panel tab (manifest "view": true) -> client fetches GET /state
- *   2. GET /plugins-api/agent-models/state -> JSON report
- *   3. /agent-models slash command -> same table as text, no browser needed
+ *   2. GET  /plugins-api/agent-models/state     -> JSON report (incl. the catalog)
+ *   3. POST /plugins-api/agent-models/set-model -> rewrite one agent's model pin
+ *   4. /agent-models slash command -> same table as text, no browser needed
  *
- * READ-ONLY BY CONSTRUCTION: the manifest does not request fs:write, so this
- * plugin cannot modify an agent file even by accident.
+ * WRITE PATH SAFETY (POST /set-model): the agent name is validated against the
+ * files actually discovered in .pi/agents (never interpolated blindly), the
+ * requested model must exist in the live catalog or be an explicit "inherit",
+ * the file is backed up before the first byte changes, and the edit itself only
+ * rewrites the `model:` line so comments and key order survive untouched.
  */
 
 import { definePlugin } from "./sdk/index.mjs";
-import { buildReport, formatReportTable, parseAgentFile } from "./resolver.mjs";
+
+/**
+ * NESTED-IMPORT CACHE (found the hard way, live): the host re-imports THIS entry
+ * with a cache-busting query on every reload, but nested relative imports are
+ * cached by the Node ESM loader for the life of the process. After adding an
+ * export to resolver.mjs, the re-activated plugin kept the OLD module and died
+ * with "does not provide an export named 'setModelInFrontmatter'" - a plugin that
+ * then shows up as failed in the UI while the file on disk looks perfect.
+ *
+ * So nested imports are cache-busted here too, with a per-activation nonce.
+ * Trade-off: the loader keeps one small extra copy of resolver.mjs per activation
+ * (a few hundred bytes, a pure function module). Correctness over micro-efficiency:
+ * a fixed version tag would rot the moment someone edits a helper without bumping it.
+ */
+const IMPORT_TAG = `${Date.now().toString(36)}`;
+const resolver = await import(new URL(`./resolver.mjs?v=${IMPORT_TAG}`, import.meta.url).href);
+const { buildReport, formatReportTable, parseAgentFile, setModelInFrontmatter } = resolver;
 
 const AGENTS_DIR = ".pi/agents";
+/** Backups live INSIDE the workspace on purpose: cross-directory writes would
+ *  need a separate user directory grant, workspace writes do not. */
+const BACKUP_DIR = ".pi/agent-models/backups";
 /** Report cache: cheap to rebuild, but /state is polled by the tab. */
 const STATE_TTL_MS = 5000;
 
@@ -84,6 +107,8 @@ export default definePlugin({
 			);
 			report.agentsDir = AGENTS_DIR;
 			report.unreadable = unreadable;
+			// The picker needs the full list; 500-odd ids is a small payload locally.
+			report.catalog = [...catalog].sort();
 			return report;
 		}
 
@@ -106,6 +131,70 @@ export default definePlugin({
 					const url = new URL(String(req?.url ?? "/"), "http://localhost");
 					const force = url.searchParams.has("refresh");
 					json(res, 200, { ok: true, ...(await state(force)) });
+				} catch (err) {
+					json(res, 500, { ok: false, error: err?.message ?? String(err) });
+				}
+			}),
+		);
+
+		/**
+		 * Write path. The host mounts plugin routes behind express.json(), so the body
+		 * is ALREADY parsed and the stream consumed - use req.body, never req.on('data')
+		 * (which hangs forever; the host's mount point even warns about it).
+		 */
+		cleanup.push(
+			host.route("POST", "/set-model", async (req, res) => {
+				try {
+					const body = req && typeof req.body === "object" && req.body !== null ? req.body : {};
+					const agent = String(body.agent ?? "").trim();
+					const model = body.model === null || body.model === undefined ? "" : String(body.model).trim();
+
+					if (!/^[A-Za-z0-9._-]+$/.test(agent)) {
+						return json(res, 400, { ok: false, error: `invalid agent name: ${JSON.stringify(agent)}` });
+					}
+					// Validate against the discovered files, never interpolate blindly.
+					const files = await listAgentFiles(host);
+					if (!files.includes(`${agent}.md`)) {
+						return json(res, 404, { ok: false, error: `unknown agent: ${agent}` });
+					}
+
+					const catalog = await readCatalog(host);
+					if (model && !catalog.has(model)) {
+						return json(res, 400, {
+							ok: false,
+							error: `not an available model: ${model} (catalog has ${catalog.size}; an unknown pin would silently fall back to the main model)`,
+						});
+					}
+
+					const file = `${AGENTS_DIR}/${agent}.md`;
+					const before = await host.fs.readText(file);
+					const edit = setModelInFrontmatter(before, model || null);
+					if (!edit.ok) return json(res, 400, { ok: false, error: edit.reason });
+
+					let backup = null;
+					if (edit.changed) {
+						const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+						backup = `${BACKUP_DIR}/${agent}-${stamp}.md`;
+						try {
+							await host.fs.mkdir(BACKUP_DIR);
+						} catch {
+							/* already there */
+						}
+						await host.fs.write(backup, before);
+						await host.fs.write(file, edit.text);
+						host.log(`set ${agent} model -> ${model || "(inherit)"} (was ${edit.previous ?? "none"}); backup ${backup}`);
+					}
+
+					json(res, 200, {
+						ok: true,
+						agent,
+						model: model || null,
+						previous: edit.previous,
+						changed: edit.changed,
+						reason: edit.reason,
+						backup,
+						report: await state(true),
+					});
 				} catch (err) {
 					json(res, 500, { ok: false, error: err?.message ?? String(err) });
 				}

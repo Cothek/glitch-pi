@@ -1,10 +1,10 @@
 {
 	"id": "agent-models",
 	"name": "Agent Models",
-	"version": "0.1.1",
-	"description": "Per-agent model assignments for .pi/agents/*.md: pinned model, effective model, and whether the pin actually resolves (dead opencode/* pins and unresolvable pins fall back to the main conversation model silently).",
+	"version": "0.2.0",
+	"description": "Per-agent model assignments for .pi/agents/*.md: see the pinned model, the effective model, whether the pin actually resolves, and change it. Every write is validated against the live model catalog and backed up first.",
 	"apiVersion": 2,
-	"permissions": ["ui", "fs:read", "http"],
+	"permissions": ["ui", "fs:read", "fs:write", "http"],
 	"view": true,
 	"preload": true
 }

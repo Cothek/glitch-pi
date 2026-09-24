@@ -231,6 +231,74 @@ export function buildReport(agents, catalogIds, catalogSource = "unknown") {
 	return { rows, counts, catalogSize: catalog.size, catalogSource, generatedAt: new Date().toISOString() };
 }
 
+/**
+ * Rewrite the `model:` line inside an agent file's frontmatter.
+ *
+ * PRESERVES EVERYTHING ELSE BYTE-FOR-BYTE: comments, key order, blank lines, the
+ * body, the BOM and the file's own line endings. This is deliberately NOT a YAML
+ * re-serialisation: re-emitting the frontmatter would reorder keys, drop comments
+ * and requote strings, producing a big meaningless diff in a file a human
+ * maintains by hand.
+ *
+ * model === null | "" -> remove the pin (the agent inherits the main model).
+ * Returns { ok, text, changed, previous, reason } and never throws.
+ */
+export function setModelInFrontmatter(rawText, model) {
+	const text = String(rawText ?? "");
+	if (!text.trim()) return { ok: false, changed: false, previous: null, text, reason: "empty file" };
+	const bom = text.charCodeAt(0) === 0xfeff ? "\uFEFF" : "";
+	const body = bom ? text.slice(1) : text;
+	if (!body.startsWith("---")) {
+		return {
+			ok: false,
+			changed: false,
+			previous: null,
+			text,
+			reason: "no frontmatter block (the dispatcher needs name + description there anyway)",
+		};
+	}
+	const eol = body.includes("\r\n") ? "\r\n" : "\n";
+	const lines = body.split(/\r?\n/);
+
+	let end = -1;
+	for (let i = 1; i < lines.length; i++) {
+		if (lines[i].trim() === "---") {
+			end = i;
+			break;
+		}
+	}
+	if (end === -1) return { ok: false, changed: false, previous: null, text, reason: "unterminated frontmatter" };
+
+	const wanted = typeof model === "string" && model.trim() ? model.trim() : null;
+	let previous = null;
+	let modelIndex = -1;
+	for (let i = 1; i < end; i++) {
+		const m = /^(\s*)model\s*:\s*(.*)$/.exec(lines[i]);
+		if (!m) continue;
+		modelIndex = i;
+		previous = unquote(m[2]) || null;
+		break;
+	}
+
+	if (modelIndex === -1) {
+		if (!wanted) {
+			return { ok: true, changed: false, previous: null, text, reason: "this agent has no pin to remove" };
+		}
+		// Insert as the last key of the block, before any trailing blank lines.
+		let insertAt = end;
+		while (insertAt > 1 && lines[insertAt - 1].trim() === "") insertAt--;
+		lines.splice(insertAt, 0, `model: ${wanted}`);
+	} else if (!wanted) {
+		lines.splice(modelIndex, 1);
+	} else if (previous === wanted) {
+		return { ok: true, changed: false, previous, text, reason: "already pinned to that model" };
+	} else {
+		lines[modelIndex] = `model: ${wanted}`;
+	}
+
+	return { ok: true, changed: true, previous, text: bom + lines.join(eol), reason: null };
+}
+
 /** Fixed-width text table for the CLI and the `/agent-models` slash command. */
 export function formatReportTable(report) {
 	const header = ["AGENT", "PINNED MODEL", "EFFECTIVE", "STATUS", "NOTE"];

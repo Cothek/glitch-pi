@@ -5,6 +5,8 @@
     "+.pi/extensions/routing.ts",
     "+.pi/extensions/agent-switcher.ts",
     "+.pi/extensions/dispatcher.ts",
-    "+.pi/extensions/memory-tools.ts"
+    "+.pi/extensions/memory-tools.ts",
+    "+.pi/extensions/nvidia-model-sync.ts",
+    "+.pi/extensions/tunnel-keeper.ts"
   ]
 }

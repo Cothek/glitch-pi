@@ -3,6 +3,7 @@
     "+.pi/extensions/mulahazah.ts",
     "+.pi/extensions/stuck-detector.ts",
     "+.pi/extensions/routing.ts",
+    "+.pi/extensions/agent-switcher.ts",
     "+.pi/extensions/dispatcher.ts",
     "+.pi/extensions/memory-tools.ts"
   ]

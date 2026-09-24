@@ -76,7 +76,7 @@ node glitch-memorycore/plugins/embed-search/search-memory.mjs -q "<your query>" 
 
 **GitNexus Code Graph (If Available)** — `query` (intent), `context` (symbol), `impact` (blast radius), `detect_changes` (diff), `rename` (coordinated rename).
 
-**Agent Mode Switching** — `node scripts/switch-agent.mjs --status` lists modes; `node scripts/switch-agent.mjs glitch` switches back to the dispatch-first primary. Mode marker: `user/agent-mode.json` (read by routing.ts for gate behavior). Restart required to apply.
+**Agent Mode Switching** — `/agent` switches the primary agent mid-session (no restart): `/agent glitch` = dispatch-first primary, `/agent glitch-omni` = direct execution (this mode), `/agent glitch-lightweight` = small-context local models. `Ctrl+Shift+A` cycles modes. Mode marker: `user/agent-mode.json` (re-read by routing.ts per call, so gates follow immediately). Offline fallback: `node scripts/switch-agent.mjs <mode>` + restart. Profile knobs (model / thinking / tools / memoryContext) live in `.pi/agent-profiles/*.md` frontmatter.
 
 ## Pi Notes (Omni)
 - Skills live in `.pi/skills/` (65 skills). Load on demand via progressive disclosure (description first, full SKILL.md on activation).

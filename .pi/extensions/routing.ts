@@ -30,7 +30,9 @@
  *   - Dispatcher-spawned sub-agents (GLITCH_SUBAGENT=1) skip the primary's
  *     gates — matches the OpenCode design where sub-agents ran plugin-free.
  *   - Primary glitch-omni mode (user/agent-mode.json "mode": "glitch-omni")
- *     gets warn-only gates, same as the omni sub-agent.
+ *     gets warn-only dispatch gates, same as the omni sub-agent. The mode
+ *     file is re-read on every gated call, so mid-session switches via the
+ *     /agent extension (agent-switcher.ts) apply immediately.
  *
  * REVIEW PASS MARKER
  *   On reviewer task result with PASS verdict → run scripts/write-review-pass.mjs
@@ -65,7 +67,8 @@ const AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const DISPATCH_WINDOW_MS = 120_000; // 120s
 
-// --- Primary agent mode (set by scripts/switch-agent.mjs, read at load) ---
+// --- Primary agent mode (user/agent-mode.json, re-read per call so mid-session
+// switches via the /agent extension take effect immediately) ---
 function readAgentMode(): string {
   try {
     if (!existsSync(AGENT_MODE_PATH)) return "glitch";
@@ -77,8 +80,9 @@ function readAgentMode(): string {
   } catch { /* ignore */ }
   return "glitch";
 }
-const AGENT_MODE = readAgentMode();
-const isOmniPrimary = AGENT_MODE === "glitch-omni";
+function isOmniPrimaryMode(): boolean {
+  return readAgentMode() === "glitch-omni";
+}
 
 // --- Detection sets (verbatim from OpenCode plugins) ---
 
@@ -303,7 +307,7 @@ export default function (pi: ExtensionAPI) {
         if (process.env.GLITCH_SUBAGENT === "1") return undefined;
 
         const agentName = extractAgentName((event as any).input);
-        const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimary;
+        const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimaryMode();
 
         // --- dispatch tracking on task-like custom tools ---
         if (event.toolName === "task" || event.toolName === "dispatch") {

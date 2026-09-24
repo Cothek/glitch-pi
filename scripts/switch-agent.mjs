@@ -9,6 +9,10 @@
 // Takes effect on the NEXT session start (Pi fixes the system prompt at
 // startup — no mid-session hot swap).
 //
+// MID-SESSION SWITCHING: use the /agent extension (agent-switcher.ts) inside
+// a live Pi session instead — no restart needed. This script remains the
+// offline/fallback path.
+//
 // Usage: node scripts/switch-agent.mjs <glitch|glitch-omni|glitch-lightweight> [--status]
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
@@ -76,6 +80,7 @@ function showStatus() {
   }
   log(DARK_GRAY, '');
   log(DARK_GRAY, '  Switch: node scripts/switch-agent.mjs <mode>');
+  log(DARK_GRAY, '  Mid-session: /agent <mode> (no restart — see agent-switcher.ts).');
   log(DARK_GRAY, '  Restart Pi to apply (system prompt is fixed per session).');
   log('');
 }
@@ -107,7 +112,7 @@ function switchMode(modeId) {
   });
 
   log(GREEN, `Switched primary agent mode: ${prev} -> ${mode.id}`);
-  log(YELLOW, 'Restart Pi (or re-run launch-glitch.bat) to apply.');
+  log(YELLOW, 'Restart Pi (or re-run launch-glitch.bat) to apply — or use /agent inside a live session.');
   log('');
 }
 

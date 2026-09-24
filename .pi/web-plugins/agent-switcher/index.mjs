@@ -148,6 +148,13 @@ export default definePlugin({
 				action: ACTION_MENU,
 				hint: "Switch the primary agent mode",
 			});
+			// Diagnostic: what does the host say it now holds for this plugin?
+			try {
+				const listed = (host.ui.list?.().items ?? []).map((i) => `${i.id}@${i.slot}:${i.kind}`);
+				host.log(`ui.register -> ${typeof unregisterUi}; host holds [${listed.join(", ")}]`);
+			} catch (err) {
+				host.log("warn", `ui.list probe failed: ${err?.message ?? err}`);
+			}
 		}
 
 		/** Keep the composer button label in sync with the marker. */
@@ -229,6 +236,18 @@ export default definePlugin({
 			host.route("GET", "/state", async (_req, res) => {
 				try {
 					json(res, 200, { modes, current: await readCurrent(host) });
+				} catch (err) {
+					json(res, 500, { ok: false, error: err?.message ?? String(err) });
+				}
+			}),
+		);
+		// Diagnostic + repair: re-run discovery/registration and report what the host holds.
+		cleanup.push(
+			host.route("GET", "/resync", async (_req, res) => {
+				try {
+					await sync();
+					const listed = (host.ui.list?.().items ?? []).map((i) => `${i.id}@${i.slot}:${i.kind}`);
+					json(res, 200, { ok: true, modes: modes.map((m) => m.id), uiItems: listed });
 				} catch (err) {
 					json(res, 500, { ok: false, error: err?.message ?? String(err) });
 				}

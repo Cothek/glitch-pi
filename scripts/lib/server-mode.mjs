@@ -635,6 +635,18 @@ export async function launchServer(options = {}) {
     return join(ROOT_DIR, 'handy-voice', 'Handy.AppImage');
   })();
   const PW_FILE = options.PwFile || join(ROOT_DIR, '.server-password');
+  // Login username follows .server-username (default 'opencode'), the same rule
+  // plugins/auth-proxy.mjs and scripts/lib/web-auth.mjs resolve. A missing file
+  // is not an error, so existing installs are byte-identical.
+  const USER_FILE = options.UserFile || join(ROOT_DIR, '.server-username');
+  const serverModeUsername = () => {
+    try {
+      const u = readFileSync(USER_FILE, 'utf-8').trim();
+      return u || 'opencode';
+    } catch {
+      return 'opencode';
+    }
+  };
   const AUTH_PROXY = options.AuthProxyPath || join(ROOT_DIR, 'plugins', 'auth-proxy.mjs');
   const FIX_PATHS = options.FixPathsMjs || join(ROOT_DIR, 'scripts', 'fix-paths.mjs');
   const SETUP_TUNNEL_SCRIPT = join(ROOT_DIR, 'scripts', isWin ? 'setup-tunnel.ps1' : 'setup-tunnel.sh');
@@ -1040,7 +1052,7 @@ export async function launchServer(options = {}) {
     process.env.OPENCODE_SERVER_PASSWORD = pw;
   }
 
-  const authToken = Buffer.from(`opencode:${pw}`).toString('base64');
+  const authToken = Buffer.from(`${serverModeUsername()}:${pw}`).toString('base64');
 
   // ---- Project-pinned URL (SPA decodes base64url slug) ----
   const projectDir = process.env.GLITCH_PROJECT_DIR || ROOT_DIR;

@@ -22,6 +22,9 @@ Thumbs.db
 # Auto-generated server password
 .server-password
 
+# Optional login username (absent = the 'opencode' default)
+.server-username
+
 # Auto-generated config (written by launch scripts from templates)
 opencode.json
 

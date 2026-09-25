@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const SERVER_PASSWORD_FILE = join(REPO_ROOT, '.server-password');
+const SERVER_USERNAME_FILE = join(REPO_ROOT, '.server-username');
 
 const DEFAULT_DB = join(homedir(), '.local', 'share', 'opencode', 'opencode.db');
 const DEFAULT_BASE_URL = 'http://localhost:4102';
@@ -36,7 +37,15 @@ function getServerPassword() {
 }
 
 function buildAuthHeader(password) {
-  const token = Buffer.from(`opencode:${password}`).toString('base64');
+  // The username follows .server-username too (default 'opencode'), the same rule
+  // plugins/auth-proxy.mjs and scripts/lib/web-auth.mjs resolve. Hardcoding it
+  // would 401 here the moment the login username changes.
+  let username = 'opencode';
+  try {
+    const u = readFileSync(SERVER_USERNAME_FILE, 'utf-8').trim();
+    if (u) username = u;
+  } catch {}
+  const token = Buffer.from(`${username}:${password}`).toString('base64');
   return `Basic ${token}`;
 }
 

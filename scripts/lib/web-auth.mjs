@@ -2,25 +2,36 @@
 // scripts/lib/web-auth.mjs - single source of truth for Pi web UI login info.
 //
 // The Pi web UI (pi-web-ui :8787) is gated by plugins/auth-proxy.mjs (:4103),
-// which enforces HTTP Basic auth: username AUTH_USERNAME, password = the
-// trimmed contents of .server-password (repo root, gitignored).
+// which enforces HTTP Basic auth: username = the trimmed contents of
+// .server-username, password = the trimmed contents of .server-password (both
+// repo root, gitignored, both optional - see below).
 //
 // IMPORTANT: plugins/auth-proxy.mjs deliberately does NOT import this module.
 // The auth gate stays dependency-free (node builtins only) so a broken import
-// can never take remote login down. If you change AUTH_USERNAME here, change
-// it in plugins/auth-proxy.mjs too - the two MUST match or auth breaks.
+// can never take remote login down. It resolves the SAME two files with its own
+// local readers (mirroring its local tunnelHost() copy), so the two agree
+// without sharing code. Change the resolution rules here and change them there.
+//
+// Both credential files are OPTIONAL. Missing .server-username means the
+// AUTH_USERNAME default; missing .server-password is an error in the gate (no
+// login possible). That keeps an existing install byte-identical: no file, no
+// change, and existing cookies keep working.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+/** Default username, used when .server-username is absent. */
 export const AUTH_USERNAME = 'opencode';
+
 // Port overrides exist for alternate-port test runs (scripts\pi-stack-window.ps1
 // exports them). Display only - the token itself never depends on the ports.
 export const WEBUI_PORT = Number(process.env.GLITCH_PI_WEBUI_PORT) || 8787;
 export const AUTH_PORT = Number(process.env.GLITCH_PI_AUTH_PORT) || 4103;
 export const PASSWORD_FILE = join(ROOT_DIR, '.server-password');
+export const USERNAME_FILE = join(ROOT_DIR, '.server-username');
 export const DEFAULT_TUNNEL_HOST = 'glitch.cothekdesigns.com';
 
 /** Trimmed password from .server-password, or null when the file is missing. */
@@ -33,9 +44,22 @@ export function readPassword() {
   }
 }
 
+/**
+ * Effective login username: .server-username when set, else AUTH_USERNAME.
+ * Mirrored in plugins/auth-proxy.mjs (local reader, no import) - keep in sync.
+ */
+export function readUsername() {
+  try {
+    const u = readFileSync(USERNAME_FILE, 'utf-8').trim();
+    return u || AUTH_USERNAME;
+  } catch {
+    return AUTH_USERNAME;
+  }
+}
+
 /** base64("username:password") - the exact token the auth proxy accepts. */
 export function authToken(password = readPassword()) {
-  return password ? Buffer.from(`${AUTH_USERNAME}:${password}`).toString('base64') : null;
+  return password ? Buffer.from(`${readUsername()}:${password}`).toString('base64') : null;
 }
 
 /** Public tunnel hostname (data/cloudflare-domain.txt override, else default). */
@@ -81,13 +105,13 @@ export function printLoginBanner(opts = {}) {
   write(BOLD('  === Pi web UI login ==='));
   write('');
   if (!password) {
-    write(`  ${c('33', 'No password set.')} Run: node scripts/set-password.mjs`);
+    write(`  ${c('33', 'No password set.')} Run: node scripts/set-credentials.mjs`);
     write(DIM(`  Expected file: ${PASSWORD_FILE}`));
     write('');
     return;
   }
 
-  write(`   Username:  ${BOLD(AUTH_USERNAME)}`);
+  write(`   Username:  ${BOLD(readUsername())}`);
   write(`   Password:  ${BOLD(password)}`);
   write('');
   write(`   Local:     ${CYAN(localUrl())}  ${DIM('(no auth needed)')}`);
@@ -99,8 +123,9 @@ export function printLoginBanner(opts = {}) {
     write(`   ${DIM(one)}`);
   }
   write('');
+  write(DIM(`   Username lives in ${USERNAME_FILE} (optional, default ${AUTH_USERNAME})`));
   write(DIM(`   Password lives in ${PASSWORD_FILE}`));
-  write(DIM('   Change it with: node scripts/set-password.mjs'));
-  write(GREEN('   (existing cookies / auth_token bookmarks die when the password changes)'));
+  write(DIM('   Change either with: node scripts/set-credentials.mjs'));
+  write(GREEN('   (existing cookies / auth_token bookmarks die when the username or password changes)'));
   write('');
 }

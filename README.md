@@ -123,8 +123,13 @@ node scripts/lib/tunnel.mjs stop              # stops only a tunnel this repo st
 node scripts/launch-pi.mjs --web --windowed   # force a visible window (remembered)
 node scripts/launch-pi.mjs --web --headless   # force detached (remembered)
 node scripts/show-credentials.mjs             # reprint username / password / login URLs
-node scripts/set-password.mjs                 # rotate the password
+node scripts/set-credentials.mjs              # rotate the password (random)
+node scripts/set-credentials.mjs --username troy            # change the login username
+node scripts/set-credentials.mjs --password 'a-real-secret' # set a specific password
+node scripts/set-credentials.mjs --show                     # current username / whether a password is set
 ```
+
+**Credentials**: the login is HTTP Basic auth built from two optional, gitignored files at the repo root. `.server-username` holds the username (absent means the `opencode` default) and `.server-password` holds the password (absent means no login is possible). `scripts/set-credentials.mjs` writes either one and restarts the auth proxy, so a change takes effect immediately. Changing either value invalidates the 7-day `glitch_auth` cookie and every `?auth_token=` bookmark, because the token is `base64("username:password")` - expect one re-login. The colon is rejected in a username on purpose: Basic auth splits the header on the first colon, so `a:b` would silently authenticate as `a`.
 
 Start mode is remembered in `user/launch-preference.json` (`pi_stack_mode`) only when you pass `--windowed` or `--headless`; otherwise a console launch gets a window and a no-console launch (extension, automation) stays detached.
 

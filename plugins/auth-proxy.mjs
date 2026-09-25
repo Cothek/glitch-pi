@@ -23,13 +23,25 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
 const pwFile = resolve(rootDir, '.server-password');
+const userFile = resolve(rootDir, '.server-username');
 
-// Login details printed on startup. The username MUST match
-// scripts/lib/web-auth.mjs (AUTH_USERNAME) - that module is the single source
-// of truth for the banner printed by the launchers. This file stays
-// dependency-free on purpose (node builtins only) so the auth gate can never
-// be taken down by a broken import.
-const USERNAME = 'opencode';
+// Login details printed on startup. Both credentials resolve the SAME files as
+// scripts/lib/web-auth.mjs (that module is the single source of truth for the
+// banner printed by the launchers). This file stays dependency-free on purpose
+// (node builtins only) so the auth gate can never be taken down by a broken
+// import - hence the local readers instead of importing web-auth.
+// Change the resolution rules here and change them there too.
+const DEFAULT_USERNAME = 'opencode';
+
+/** .server-username when set, else DEFAULT_USERNAME. Missing file is not an error. */
+function readUsername() {
+  try {
+    const u = readFileSync(userFile, 'utf-8').trim();
+    return u || DEFAULT_USERNAME;
+  } catch {
+    return DEFAULT_USERNAME;
+  }
+}
 
 // Public hostname for the login URL (data/cloudflare-domain.txt wins, else the
 // known tunnel host). Local helper on purpose - see note above.
@@ -49,6 +61,7 @@ try {
   console.error('Error: .server-password not found at', pwFile);
   process.exit(1);
 }
+const USERNAME = readUsername();
 const authToken = Buffer.from(`${USERNAME}:${password}`).toString('base64');
 const AUTH_COOKIE = `glitch_auth=${authToken}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`;
 

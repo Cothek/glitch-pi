@@ -94,7 +94,7 @@ Write-Host " ============================================================"
 Write-Host "   web UI     : http://localhost:$WebPort"
 Write-Host "   auth proxy : localhost:$AuthPort -> localhost:$WebPort"
 Write-Host "   tunnel     : $(if ($NoTunnel) {'disabled (-NoTunnel)'} else {'auto (Cloudflare, tied to this window)'})"
-Write-Host "   login      : username 'opencode' + the password below"
+Write-Host "   login      : username + password printed above (change: scripts\set-credentials.mjs)"
 Write-Host ""
 Write-Host "   Close this window (or press Ctrl+C) to STOP the stack."
 Write-Host ""
@@ -132,7 +132,7 @@ if (-not (Test-Path $AuthProxy)) {
 }
 if (-not (Test-Path (Join-Path $RootDir ".server-password"))) {
     Write-Host "  ERROR: .server-password missing - the auth proxy will refuse to start." -ForegroundColor Red
-    Write-Host "         Create one with: node scripts\set-password.mjs" -ForegroundColor DarkGray
+    Write-Host "         Create one with: node scripts\set-credentials.mjs" -ForegroundColor DarkGray
     return
 }
 

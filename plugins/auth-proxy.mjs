@@ -532,6 +532,121 @@ const server = http.createServer((req, res) => {
   req.pipe(proxyReq);
 });
 
+// ---- WebSocket upgrades ------------------------------------------------------
+// Without an 'upgrade' listener Node destroys every upgrade request, so the
+// SPA's wss:// connection dies and the app hangs on "connecting" forever when
+// opened through the tunnel (localhost works because it talks to :8787
+// directly). Browsers cannot set an Authorization header on a WebSocket, so
+// remote WS clients authenticate with the glitch_auth session cookie (set on
+// any earlier HTTP response; same-origin WS carries cookies) or ?auth_token=.
+server.on('upgrade', (req, socket, head) => {
+  const auth = authenticate(req);
+  if (!auth.ok) {
+    socket.write(
+      'HTTP/1.1 401 Unauthorized\r\n' +
+        'WWW-Authenticate: Basic realm="Glitch AI", charset="UTF-8"\r\n' +
+        'Content-Type: text/plain\r\n' +
+        'Content-Length: 22\r\n' +
+        'Connection: close\r\n' +
+        '\r\n' +
+        'Authorization required'
+    );
+    socket.destroy();
+    return;
+  }
+
+  // Same routing table as the HTTP branches above: /money -> :4110,
+  // /models and /plugins/glitch-ui/* -> :4104, everything else -> the upstream.
+  // auth_token is stripped, it must never reach the origin.
+  let targetPath = req.url || '/';
+  try {
+    const parsed = new URL(targetPath, 'http://localhost');
+    parsed.searchParams.delete('auth_token');
+    targetPath = parsed.pathname + parsed.search;
+  } catch {}
+
+  const url = req.url || '';
+  let target;
+  let forwardCredentials = true; // the default branch injects Basic like the HTTP proxy does
+  if (url === '/money' || url.startsWith('/money/') || url.startsWith('/money?')) {
+    target = new URL('http://localhost:4110');
+    forwardCredentials = false;
+  } else if (
+    url === '/models' ||
+    url.startsWith('/models/') ||
+    url.startsWith('/models?') ||
+    url.startsWith('/plugins/glitch-ui/')
+  ) {
+    target = new URL('http://localhost:4104');
+    forwardCredentials = false;
+  } else {
+    target = upstream;
+  }
+
+  const headers = Object.fromEntries(
+    Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
+  );
+  headers.host = target.host;
+  if (forwardCredentials) headers.authorization = `Basic ${authToken}`;
+
+  const proxyReq = http.request({
+    hostname: target.hostname,
+    port: target.port || 80,
+    path: targetPath,
+    method: req.method,
+    headers,
+  });
+
+  proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+    // Raw socket from here: status line and headers written by hand.
+    let out = `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage || ''}\r\n`;
+    for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
+      out += `${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}\r\n`;
+    }
+    out += '\r\n';
+    socket.write(out);
+    if (head?.length) proxySocket.write(head);
+    if (proxyHead?.length) socket.write(proxyHead);
+    proxySocket.pipe(socket);
+    socket.pipe(proxySocket);
+    const kill = () => {
+      proxySocket.destroy();
+      socket.destroy();
+    };
+    proxySocket.on('error', kill);
+    socket.on('error', kill);
+    proxySocket.on('close', () => socket.destroy());
+    socket.on('close', () => proxySocket.destroy());
+  });
+
+  // Upstream answered with a plain HTTP response instead of an upgrade (bad
+  // path, ws disabled): forward it once, then both ends close on their own.
+  proxyReq.on('response', (proxyRes) => {
+    let out = `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage || ''}\r\n`;
+    for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
+      out += `${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}\r\n`;
+    }
+    out += '\r\n';
+    socket.write(out);
+    proxyRes.pipe(socket);
+  });
+
+  proxyReq.on('error', (err) => {
+    console.error(`Upgrade proxy error for ${req.method} ${req.url}:`, err.message);
+    socket.write(
+      'HTTP/1.1 502 Bad Gateway\r\n' +
+        'Content-Type: text/plain\r\n' +
+        'Content-Length: 11\r\n' +
+        'Connection: close\r\n' +
+        '\r\n' +
+        'Bad Gateway'
+    );
+    socket.destroy();
+  });
+
+  proxyReq.end();
+});
+
 server.listen(PROXY_PORT, () => {
   console.log(`  Auth proxy listening on :${PROXY_PORT} -> ${UPSTREAM_URL}`);
   console.log(`  /models -> http://localhost:4104`);

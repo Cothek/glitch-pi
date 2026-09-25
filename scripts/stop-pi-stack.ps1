@@ -9,6 +9,12 @@
       - headless  (start-detached.ps1, CREATE_NO_WINDOW)
       - windowed  (a visible window running pi-stack-window.ps1)
 
+    Then stops the Cloudflare tunnel through scripts\lib\tunnel.mjs, the same
+    module that starts it. A tunnel left behind after the stack is down just
+    serves 502s for pi.cothekdesigns.com, so the two scripts must not drift.
+    Only a tunnel this repo started (recorded in data\cloudflared-auto.pid) is
+    stopped; one started by hand is reported and left running.
+
     Killing a windowed stack from here also leaves that window sitting at its
     prompt - close it afterwards.
 
@@ -16,14 +22,20 @@
     pi-web-ui port. Default 8787.
 .PARAMETER AuthPort
     Auth proxy port. Default 4103.
+.PARAMETER NoTunnel
+    Stop the stack but leave the Cloudflare tunnel running (useful when the
+    tunnel is serving something else, or when you are restarting only the web
+    layers and do not want the public URL to blink).
 
 .EXAMPLE
     .\scripts\stop-pi-stack.ps1
     .\scripts\stop-pi-stack.ps1 -WebPort 8799 -AuthPort 4199
+    .\scripts\stop-pi-stack.ps1 -NoTunnel
 #>
 param(
     [int]$WebPort = 8787,
-    [int]$AuthPort = 4103
+    [int]$AuthPort = 4103,
+    [switch]$NoTunnel
 )
 
 # NOTE: deliberately NOT [int[]]$Ports. Invoked with -File, PowerShell passes
@@ -33,6 +45,11 @@ param(
 $Ports = @($WebPort, $AuthPort)
 
 $ErrorActionPreference = "Continue"
+
+$RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$NodeExe = Join-Path $RootDir "data\node\node.exe"
+if (-not (Test-Path $NodeExe)) { $NodeExe = "node" }
+$TunnelScript = Join-Path $RootDir "scripts\lib\tunnel.mjs"
 
 function Get-ListenerPids([int]$Port) {
     netstat -ano | Select-String ":$Port\s" | Select-String "LISTENING" |
@@ -56,6 +73,26 @@ foreach ($port in $Ports) {
         } catch {
             Write-Host "Could not stop PID $procId on :$port - $($_.Exception.Message)"
         }
+    }
+}
+
+# ---- Cloudflare tunnel ----------------------------------------------------
+# Through the owning module, so the ownership rule (pidfile = ours) is applied
+# in exactly one place. A tunnel this repo did not start is reported, not killed.
+if ($NoTunnel) {
+    Write-Host ""
+    Write-Host "Tunnel: left running (-NoTunnel)"
+} elseif (-not (Test-Path $TunnelScript)) {
+    Write-Host ""
+    Write-Host "Tunnel: cannot stop - $TunnelScript missing" -ForegroundColor Yellow
+} else {
+    Write-Host ""
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $NodeExe $TunnelScript stop | ForEach-Object { Write-Host $_ }
+    } finally {
+        $ErrorActionPreference = $prev
     }
 }
 

@@ -2,7 +2,7 @@
 name: glitch-omni
 description: "Direct-execution variant of Glitch for Normal mode. Does everything itself using full tool access no sub-agent delegation. Select when you want maximum control and speed without delegation overhead."
 tools: read, edit, bash, find, grep, ls, webfetch, websearch, question, skill, todowrite
-model: opencode-go/qwen3.6-plus
+model: commandcode/Qwen/Qwen3.6-Plus
 ---
 
 

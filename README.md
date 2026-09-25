@@ -98,15 +98,25 @@ Two start modes:
 
 | Mode | Behaviour | Stop it by |
 |---|---|---|
-| **windowed** (default) | One visible PowerShell window runs the whole stack. `pi-web-ui` runs in that window's foreground, the auth proxy is a child on the same console. | Closing the window (or Ctrl+C in it). |
-| **headless** | Both layers start detached with `CREATE_NO_WINDOW` and survive closing every shell. | `scripts\stop-pi-stack.ps1` |
+| **windowed** (default) | One visible PowerShell window runs the whole stack. `pi-web-ui` runs in that window's foreground, the auth proxy and the Cloudflare tunnel are children on the same console. | Closing the window (or Ctrl+C in it). |
+| **headless** | All three layers start detached with `CREATE_NO_WINDOW` and survive closing every shell. | `scripts\stop-pi-stack.ps1` |
+
+The **Cloudflare tunnel** (`pi.cothekdesigns.com` -> auth proxy `:4103` -> `pi-web-ui :8787`) is part of the stack, not a separate service. It is started once both ports are confirmed bound, and skipped when the auth proxy is down, because a connector with no origin just serves 502s. Windowed mode ties it to the window; detached mode spawns it detached so it outlives the shell. `scripts\stop-pi-stack.ps1` stops it again through `scripts\lib\tunnel.mjs`, which owns the lifecycle: only a tunnel this repo started (recorded in `data\cloudflared-auto.pid`) is ever stopped, and a second start is skipped instead of adding a duplicate connector to the same tunnel (Cloudflare would accept one without complaining). The `tunnel-keeper` Pi extension is the safety net: it re-checks every 5 minutes and restarts the tunnel if it died mid-session.
 
 ```powershell
 .\scripts\start-pi-stack.ps1                  # detached (survives closing every shell)
 .\scripts\start-pi-stack.ps1 -Windowed        # visible window you close to stop
 .\scripts\start-pi-stack-window.ps1           # same, opens the window directly
-.\scripts\start-pi-stack.ps1 -Status          # check only
-.\scripts\stop-pi-stack.ps1                   # stop both layers, either start mode
+.\scripts\start-pi-stack.ps1 -Status          # check only (web UI, auth proxy, tunnel)
+.\scripts\start-pi-stack.ps1 -NoTunnel        # local only, no Cloudflare
+.\scripts\stop-pi-stack.ps1                   # stop the stack and its tunnel, either start mode
+.\scripts\stop-pi-stack.ps1 -NoTunnel         # stop the stack, leave the tunnel running
+```
+
+```bash
+node scripts/lib/tunnel.mjs status            # one line, exit 0 when up / 1 when down
+node scripts/lib/tunnel.mjs start             # idempotent: skips when already running
+node scripts/lib/tunnel.mjs stop              # stops only a tunnel this repo started
 ```
 
 ```bash

@@ -18,7 +18,11 @@
  *
  * BLOCKED BEHAVIORS (throws → tool_call returns { block: true, reason })
  *   1. Plan-First: complex task dispatch or code-file edit without a fresh
- *      data/plans/current-plan.md (< 6h). Bypass: "quick task" / --no-plan.
+ *      SESSION-SCOPED plan (< 6h) at
+ *      data/plans/sessions/<sessionID>/current-plan.md.
+ *      Bypass: "quick task" / --no-plan. Ownership: a session may only
+ *      mutate its own plan file and the shared data/plans/archive —
+ *      cross-session plan writes/moves/deletes are blocked (plan-paths.mjs).
  *   2. Dispatch-First: code-file edit or destructive bash without a prior
  *      task() dispatch within 120s. glitch-omni warns instead of blocks.
  *   3. Review Gate: git commit when pendingReview && lastCode > lastReview.
@@ -47,6 +51,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+// Session-scoped plan ownership rules — dependency-free lib, unit-tested in
+// .pi/lib/plan-paths.test.mjs (dispatch-plan.mjs pattern).
+import {
+  classifyPlanCommand,
+  classifyPlanPath,
+  hasPlanMutation,
+  isPlanPath,
+  sessionPlanPath,
+} from "../lib/plan-paths.mjs";
 
 // --- Paths (resolve repo root by walking up from cwd to the nearest .git/.pi) ---
 function resolveRepoRoot(): string {
@@ -61,7 +74,10 @@ function resolveRepoRoot(): string {
 const REPO_ROOT = resolveRepoRoot();
 const REVIEW_PASS_SCRIPT = join(REPO_ROOT, "scripts", "write-review-pass.mjs");
 const MARKER_PATH = join(REPO_ROOT, "data", ".review-pass.json");
-const PLAN_MARKER_PATH = join(REPO_ROOT, "data", "plans", "current-plan.md");
+// Plan files are SESSION-SCOPED: data/plans/sessions/<sessionID>/current-plan.md
+// (built by planMarkerPath() below, canonical form in ../lib/plan-paths.mjs).
+// The old shared data/plans/current-plan.md let concurrent sessions overwrite
+// and archive each other's live plans — incident logged in user/current-session.md.
 const AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
 
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
@@ -197,10 +213,17 @@ function isComplexTask(prompt: string, filePath?: string): boolean {
   return false;
 }
 
-function hasValidPlanMarker(): boolean {
+function planMarkerPath(sessionId: string | null): string {
+  // Session-scoped: data/plans/sessions/<sid>/current-plan.md under REPO_ROOT.
+  // sessionPlanPath is the single canonical builder (it sanitizes the id too).
+  return join(REPO_ROOT, sessionPlanPath(sessionId));
+}
+
+function hasValidPlanMarker(sessionId: string | null): boolean {
   try {
-    if (!existsSync(PLAN_MARKER_PATH)) return false;
-    const age = Date.now() - statSync(PLAN_MARKER_PATH).mtimeMs;
+    const marker = planMarkerPath(sessionId);
+    if (!existsSync(marker)) return false;
+    const age = Date.now() - statSync(marker).mtimeMs;
     return age <= PLAN_MAX_AGE_MS;
   } catch {
     return false;
@@ -294,6 +317,26 @@ export default function (pi: ExtensionAPI) {
       (ctx.sessionManager as any)?.id ||
       "default";
     currentSessionID = String(sid);
+
+    // Tell the model which plan file it owns so it never has to guess (and
+    // never touches another session's). Best-effort: if this fails silently,
+    // the gate's block reasons carry the same information.
+    try {
+      pi.sendMessage(
+        {
+          customType: "plan-session-info",
+          content:
+            `Plan-First: this session's plan file is ${sessionPlanPath(currentSessionID)}. ` +
+            `Write complex-task plans there BEFORE editing code files (plan-first skill). ` +
+            `When the task is done, archive ONLY this file to data/plans/archive/<YYYY-MM-DD>-<short-task-name>.md. ` +
+            `Other sessions' plan files (data/plans/sessions/<other-id>/...) are read-only to you — the gate blocks cross-session plan writes, moves, and deletes.`,
+          display: true,
+        },
+        { deliverAs: "nextTurn" },
+      );
+    } catch {
+      // announce is best-effort; the block reasons repeat the paths anyway
+    }
   });
 
   // --- Pre-tool gates: plan-first + dispatch-first + review gate ---
@@ -319,17 +362,31 @@ export default function (pi: ExtensionAPI) {
           const filePath = extractFilePath((event as any).input);
           if (!filePath) return undefined;
 
+          // Plan-ownership gate: a session may only write its own plan file
+          // (data/plans/sessions/<mysid>/...) or the shared archive. Foreign
+          // plan paths — other sessions' files, the legacy shared file — are
+          // blocked so concurrent sessions can't clobber each other's plans.
+          if (isPlanPath(filePath) && classifyPlanPath(filePath, currentSessionID) === "foreign") {
+            return {
+              block: true,
+              reason:
+                `⛔ Plan Ownership Violation: ${filePath} is not this session's plan file.\n` +
+                `Your session-scoped plan is ${sessionPlanPath(currentSessionID)}; the shared archive is data/plans/archive/.\n` +
+                `Write plans only to your own file. Reading another session's plan is fine — mutating it is not.`,
+            };
+          }
+
           // Plan-First (plan-reflex)
           if (!isExemptFile(filePath) && isCodeFile(filePath)) {
             const promptHint = String((event as any).input?.prompt || "");
             if (!promptHint.toLowerCase().includes("quick task")) {
-              if (!hasValidPlanMarker()) {
+              if (!hasValidPlanMarker(currentSessionID)) {
                 return {
                   block: true,
                   reason:
                     "⛔ Plan-First Violation: Code file edit without an up-front plan.\n" +
                     `File: ${filePath}\n` +
-                    "You MUST write a plan to data/plans/current-plan.md (via the plan-first skill) before editing code files.\n" +
+                    `You MUST write a plan to ${sessionPlanPath(currentSessionID)} (via the plan-first skill) before editing code files.\n` +
                     "Plan template: Goal, Approach, Files to change, Risks, Verification.\n" +
                     "Exempt: memory files (user/*.md), config files (config/*.json, opencode.json).\n" +
                     'To force-skip for an intentionally simple task: include "quick task" in the prompt.',
@@ -363,6 +420,22 @@ export default function (pi: ExtensionAPI) {
           const command = String((event as any).input?.command || "");
           if (!command) return undefined;
           const normalizedCmd = command.trim().toLowerCase();
+
+          // Plan-ownership gate: mutating shell commands (mv/rm/move-item/...)
+          // may only touch this session's own plan file or the shared archive.
+          // Reads (cat/ls/type) are never judged here.
+          if (hasPlanMutation(command)) {
+            const verdict = classifyPlanCommand(command, currentSessionID);
+            if (!verdict.allowed) {
+              return {
+                block: true,
+                reason:
+                  "⛔ Plan Ownership Violation in shell command.\n" +
+                  `Offending plan path(s): ${verdict.offending.join(", ")}\n` +
+                  verdict.reason,
+              };
+            }
+          }
 
           // Destructive bash → dispatch-first
           if (shouldBlockDestructiveBash(command)) {

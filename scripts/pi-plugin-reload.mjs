@@ -66,11 +66,17 @@ function printResult(list, epoch) {
 		const mine = list.find((p) => p.id === PLUGIN_ID);
 		if (!mine) {
 			console.log(`${PLUGIN_ID}: NOT LOADED (epoch ${epoch})`);
-		} else {
-			const err = mine?.error ? ` ERROR: ${mine.error}` : "";
-			console.log(`${mine.id}: v${mine.version ?? "?"} active=${mine.active} preload=${mine.preload} epoch=${epoch}${err}`);
+			process.exit(1);
 		}
-		process.exit(mine && !mine.error ? 0 : 1);
+		const err = mine.error ? ` ERROR: ${mine.error}` : "";
+		// Print only the fields this payload actually carries. The reload reply is a
+		// thinner shape than the attach snapshot (it omits `active`), and printing
+		// "active=undefined" looked like a failure when the plugin was fine.
+		const wanted = ["version", "active", "preload", "view", "hasClient", "enabled"];
+		const present = wanted.filter((k) => mine[k] !== undefined).map((k) => `${k}=${mine[k]}`);
+		const shown = present.length ? present.join(" ") : `fields: ${Object.keys(mine).join(",") || "(none)"}`;
+		console.log(`${mine.id}: ${shown} epoch=${epoch}${err}`);
+		process.exit(mine.error ? 1 : 0);
 	}
 	console.log(`epoch ${epoch}: ${list.map((p) => p.id ?? "?").join(", ") || "(none)"}`);
 	process.exit(0);

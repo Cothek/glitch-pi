@@ -371,7 +371,11 @@ describe("plugin: cost table in the payload", () => {
 		assert.equal(payload.costMeta.missing, true);
 		assert.match(payload.costMeta.hint, /agent-model-costs\.mjs/);
 		const priced = payload.rows.find((r) => r.name === "priced");
-		assert.equal(priced.costShort, null, "no price known -> no chip, not a fake number");
+		// A pin whose provider has no price data now says n/a explicitly (it used to show
+		// nothing at all, which read as "no information" rather than "no price known").
+		assert.equal(priced.costShort, "n/a");
+		assert.equal(priced.tier, "unknown");
+		assert.equal(priced.backups, 0);
 	});
 });
 

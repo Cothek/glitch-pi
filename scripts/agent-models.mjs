@@ -154,6 +154,7 @@ function main() {
 	for (const row of report.rows) {
 		const cost = row.pin && costTable ? costTable[row.pin] : null;
 		row.costShort = cost ? formatCostShort(cost) : row.pin ? "n/a" : null;
+		row.tier = cost?.tier ?? null;
 	}
 	report.costMeta = costTable
 		? { path: costsPath, generatedAt: costDoc.generatedAt ?? null, summary: costDoc.summary ?? null }

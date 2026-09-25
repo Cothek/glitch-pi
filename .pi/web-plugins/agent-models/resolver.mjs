@@ -323,7 +323,9 @@ function money(n) {
 export function formatCostShort(cost) {
 	if (!cost) return "n/a";
 	if (cost.in === 0 && cost.out === 0) return "free";
-	return `$${money(cost.in)}/$${money(cost.out)}`;
+	// A tilde means ESTIMATED: the number comes from another vendor's list for the same
+	// model slug, because this provider publishes nothing. Never shown as published.
+	return `${cost.estimated ? "~" : ""}$${money(cost.in)}/$${money(cost.out)}`;
 }
 
 /** Hover text: what the numbers mean and where they came from. */
@@ -333,18 +335,31 @@ export function formatCostTitle(cost) {
 	const parts = [`input $${money(cost.in)} / output $${money(cost.out)} USD per million tokens`];
 	if (typeof cost.cacheRead === "number") parts.push(`cache read $${money(cost.cacheRead)}`);
 	if (typeof cost.cacheWrite === "number") parts.push(`cache write $${money(cost.cacheWrite)}`);
-	if (cost.source) parts.push(`source: ${cost.source}`);
+	if (cost.estimated) parts.push(`ESTIMATED from ${cost.estimatedFrom ?? "a same-slug model"} (this provider publishes no price)`);
+	else if (cost.source) parts.push(`source: ${cost.source}`);
+	if (typeof cost.contextWindow === "number") parts.push(`context ${Math.round(cost.contextWindow / 1000)}K`);
+	if (cost.tier) parts.push(`tier: ${cost.tier}`);
 	return parts.join(" | ");
 }
 
 /** Fixed-width text table for the CLI and the `/agent-models` slash command. */
 export function formatReportTable(report) {
 	const withCost = report.rows.some((r) => r.costShort);
-	const header = ["AGENT", "PINNED MODEL", ...(withCost ? ["COST"] : []), "EFFECTIVE", "STATUS", "NOTE"];
+	const withTier = report.rows.some((r) => r.tier);
+	const header = [
+		"AGENT",
+		"PINNED MODEL",
+		...(withCost ? ["COST"] : []),
+		...(withTier ? ["TIER"] : []),
+		"EFFECTIVE",
+		"STATUS",
+		"NOTE",
+	];
 	const cells = report.rows.map((r) => [
 		r.name,
 		r.pin ?? "(none)",
 		...(withCost ? [r.costShort ?? "n/a"] : []),
+		...(withTier ? [r.tier ?? "unknown"] : []),
 		r.effective ?? r.effectiveLabel,
 		r.statusLabel,
 		r.warnings.length ? r.warnings.join("; ") : r.why,

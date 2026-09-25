@@ -130,6 +130,13 @@ const STYLE_CSS = `
 .am-provider[aria-pressed="true"]{border-color:var(--accent);color:var(--text);background:var(--bg-elev)}
 .am-provider-count{color:var(--text-faint);margin-left:5px}
 .am-option-cost{margin-left:auto;flex:none;color:var(--text-faint);font-size:10.5px;font-family:var(--mono, monospace);padding-left:10px}
+.am-option-tier{flex:none;color:var(--text-faint);font-size:10px;border:1px solid var(--border-soft);border-radius:4px;padding:0 4px;margin-left:6px}
+.am-option-tier.am-tier-free{color:var(--green);border-color:var(--green)}
+.am-option-tier.am-tier-budget{color:var(--text-dim);border-color:var(--text-faint)}
+.am-option-tier.am-tier-mid{color:var(--amber);border-color:var(--amber)}
+.am-option-tier.am-tier-premium{color:var(--red);border-color:var(--red)}
+.am-option-cap{flex:none;color:var(--text-faint);font-size:10px;margin-left:6px}
+.am-rollback{margin-top:2px}
 .am-option.am-current .am-option-cost{color:var(--accent)}
 .am-cost{font-family:var(--mono, monospace);font-size:10.5px;color:var(--text-faint);border:1px solid var(--border-soft);border-radius:5px;padding:0 5px;flex:none;margin-left:6px}
 .am-cost.am-free{color:var(--green);border-color:var(--green)}
@@ -206,6 +213,22 @@ function matchesFilter(row, filter) {
 	return row.status === filter;
 }
 
+/** Restore an agent's newest backup. Never throws. */
+async function postRestore(agent) {
+	try {
+		const res = await fetch(`${API_BASE}/restore`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent }),
+		});
+		const payload = await res.json().catch(() => null);
+		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		return payload;
+	} catch (err) {
+		return { ok: false, error: errorText(err) };
+	}
+}
+
 /** A cost chip: green for free, amber for priced, faint for unknown. */
 function costChipNode(short, title) {
 	const cls = short === "free" ? "am-cost am-free" : String(short).startsWith("$") ? "am-cost am-paid" : "am-cost";
@@ -225,6 +248,8 @@ function createInstance(container, ctx) {
 		loading: true,
 		filter: "all",
 		provider: "all",
+		tier: "all",
+		capability: "all",
 		destroyed: false,
 		generation: 0,
 		timer: null,
@@ -343,6 +368,35 @@ function createInstance(container, ctx) {
 		render();
 	}
 
+	/** Restore the newest backup for an agent (rollback). */
+	async function applyRestore(agent) {
+		state.saving = agent;
+		state.pickerError = null;
+		state.diag.lastAction = `restore:${agent}`;
+		state.diag.lastAt = new Date().toLocaleTimeString();
+		render();
+		const payload = await postRestore(agent);
+		if (state.destroyed) return;
+		state.saving = null;
+		if (payload?.ok) {
+			if (payload.report) {
+				state.report = payload.report;
+				state.diag.agentCount = payload.report.counts?.total ?? state.diag.agentCount;
+			}
+			state.savedNote = {
+				agent,
+				text: `rolled back to ${payload.restoredFrom} | pre-rollback state saved as ${String(payload.safety ?? "").split("/").pop()}`,
+			};
+			state.diag.lastWrite = `${agent} rollback @ ${new Date().toLocaleTimeString()}`;
+			state.openFor = null;
+			state.query = "";
+		} else {
+			state.pickerError = payload?.error ?? "unknown error";
+			state.diag.lastWrite = `${agent} rollback FAILED`;
+		}
+		render();
+	}
+
 	/** The inline model picker for one row. */
 	function pickerNode(row) {
 		const wrap = el("div", "am-picker");
@@ -366,39 +420,52 @@ function createInstance(container, ctx) {
 
 		if (state.pickerError) wrap.appendChild(el("div", "am-picker-err", state.pickerError));
 
-		// Provider filter chips. The catalog is sorted by id, so without these the
-		// first screenful is whichever provider sorts first (commandcode/), and the
-		// other providers look like they are missing. With ~500 models, clicking a
-		// provider is faster than typing anyway.
-		const providerRow = el("div", "am-providers");
-		const providerCounts = new Map();
-		for (const id of Array.isArray(state.report?.catalog) ? state.report.catalog : []) {
-			const slash = id.indexOf("/");
-			const name = slash > 0 ? id.slice(0, slash) : "(none)";
-			providerCounts.set(name, (providerCounts.get(name) ?? 0) + 1);
+		// Filter chips: provider, tier, capability. Counts come from the server's facets so
+		// every surface agrees; providers fall back to counting the catalog if an older
+		// payload has no facets.
+		const facets = state.report?.facets ?? {};
+		const total = Array.isArray(state.report?.catalog) ? state.report.catalog.length : 0;
+		let providerFacet = Array.isArray(facets.providers) ? facets.providers : [];
+		if (!providerFacet.length && total) {
+			const counts = new Map();
+			for (const id of state.report.catalog) {
+				const slash = id.indexOf("/");
+				const name = slash > 0 ? id.slice(0, slash) : "(none)";
+				counts.set(name, (counts.get(name) ?? 0) + 1);
+			}
+			providerFacet = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id, count]) => ({ id, count }));
 		}
-		const chips = new Map();
-		const addChip = (id, label, n) => {
-			const chip = el("button", "am-provider");
-			chip.type = "button";
-			chip.setAttribute("aria-pressed", String(id === state.provider));
-			chip.setAttribute("data-am-provider", id);
-			chip.appendChild(el("span", undefined, label));
-			if (typeof n === "number") chip.appendChild(el("span", "am-provider-count", String(n)));
-			chip.addEventListener("click", () => {
-				state.provider = id;
-				renderOptions();
-			});
-			chips.set(id, chip);
-			providerRow.appendChild(chip);
+		const chips = [];
+		const chipRow = (attr, allLabel, items, isActive, pick) => {
+			const rowEl = el("div", "am-providers");
+			const mk = (id, label, n) => {
+				const chip = el("button", "am-provider");
+				chip.type = "button";
+				chip.setAttribute("aria-pressed", String(isActive(id)));
+				chip.setAttribute(attr, id);
+				chip.appendChild(el("span", undefined, label));
+				if (typeof n === "number") chip.appendChild(el("span", "am-provider-count", String(n)));
+				chip.addEventListener("click", () => {
+					pick(id);
+					renderOptions();
+				});
+				chips.push({ attr, id, el: chip });
+				rowEl.appendChild(chip);
+			};
+			mk("all", allLabel, total);
+			for (const it of items) mk(it.id, it.label ?? it.id, it.count);
+			return rowEl;
 		};
-		const total = [...providerCounts.values()].reduce((n, c) => n + c, 0);
-		addChip("all", "All", total);
-		for (const [name, n] of [...providerCounts.entries()].sort((a, b) => b[1] - a[1])) addChip(name, name, n);
-		wrap.appendChild(providerRow);
+		wrap.appendChild(
+			chipRow("data-am-provider", "All providers", providerFacet, (id) => state.provider === id, (id) => { state.provider = id; }),
+		);
+		wrap.appendChild(chipRow("data-am-tier", "All tiers", facets.tiers ?? [], (id) => state.tier === id, (id) => { state.tier = id; }));
+		wrap.appendChild(
+			chipRow("data-am-capability", "Any capability", facets.capabilities ?? [], (id) => state.capability === id, (id) => { state.capability = id; }),
+		);
 
 		const options = el("div", "am-options");
-		pickerRefs = { agent: row.name, pin: row.pin ?? null, options, count, providers: chips };
+		pickerRefs = { agent: row.name, pin: row.pin ?? null, options, count, chips };
 		renderOptions();
 		wrap.appendChild(options);
 
@@ -413,6 +480,16 @@ function createInstance(container, ctx) {
 					: "costs are USD per million tokens (input/output). n/a = the provider publishes no pricing.",
 			),
 		);
+
+		if (row.backups > 0) {
+			const rollback = el("button", "am-btn am-rollback", `Rollback this agent (${row.backups} backup${row.backups === 1 ? "" : "s"})`);
+			rollback.type = "button";
+			rollback.setAttribute("data-am-action", "restore");
+			rollback.disabled = state.saving === row.name;
+			rollback.title = "Restore this agent file's newest backup. The current content is saved first, so clicking again steps back one more state.";
+			rollback.addEventListener("click", () => void applyRestore(row.name));
+			wrap.appendChild(rollback);
+		}
 
 		if (state.saving === row.name) wrap.appendChild(el("div", "am-note", `saving ${row.name}...`));
 		const hint = el("div", "am-note", "Click a model to apply it. The file is edited in place and backed up first. Escape closes.");
@@ -429,12 +506,20 @@ function createInstance(container, ctx) {
 		if (!refs || state.destroyed) return;
 		const catalog = Array.isArray(state.report?.catalog) ? state.report.catalog : [];
 		const q = state.query.trim().toLowerCase();
+		const info = (id) => state.report?.models?.[id] ?? null;
 		let matches = catalog;
 		if (state.provider !== "all") matches = matches.filter((m) => m.startsWith(`${state.provider}/`));
+		if (state.tier !== "all") matches = matches.filter((m) => info(m)?.tier === state.tier);
+		if (state.capability === "vision") matches = matches.filter((m) => info(m)?.vision === true);
+		else if (state.capability === "largeContext") matches = matches.filter((m) => info(m)?.largeContext === true);
 		if (q) matches = matches.filter((m) => m.toLowerCase().includes(q));
 
 		refs.count.textContent = `${matches.length}${matches.length > PICKER_LIMIT ? ` (showing ${PICKER_LIMIT})` : ""}`;
-		for (const [id, chip] of refs.providers) chip.setAttribute("aria-pressed", String(id === state.provider));
+		for (const chip of refs.chips) {
+			const active =
+				chip.attr === "data-am-provider" ? state.provider : chip.attr === "data-am-tier" ? state.tier : state.capability;
+			chip.el.setAttribute("aria-pressed", String(chip.id === active));
+		}
 
 		const saving = state.saving === refs.agent;
 		refs.options.textContent = "";
@@ -464,10 +549,15 @@ function createInstance(container, ctx) {
 			btn.setAttribute("data-am-option", model);
 			if (model === refs.pin) btn.className = "am-option am-current";
 			btn.appendChild(el("span", "am-option-label", model));
-			const cost = state.report?.costs?.[model];
-			const costChip = el("span", "am-option-cost", cost?.short ?? "n/a");
-			costChip.setAttribute("data-am-cost", cost?.short ?? "n/a");
-			if (cost?.title) costChip.title = cost.title;
+			const meta = info(model);
+			if (meta?.tier && meta.tier !== "unknown") {
+				btn.appendChild(el("span", `am-option-tier am-tier-${meta.tier}`, meta.tier));
+			}
+			if (meta?.vision) btn.appendChild(el("span", "am-option-cap", "vision"));
+			if (meta?.largeContext) btn.appendChild(el("span", "am-option-cap", "200K+"));
+			const costChip = el("span", "am-option-cost", meta?.short ?? "n/a");
+			costChip.setAttribute("data-am-cost", meta?.short ?? "n/a");
+			if (meta?.title) costChip.title = meta.title;
 			btn.appendChild(costChip);
 			if (model === refs.pin) btn.appendChild(el("span", "am-option-mark", "✓"));
 			btn.addEventListener("click", () => void applyModel(refs.agent, model));
@@ -533,6 +623,7 @@ function createInstance(container, ctx) {
 		eff.title = row.effective ?? row.why;
 		models.appendChild(eff);
 		if (row.costShort) models.appendChild(costChipNode(row.costShort, row.costTitle));
+		if (row.tier && row.tier !== "unknown") models.appendChild(el("span", "am-cost", row.tier));
 		toggle.appendChild(models);
 
 		if (row.warnings.length) {

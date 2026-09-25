@@ -40,11 +40,20 @@ Every option carries a cost chip, and so does each row (the price of its current
 
 | Chip | Meaning |
 |---|---|
-| `free` (green) | every cost field is 0. The NVIDIA endpoints really are free. |
-| `$0.8/$1.6` (amber) | input / output in **USD per million tokens**. Hover shows cache read/write prices and the source file. |
-| `n/a` (grey) | the provider publishes no pricing anywhere on this machine. |
+| `free` (green) | every cost field is 0 (the NVIDIA endpoints really are free). |
+| `$0.15/$0.5` (amber) | input / output in **USD per million tokens**, published. The tooltip adds cache read/write, context, tier and which file the number came from. |
+| `~$10/$50` | **estimated** from another vendor's same-slug listing (openrouter), because this provider publishes nothing. Never presented as a published price. |
+| `n/a` (grey) | no price from any source. |
 
-The header line adds the coverage, e.g. `cost: 448 known (372 priced, 76 free)`.
+Alongside the price each option carries its **tier** and capability badges, and the picker filters on all of it:
+
+```
+All providers 507 | openrouter 392 | commandcode 59 | nvidia 56
+All tiers 507 | budget 222 | mid 151 | free 79 | premium 55
+Any capability 507 | Vision 315 | 200K+ context 372
+```
+
+Tiers are DERIVED, not published: `blended = 0.75*in + 0.25*out`, then free = 0, budget < 1, mid < 5, premium >= 5. The thresholds live in `scripts/agent-model-costs.mjs` and the tier is stored in the data, so changing them is a one-line edit with no UI change. Vision comes from the live host model list; 200K+ context comes from the cost table.
 
 ### Where the numbers come from, and the honest gap
 
@@ -58,11 +67,13 @@ That writes `.pi/agent-models/costs.json` (gitignored, runtime data) with a gene
 
 Coverage on this machine, stated plainly:
 
-- `openrouter` - 392 models with real prices
-- `nvidia` - 56 models, every field 0 = free
-- `commandcode` - **59 models with no pricing data anywhere.** The config lists only id, name and context window, so those rows say `n/a` and no amount of processing invents a number.
+- `commandcode` - **all 59 configured models are priced**, from Command Code's own published GOAT plan rates ($0.50/$3.00 for Qwen 3.6 Plus, $0.15/$0.50 for glm-5.3-flash). Their docs page embeds a structured catalog; `scripts/commandcode-prices.mjs` extracts it into `config/commandcode-prices.json` (checked in, re-run when prices change). It also carries context window, vision and reasoning per model, and lists 82 models against the 59 pi has configured.
+- `openrouter` - 392 models with real list prices, from the official catalog cache.
+- `nvidia` - 56 models, every field 0 = genuinely free.
 
-To fill that gap, write the prices you know into `.pi/agent-models/prices.json`; manual entries win over everything else:
+Precedence, lowest to highest: `models-store.json`, `models.json`, `config/commandcode-prices.json`, then `.pi/agent-models/prices.json`. Anything still unpriced gets an **openrouter same-slug estimate**, shown with a `~` and named in the tooltip. On this machine that count is legitimately 0 because the docs cover everything, so the path is proven by a synthetic probe instead of by hope.
+
+To override anything by hand, write `.pi/agent-models/prices.json`; manual entries win over everything else:
 
 ```json
 { "commandcode/Qwen/Qwen3.6-Plus": { "in": 0.4, "out": 2.0 } }
@@ -95,11 +106,33 @@ The host re-scans `<dataDir>/plugins` on every WS attach (`pluginMgr.ensureLoade
 
 ## Tests
 
-```powershell
-node --test .pi/web-plugins/agent-models/index.test.mjs
+```
+node --test .pi/web-plugins/agent-models/index.test.mjs .pi/web-plugins/agent-models/client.test.mjs
 ```
 
-15 tests cover the parser (quoting, BOM, bracketed tools, missing frontmatter), every status branch, the lints, the report counts, and the `/state` route payload.
+47 tests: 35 server-side (parser, status truth table, lints, cost labels, the `/state` payload, the frontmatter rewrite, the write route) and 12 for the CLIENT via a fake DOM (`client.test.mjs`).
+
+The client harness exists because every bug this plugin actually shipped was client-side and invisible to the server tests: a picker whose tail referenced a variable removed in a refactor (the panel rendered "Render failed"), an id-only stylesheet guard that pinned the first deploy's CSS for the life of the page, and a flex container that squashed rows instead of scrolling. The harness mounts the client, clicks a row to open the picker, filters by provider/tier/capability, applies a model (asserting the POST body), rolls back, and re-mounts over a deliberately stale stylesheet. It is a regression net for wiring mistakes, not a substitute for looking at the real page.
+
+## Parity with the OpenCode model-ui app
+
+The OpenCode app (`glitch-ai/plugins/model-ui`) was audited feature by feature against this page:
+
+| OpenCode feature | Here |
+|---|---|
+| Agent list with the assigned model | yes (row per agent: pin, effective model, status) |
+| Cost badges per model, in USD per million tokens | yes, and with a published/estimated/free distinction it did not have |
+| Provider filter | yes (chips with counts) |
+| Tier filter (free / budget / mid / premium) | yes, derived from price |
+| Capability filter | yes (vision from the host, 200K+ context from the cost table) |
+| Search | yes (in-place filtering, caret preserved) |
+| Rollback | yes, per agent, restore the newest backup; the pre-rollback state is saved first so a second click steps back again |
+| Refresh models | yes (header Refresh + the 15s poll) |
+| Pending changes then Apply / Clear | **not ported** - see below |
+| Apply & restart / manual restart | **not ported** - OpenCode needed a restart after rewriting its config; pi applies a pin immediately |
+| Model registry refresh endpoint | n/a - pi's catalog comes from the live runtime on every read |
+
+**Why staging was left out.** OpenCode staged edits because applying meant rewriting `opencode.json` and restarting the harness, so it had to batch. In pi a write is instant, per-agent, validated against the live catalog and backed up first, with rollback available. Staging would add clicks without adding safety. If it is ever wanted, it is a client-side map plus an Apply loop over the existing endpoint.
 
 ## Mount contract (learned from the first broken deploy)
 

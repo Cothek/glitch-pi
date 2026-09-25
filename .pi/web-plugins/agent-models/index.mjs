@@ -17,9 +17,10 @@
  *
  * SURFACES
  *   1. right-panel tab (manifest "view": true) -> client fetches GET /state
- *   2. GET  /plugins-api/agent-models/state     -> JSON report (incl. the catalog)
+ *   2. GET  /plugins-api/agent-models/state     -> JSON report (catalog, models, facets)
  *   3. POST /plugins-api/agent-models/set-model -> rewrite one agent's model pin
- *   4. /agent-models slash command -> same table as text, no browser needed
+ *   4. POST /plugins-api/agent-models/restore   -> restore an agent's newest backup
+ *   5. /agent-models slash command -> same table as text, no browser needed
  *
  * WRITE PATH SAFETY (POST /set-model): the agent name is validated against the
  * files actually discovered in .pi/agents (never interpolated blindly), the
@@ -74,12 +75,17 @@ async function readCatalog(host) {
 	try {
 		const listed = await host.models.list();
 		const ids = new Set();
+		/** Vision comes from the LIVE runtime, so the capability filter covers every
+		 *  model in the catalog and not just the ones with a price entry. */
+		const vision = new Map();
 		for (const m of listed ?? []) {
-			if (typeof m?.id === "string" && m.id) ids.add(m.id);
+			if (typeof m?.id !== "string" || !m.id) continue;
+			ids.add(m.id);
+			if (m.vision === true) vision.set(m.id, true);
 		}
-		return ids;
+		return { ids, vision };
 	} catch {
-		return new Set();
+		return { ids: new Set(), vision: new Map() };
 	}
 }
 
@@ -100,6 +106,13 @@ async function readCosts(host) {
 				source: cost?.source ?? null,
 				short: formatCostShort(cost),
 				title: formatCostTitle(cost),
+				tier: typeof cost?.tier === "string" ? cost.tier : null,
+				estimated: cost?.estimated === true,
+				estimatedFrom: typeof cost?.estimatedFrom === "string" ? cost.estimatedFrom : null,
+				vision: cost?.vision === true,
+				contextWindow: typeof cost?.contextWindow === "number" ? cost.contextWindow : null,
+				name: typeof cost?.name === "string" ? cost.name : null,
+				minPlan: typeof cost?.minPlan === "string" ? cost.minPlan : null,
 			};
 		}
 		return {
@@ -116,6 +129,23 @@ async function readCosts(host) {
 	}
 }
 
+/** Backups per agent, for the rollback affordance: one listing, counted by prefix. */
+async function countBackups(host) {
+	const counts = new Map();
+	try {
+		for (const entry of await host.fs.list(BACKUP_DIR)) {
+			if (entry.type !== "file" || !entry.name.endsWith(".md")) continue;
+			const dash = entry.name.indexOf("-");
+			const agent = dash > 0 ? entry.name.slice(0, dash) : "";
+			if (!agent) continue;
+			counts.set(agent, (counts.get(agent) ?? 0) + 1);
+		}
+	} catch {
+		/* no backups yet */
+	}
+	return counts;
+}
+
 export default definePlugin({
 	async activate(host) {
 		const cleanup = [];
@@ -127,8 +157,9 @@ export default definePlugin({
 		async function collect() {
 			const files = await listAgentFiles(host);
 			const catalog = await readCatalog(host);
-			catalogSize = catalog.size;
+			catalogSize = catalog.ids.size;
 			const priceData = await readCosts(host);
+			const backupCounts = await countBackups(host);
 			const agents = [];
 			const unreadable = [];
 			for (const name of files) {
@@ -140,20 +171,70 @@ export default definePlugin({
 			}
 			const report = buildReport(
 				agents,
-				catalog,
-				`host.models.list() - ${catalog.size} authenticated model${catalog.size === 1 ? "" : "s"}`,
+				catalog.ids,
+				`host.models.list() - ${catalog.ids.size} authenticated model${catalog.ids.size === 1 ? "" : "s"}`,
 			);
 			report.agentsDir = AGENTS_DIR;
 			report.unreadable = unreadable;
 			// The picker needs the full list; 500-odd ids is a small payload locally.
-			report.catalog = [...catalog].sort();
+			report.catalog = [...catalog.ids].sort();
 			report.costs = priceData.costs;
 			report.costMeta = priceData.meta;
-			// Per-row cost of the CURRENT pin, for the row chip and the CLI table.
+
+			// One entry per catalog model with everything the picker prints, precomputed
+			// here so the client cannot drift from the CLI or re-derive a label.
+			const models = {};
+			for (const id of report.catalog) {
+				const cost = priceData.costs[id] ?? null;
+				const ctx = cost?.contextWindow ?? null;
+				models[id] = {
+					short: cost?.short ?? "n/a",
+					title: cost?.title ?? "no pricing data for this model's provider",
+					tier: cost?.tier ?? "unknown",
+					estimated: cost?.estimated === true,
+					vision: cost?.vision === true || catalog.vision.get(id) === true,
+					largeContext: typeof ctx === "number" && ctx >= 200000,
+					contextWindow: ctx,
+					provider: id.slice(0, Math.max(0, id.indexOf("/"))),
+					name: cost?.name ?? null,
+					minPlan: cost?.minPlan ?? null,
+				};
+			}
+			report.models = models;
+
+			// Filter facets, tallied from the same entries the rows use.
+			const tally = (counts) =>
+				[...counts.entries()]
+					.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+					.map(([id, count]) => ({ id, count }));
+			const providers = new Map();
+			const tiers = new Map();
+			let visionCount = 0;
+			let largeCount = 0;
+			for (const m of Object.values(models)) {
+				providers.set(m.provider, (providers.get(m.provider) ?? 0) + 1);
+				tiers.set(m.tier, (tiers.get(m.tier) ?? 0) + 1);
+				if (m.vision) visionCount++;
+				if (m.largeContext) largeCount++;
+			}
+			report.facets = {
+				providers: tally(providers),
+				tiers: tally(tiers),
+				capabilities: [
+					...(visionCount ? [{ id: "vision", label: "Vision", count: visionCount }] : []),
+					...(largeCount ? [{ id: "largeContext", label: "200K+ context", count: largeCount }] : []),
+				],
+			};
+
+			// Per-row view: the price/tier of the CURRENT pin, plus how many backups exist.
 			for (const row of report.rows) {
-				const cost = row.pin ? priceData.costs[row.pin] : null;
-				row.costShort = cost?.short ?? null;
-				row.costTitle = cost?.title ?? null;
+				const info = row.pin ? models[row.pin] ?? null : null;
+				row.costShort = info?.short ?? (row.pin ? "n/a" : null);
+				row.costTitle = info?.title ?? null;
+				row.tier = info?.tier ?? null;
+				row.vision = info?.vision === true;
+				row.contextWindow = info?.contextWindow ?? null;
+				row.backups = backupCounts.get(row.name) ?? 0;
 			}
 			return report;
 		}
@@ -205,10 +286,10 @@ export default definePlugin({
 					}
 
 					const catalog = await readCatalog(host);
-					if (model && !catalog.has(model)) {
+					if (model && !catalog.ids.has(model)) {
 						return json(res, 400, {
 							ok: false,
-							error: `not an available model: ${model} (catalog has ${catalog.size}; an unknown pin would silently fall back to the main model)`,
+							error: `not an available model: ${model} (catalog has ${catalog.ids.size}; an unknown pin would silently fall back to the main model)`,
 						});
 					}
 
@@ -241,6 +322,63 @@ export default definePlugin({
 						backup,
 						report: await state(true),
 					});
+				} catch (err) {
+					json(res, 500, { ok: false, error: err?.message ?? String(err) });
+				}
+			}),
+		);
+
+		/**
+		 * Restore the newest backup for one agent.
+		 *
+		 * The current content is snapshotted FIRST, so a restore is itself restorable and a
+		 * second click steps back again rather than being a no-op. Only files this plugin
+		 * wrote into its own backup directory are ever read as a source.
+		 */
+		cleanup.push(
+			host.route("POST", "/restore", async (req, res) => {
+				try {
+					const body = req && typeof req.body === "object" && req.body !== null ? req.body : {};
+					const agent = String(body.agent ?? "").trim();
+					if (!/^[A-Za-z0-9._-]+$/.test(agent)) {
+						return json(res, 400, { ok: false, error: `invalid agent name: ${JSON.stringify(agent)}` });
+					}
+					const files = await listAgentFiles(host);
+					if (!files.includes(`${agent}.md`)) {
+						return json(res, 404, { ok: false, error: `unknown agent: ${agent}` });
+					}
+
+					let entries = [];
+					try {
+						entries = await host.fs.list(BACKUP_DIR);
+					} catch {
+						/* no backup dir yet */
+					}
+					// Names are <agent>-<ISO with ':' and '.' replaced by '-'>.md, so a plain
+					// reverse sort is newest-first.
+					const backups = entries
+						.filter((e) => e.type === "file" && e.name.startsWith(`${agent}-`) && e.name.endsWith(".md"))
+						.map((e) => e.name)
+						.sort()
+						.reverse();
+					if (!backups.length) {
+						return json(res, 404, { ok: false, error: `no backup exists for ${agent} - nothing to restore` });
+					}
+
+					const file = `${AGENTS_DIR}/${agent}.md`;
+					const current = await host.fs.readText(file);
+					const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+					const safety = `${BACKUP_DIR}/${agent}-${stamp}.md`;
+					try {
+						await host.fs.mkdir(BACKUP_DIR);
+					} catch {
+						/* already there */
+					}
+					await host.fs.write(safety, current);
+					const restored = await host.fs.readText(`${BACKUP_DIR}/${backups[0]}`);
+					await host.fs.write(file, restored);
+					host.log(`restored ${agent} from ${backups[0]} (pre-restore state saved as ${safety})`);
+					json(res, 200, { ok: true, agent, restoredFrom: backups[0], safety, report: await state(true) });
 				} catch (err) {
 					json(res, 500, { ok: false, error: err?.message ?? String(err) });
 				}

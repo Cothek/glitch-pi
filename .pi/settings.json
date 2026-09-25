@@ -7,6 +7,7 @@
     "+.pi/extensions/dispatcher.ts",
     "+.pi/extensions/memory-tools.ts",
     "+.pi/extensions/nvidia-model-sync.ts",
-    "+.pi/extensions/tunnel-keeper.ts"
+    "+.pi/extensions/tunnel-keeper.ts",
+    "+.pi/extensions/commandcode-usage.ts"
   ]
 }

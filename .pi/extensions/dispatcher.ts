@@ -25,6 +25,9 @@ import * as path from "node:path";
 import type { ExtensionAPI, AgentMessage } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig, type AgentScope } from "../lib/dispatcher-agents.ts";
+// Model + thinking precedence lives in its own dependency-free module so it can be
+// unit-tested without the pi runtime: .pi/lib/dispatch-plan.test.mjs.
+import { planDispatch } from "../lib/dispatch-plan.mjs";
 
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
@@ -86,12 +89,23 @@ async function spawnPiJson(
   signal: AbortSignal | undefined,
 ): Promise<SpawnResult> {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
-  // Skip OpenCode-specific models (opencode/*, opencode-go/*) — not available on Pi.
-  const agentModel = agent.model && !/^opencode(-go)?\//.test(agent.model) ? agent.model : undefined;
-  const inherits = !agentModel;
-  const model = agentModel ?? parentModel;
-  if (model) args.push("--model", model);
-  if (inherits && parentThinking) args.push("--thinking", parentThinking);
+  // Model + thinking choice: one source of truth, shared with the SDK path below and
+  // covered by .pi/lib/dispatch-plan.test.mjs.
+  const plan = planDispatch({
+    agentModel: agent.model,
+    agentThinking: agent.thinkingLevel,
+    parentModel,
+    parentThinking,
+  });
+  if (plan.droppedPin) {
+    // Say it out loud instead of silently running the parent model. The agent-models
+    // panel shows the same verdict; this is the dispatch-time echo of it.
+    console.error(
+      `[dispatcher] ${agent.name}: pin "${agent.model}" is not available on pi - running ${plan.model ?? "the model default"}`,
+    );
+  }
+  if (plan.model) args.push("--model", plan.model);
+  if (plan.thinking) args.push("--thinking", plan.thinking);
   if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
   let tmpPromptPath: string | null = null;
@@ -199,10 +213,14 @@ async function runViaSdk(
     const SessionManager = sdk?.SessionManager;
     if (typeof createAgentSession !== "function" || !SessionManager?.inMemory) return null;
 
-    // Same OpenCode-model filter as spawn (opencode/*, opencode-go/* → inherit)
-    const agentModel =
-      agent.model && !/^opencode(-go)?\//.test(agent.model) ? agent.model : undefined;
-    const modelId = agentModel ?? parentModel;
+    // Same precedence as the spawn path, from the same module.
+    const plan = planDispatch({
+      agentModel: agent.model,
+      agentThinking: agent.thinkingLevel,
+      parentModel,
+      parentThinking,
+    });
+    const modelId = plan.model;
 
     let model: unknown;
     if (modelId) {
@@ -217,7 +235,7 @@ async function runViaSdk(
       }
     }
     // Unresolvable explicit model → let spawn handle it (keeps known-good path)
-    if (agentModel && !model) return null;
+    if (!plan.inherits && !model) return null;
 
     const systemPrompt = agent.systemPrompt.trim();
     const prompt = systemPrompt ? `${systemPrompt}\n\nTask: ${task}` : `Task: ${task}`;
@@ -228,9 +246,9 @@ async function runViaSdk(
     };
     if (model) opts.model = model;
     if (agent.tools && agent.tools.length > 0) opts.tools = agent.tools;
-    if (!agentModel && parentThinking) {
+    if (plan.thinking) {
       try {
-        opts.thinkingLevel = parentThinking;
+        opts.thinkingLevel = plan.thinking;
       } catch {
         /* optional */
       }

@@ -624,6 +624,7 @@ function createInstance(container, ctx) {
 		models.appendChild(eff);
 		if (row.costShort) models.appendChild(costChipNode(row.costShort, row.costTitle));
 		if (row.tier && row.tier !== "unknown") models.appendChild(el("span", "am-cost", row.tier));
+		if (row.thinkingLevel) models.appendChild(el("span", "am-cost", `think:${row.thinkingLevel}`));
 		toggle.appendChild(models);
 
 		if (row.warnings.length) {

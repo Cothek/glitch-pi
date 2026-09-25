@@ -14,6 +14,10 @@ export interface AgentConfig {
   description: string;
   tools?: string[];
   model?: string;
+  /** Frontmatter `thinkingLevel:` - reasoning effort for this agent. Undefined means
+   *  "decide by the rules in .pi/lib/dispatch-plan.mjs" (parent level when the agent
+   *  inherits the model, the model's own default when it is pinned). */
+  thinkingLevel?: string;
   systemPrompt: string;
   source: "user" | "project";
   filePath: string;
@@ -29,6 +33,7 @@ type AgentFrontmatter = {
   description?: unknown;
   tools?: unknown;
   model?: unknown;
+  thinkingLevel?: unknown;
 };
 
 function parseToolList(value: unknown): string[] | undefined {
@@ -73,6 +78,10 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
       description: frontmatter.description,
       tools: parseToolList(frontmatter.tools),
       model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+      thinkingLevel:
+        typeof frontmatter.thinkingLevel === "string" && frontmatter.thinkingLevel.trim()
+          ? frontmatter.thinkingLevel.trim()
+          : undefined,
       systemPrompt: body,
       source,
       filePath,

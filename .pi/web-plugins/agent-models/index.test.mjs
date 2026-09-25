@@ -114,6 +114,25 @@ describe("resolver: parsing", () => {
 		assert.deepEqual(agent.tools, ["read"]);
 	});
 
+	it("parses a CRLF file, INCLUDING its last frontmatter key", () => {
+		// Regression: git normalizes these agent files to CRLF on checkout, and the last
+		// header line then carries a lone \r. Because "." does not match \r in JS, the
+		// key regex failed silently and a pinned agent reported as unpinned. Caught when
+		// the CLI claimed ten agents had no model after a checkout.
+		const crlf = `---\r\nname: pentester\r\ndescription: "d"\r\ntools: read, bash\r\nmodel: commandcode/z-ai/glm-5.3-flash\r\n---\r\n\r\nbody\r\n`;
+		const agent = parseAgentFile(crlf, "pentester.md");
+		assert.equal(agent.model, "commandcode/z-ai/glm-5.3-flash", "last key must survive CRLF");
+		assert.equal(agent.name, "pentester");
+		assert.deepEqual(agent.tools, ["read", "bash"]);
+		assert.match(agent.body, /^body/);
+	});
+
+	it("parses the thinkingLevel key (and leaves it null when absent)", () => {
+		const withLevel = parseAgentFile(`---\nname: memory\ndescription: "d"\nmodel: nvidia/x\nthinkingLevel: minimal\n---\nbody\n`, "memory.md");
+		assert.equal(withLevel.thinkingLevel, "minimal");
+		assert.equal(parseAgentFile(`---\nname: coder\ndescription: "d"\nmodel: nvidia/x\n---\nbody\n`, "coder.md").thinkingLevel, null);
+	});
+
 	it("degrades to no-pin instead of throwing on a file without frontmatter", () => {
 		const agent = parseAgentFile("# just a heading\n", "loose.md");
 		assert.equal(agent.name, "loose");

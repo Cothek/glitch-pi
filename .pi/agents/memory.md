@@ -3,6 +3,11 @@ name: memory
 description: "Memory writer agent. Writes and updates Glitch memory files only (user/*.md) preferences, decisions, patterns, diary, reminders."
 tools: read, write, ls, find, edit, bash, skill
 model: nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
+# Reasoning effort for THIS agent. Memory writes are mechanical transcription, so they do
+# not need the model's deep-thinking default. Absent on every other agent on purpose:
+# they get the parent session's level when they inherit the model, and their pinned
+# model's own default otherwise (see .pi/lib/dispatch-plan.mjs).
+thinkingLevel: minimal
 ---
 
 

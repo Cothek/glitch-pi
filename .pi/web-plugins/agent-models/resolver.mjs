@@ -82,7 +82,16 @@ export function splitFrontmatter(rawText) {
 	const bodyStart = text.indexOf("\n", end + 1);
 	const body = bodyStart === -1 ? "" : text.slice(bodyStart + 1).trim();
 	const data = {};
-	for (const line of header.split(/\r?\n/)) {
+	for (const rawLine of header.split(/\r?\n/)) {
+		// A CRLF file keeps a LONE trailing \r on its last frontmatter line: the split
+		// above only removes \r\n PAIRS, and the \r whose \n became the closing fence
+		// index is left attached. That matters because in JavaScript "." does not match
+		// \r, so "(.*)$" cannot span it and the regex fails outright - the key is dropped
+		// with no error. A pinned agent whose model: line is last (the usual shape) then
+		// reports as having no pin at all, which is exactly how this was caught: git
+		// normalized the file to CRLF on checkout and the CLI started claiming ten agents
+		// had no model.
+		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
 		const match = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
 		if (!match) continue;
 		data[match[1]] = unquote(match[2]);
@@ -115,6 +124,10 @@ export function parseAgentFile(rawText, fileName) {
 		description: typeof data.description === "string" ? data.description : "",
 		tools: parseToolList(data.tools),
 		model: typeof data.model === "string" && data.model.trim() ? data.model.trim() : null,
+		// Declared reasoning effort, if any. Absent means the dispatcher decides
+		// (parent level when inheriting the model, the model default when pinned).
+		thinkingLevel:
+			typeof data.thinkingLevel === "string" && data.thinkingLevel.trim() ? data.thinkingLevel.trim() : null,
 		body,
 		hasFrontmatter,
 	};
@@ -346,11 +359,13 @@ export function formatCostTitle(cost) {
 export function formatReportTable(report) {
 	const withCost = report.rows.some((r) => r.costShort);
 	const withTier = report.rows.some((r) => r.tier);
+	const withThinking = report.rows.some((r) => r.thinkingLevel);
 	const header = [
 		"AGENT",
 		"PINNED MODEL",
 		...(withCost ? ["COST"] : []),
 		...(withTier ? ["TIER"] : []),
+		...(withThinking ? ["THINKING"] : []),
 		"EFFECTIVE",
 		"STATUS",
 		"NOTE",
@@ -360,6 +375,7 @@ export function formatReportTable(report) {
 		r.pin ?? "(none)",
 		...(withCost ? [r.costShort ?? "n/a"] : []),
 		...(withTier ? [r.tier ?? "unknown"] : []),
+		...(withThinking ? [r.thinkingLevel ?? "(model default)"] : []),
 		r.effective ?? r.effectiveLabel,
 		r.statusLabel,
 		r.warnings.length ? r.warnings.join("; ") : r.why,

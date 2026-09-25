@@ -18,7 +18,8 @@
 param(
     [int]$WebPort = 8787,
     [int]$AuthPort = 4103,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [switch]$NoTunnel
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +27,7 @@ $RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $NodeExe = Join-Path $RootDir "data\node\node.exe"
 if (-not (Test-Path $NodeExe)) { $NodeExe = "node" }
 $Body = Join-Path $RootDir "scripts\pi-stack-window.ps1"
+$TunnelScript = Join-Path $RootDir "scripts\lib\tunnel.mjs"
 
 function Test-Port([int]$Port) {
     [bool](netstat -ano | Select-String ":$Port\s" | Select-String "LISTENING")
@@ -47,6 +49,7 @@ if ($busy.Count -gt 0) {
 # stays readable instead of vanishing with the window.
 $psArgs = "-NoExit -ExecutionPolicy Bypass -File `"$Body`" -WebPort $WebPort -AuthPort $AuthPort"
 if ($NoBrowser) { $psArgs += " -NoBrowser" }
+if ($NoTunnel) { $psArgs += " -NoTunnel" }
 $win = Start-Process powershell -ArgumentList $psArgs -WorkingDirectory $RootDir -PassThru
 
 Write-Host "Opening Pi web UI window (PID $($win.Id))..." -ForegroundColor Cyan
@@ -64,14 +67,28 @@ function Wait-Port([int]$Port, [int]$TimeoutSec) {
 $webUp = Wait-Port $WebPort 60
 $authUp = Wait-Port $AuthPort 20
 
+# The tunnel is started by the window body (it owns the child), so read its
+# state from the shared ownership record instead of guessing.
+$tunnelLine = "unknown"
+if (Test-Path $TunnelScript) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $line = & $NodeExe $TunnelScript status | Select-Object -First 1
+        if ($line) { $tunnelLine = ($line -replace '^\s*cloudflared:\s*', '') }
+    } catch { $tunnelLine = "unknown" } finally { $ErrorActionPreference = $prev }
+}
+
 Write-Host ""
 Write-Host "Result:"
 Write-Host "  pi-web-ui  ($WebPort): $(if ($webUp) {'UP'} else {'DOWN'})"
 Write-Host "  auth-proxy ($AuthPort): $(if ($authUp) {'UP'} else {'DOWN'})"
+Write-Host "  tunnel (cloudflared): $(if ($NoTunnel) {'skipped (-NoTunnel)'} else {$tunnelLine})"
 
 if ($webUp -and $authUp) {
     Write-Host ""
-    Write-Host "  Close the Pi web UI window (PID $($win.Id)) to stop the stack." -ForegroundColor DarkGray
+    Write-Host "  Close the Pi web UI window (PID $($win.Id)) to stop the stack (web UI," -ForegroundColor DarkGray
+    Write-Host "  auth proxy, and any tunnel that window started)." -ForegroundColor DarkGray
     exit 0
 } else {
     Write-Host ""

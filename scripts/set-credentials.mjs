@@ -20,7 +20,7 @@
 // ?auth_token= bookmark, because the token is base64("username:password").
 // Re-login once afterwards.
 
-import { existsSync, writeFileSync, openSync, mkdirSync, readFileSync } from 'fs';
+import { existsSync, writeFileSync, openSync, mkdirSync, readFileSync, unlinkSync } from 'fs';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync, spawn, spawnSync } from 'child_process';
@@ -76,7 +76,7 @@ function validateUsername(name) {
 }
 
 function parseArgs(argv) {
-  const out = { username: null, password: null, show: false, help: false };
+  const out = { username: null, password: null, show: false, help: false, revokeSessions: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--username' || a === '-u') out.username = argv[++i] ?? '';
@@ -84,10 +84,28 @@ function parseArgs(argv) {
     else if (a === '--password' || a === '-p') out.password = argv[++i] ?? '';
     else if (a.startsWith('--password=')) out.password = a.slice('--password='.length);
     else if (a === '--show' || a === '-s') out.show = true;
+    else if (a === '--revoke-sessions') out.revokeSessions = true;
     else if (a === '--help' || a === '-h') out.help = true;
     else if (!a.startsWith('-') && out.password === null) out.password = a; // legacy positional
   }
   return out;
+}
+
+/**
+ * Log out every device. Sessions are independent of the credential, so a password
+ * change deliberately does NOT evict them; this is the explicit "log out
+ * everywhere". It is also the recovery move when a password leaked: rotate, then
+ * revoke, and every old session dies.
+ */
+function revokeAllSessions() {
+  const file = join(ROOT_DIR, 'data', 'auth-sessions.json');
+  let removed = 0;
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf-8'));
+    removed = Object.keys(parsed?.sessions || {}).length;
+  } catch {}
+  try { unlinkSync(file); } catch {}
+  return { file, removed };
 }
 
 const USAGE = `
@@ -98,10 +116,15 @@ const USAGE = `
     node scripts/set-credentials.mjs --password <pw>        set a specific password
     node scripts/set-credentials.mjs --username <n> --password <pw>
     node scripts/set-credentials.mjs --show                 show current state (no secrets)
+    node scripts/set-credentials.mjs --revoke-sessions      log out every device (keeps the credentials)
 
   Files (repo root, gitignored):
     .server-username   login username   (absent = "${AUTH_USERNAME}")
     .server-password   login password   (absent = no login possible)
+
+  Sessions are separate from the credentials, so changing them does NOT log out
+  the browser you are using, or any other device. Use --revoke-sessions (alone, or
+  together with a change) to log everyone out.
 `;
 
 const args = parseArgs(process.argv.slice(2));
@@ -126,7 +149,18 @@ if (args.show) {
 }
 
 const changingUsername = args.username !== null;
-const changingPassword = args.password !== null || !changingUsername;
+const changingPassword = args.password !== null || (!changingUsername && !args.revokeSessions);
+
+// Pure revoke: no credential change, just drop every session.
+if (args.revokeSessions && !changingUsername && args.password === null) {
+  const r = revokeAllSessions();
+  console.log('');
+  console.log(`  Logged out every device (${r.removed} session${r.removed === 1 ? '' : 's'} revoked).`);
+  console.log(`  Removed: ${r.file}`);
+  console.log('  Credentials are unchanged - log in again with the same username and password.');
+  console.log('');
+  process.exit(0);
+}
 
 if (changingUsername) {
   const name = String(args.username).trim();
@@ -227,8 +261,16 @@ if (!findPidOnPort(WEBUI_PORT)) {
   console.log('        node scripts/launch-pi.mjs --stack-only');
 }
 
-// 4. The banner is the shared helper, so it always matches what the gate expects.
+// 4. Optional: evict every session (explicit "log out everywhere").
+if (args.revokeSessions) {
+  const r = revokeAllSessions();
+  console.log(`  Logged out every device (${r.removed} session${r.removed === 1 ? '' : 's'} revoked)`);
+}
+
+// 5. The banner is the shared helper, so it always matches what the gate expects.
 printLoginBanner({ password, color: process.stdout.isTTY === true });
 console.log('  Local http://localhost:%d needs no auth.', WEBUI_PORT);
-console.log('  Old cookies / ?auth_token= bookmarks are invalidated - re-auth once.');
+console.log('  Sessions are independent of the credentials: this change did NOT log');
+console.log('  you out, and other logged-in devices are still logged in.');
+console.log('  To log everyone out: node scripts/set-credentials.mjs --revoke-sessions');
 console.log('');

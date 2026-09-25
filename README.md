@@ -129,7 +129,24 @@ node scripts/set-credentials.mjs --password 'a-real-secret' # set a specific pas
 node scripts/set-credentials.mjs --show                     # current username / whether a password is set
 ```
 
-**Credentials**: the login is HTTP Basic auth built from two optional, gitignored files at the repo root. `.server-username` holds the username (absent means the `opencode` default) and `.server-password` holds the password (absent means no login is possible). `scripts/set-credentials.mjs` writes either one and restarts the auth proxy, so a change takes effect immediately. Changing either value invalidates the 7-day `glitch_auth` cookie and every `?auth_token=` bookmark, because the token is `base64("username:password")` - expect one re-login. The colon is rejected in a username on purpose: Basic auth splits the header on the first colon, so `a:b` would silently authenticate as `a`.
+**Credentials**: the login is HTTP Basic auth built from two optional, gitignored files at the repo root. `.server-username` holds the username (absent means the `opencode` default) and `.server-password` holds the password (absent means no login is possible). `scripts/set-credentials.mjs` writes either one and restarts the auth proxy, so a change takes effect immediately. The colon is rejected in a username on purpose: Basic auth splits the header on the first colon, so `a:b` would silently authenticate as `a`.
+
+**Sessions are separate from the credentials.** The `glitch_auth` cookie holds a random session id - not the credential - and sessions live in `data/auth-sessions.json` (gitignored, 7-day sliding expiry). So changing the username or password affects **new logins only**: the browser you are using, and any other logged-in device, stay logged in. That is deliberate, because making the cookie *be* the credential is what used to log you out the instant you rotated it. To revoke anyway:
+
+```bash
+node scripts/set-credentials.mjs --revoke-sessions   # log out every device (credentials unchanged)
+```
+
+The gate also exposes, behind the login itself:
+
+| Route | Purpose |
+|---|---|
+| `GET /__auth/whoami` | how you authenticated (session / basic / token) |
+| `POST /__auth/logout` | revoke the current session |
+| `POST /__auth/logout-others` | revoke every other session, keep yours |
+| `POST /__auth/logout-all` | revoke every session |
+
+A pre-sessions cookie (one still holding the old `base64(user:pass)` value) is accepted once and upgraded in place, so upgrading does not log anyone out. And a missing or corrupt session store is never a lockout: Basic auth and `?auth_token=` stay independent of it.
 
 Start mode is remembered in `user/launch-preference.json` (`pi_stack_mode`) only when you pass `--windowed` or `--headless`; otherwise a console launch gets a window and a no-console launch (extension, automation) stays detached.
 

@@ -6,9 +6,22 @@
  * Credentials accepted via:
  *   - Authorization: Basic <base64> header (browser native auth dialog)
  *   - ?auth_token=<base64> query parameter (bookmarkable one-click URL)
- *   - glitch_auth=<base64> HttpOnly cookie (set automatically on any
- *     successful auth; covers SPA internal fetches that carry no
- *     credentials, e.g. Model Switcher /models/api/* calls)
+ *   - glitch_auth=<session id> HttpOnly cookie, set automatically on any
+ *     successful auth; covers SPA internal fetches that carry no credentials
+ *
+ * SESSIONS ARE NOT THE CREDENTIAL. The cookie used to hold base64(user:pass),
+ * which meant changing the password logged out every browser at once, including
+ * the one making the change - the classic "rotate it and lock yourself out".
+ * The cookie now holds a random session id, and sessions live in their own file,
+ * so credentials and sessions are independent: a credential change affects NEW
+ * logins only. A pre-sessions cookie (still holding the old token) is accepted
+ * once and upgraded in place, so nobody is logged out by this change either.
+ *
+ * Session routes (handled before the gate, so they work even when the caller's
+ * session is already gone):
+ *   GET  /__auth/whoami      -> how you authenticated + when the session expires
+ *   POST /__auth/logout      -> revoke the current session (idempotent)
+ *   POST /__auth/logout-all  -> revoke every session ("log out everywhere")
  *
  * Usage: node plugins/auth-proxy.mjs [port] [upstream]
  *   Default port: 4101
@@ -16,7 +29,8 @@
  */
 
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, statSync, renameSync, mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -63,55 +77,185 @@ try {
 }
 const USERNAME = readUsername();
 const authToken = Buffer.from(`${USERNAME}:${password}`).toString('base64');
-const AUTH_COOKIE = `glitch_auth=${authToken}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`;
+const AUTH_COOKIE_NAME = 'glitch_auth';
+
+// ---- Session store ---------------------------------------------------------
+// `data/` is already gitignored, so the session list never lands in git. Read is
+// cached by mtime and pruned of expired entries, so the usual per-request cost is
+// one statSync. A missing or corrupt store reads as "no sessions" - it can never
+// throw, because Basic auth and ?auth_token= stay independent of this file and
+// must keep working even if the store is gone.
+const SESSIONS_FILE = resolve(rootDir, 'data', 'auth-sessions.json');
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // matches the old cookie Max-Age
+const SESSION_EXTEND_AFTER_MS = 60 * 60 * 1000; // throttle: extend at most hourly
+
+let sessionCache = { mtimeMs: -1, data: null };
+
+function emptyStore() {
+  return { version: 1, sessions: {} };
+}
+
+function readStore() {
+  let stat;
+  try {
+    stat = statSync(SESSIONS_FILE);
+  } catch {
+    // Deleted or never created: no remembered sessions. Never a lockout, Basic still works.
+    return emptyStore();
+  }
+  if (sessionCache.data && sessionCache.mtimeMs === stat.mtimeMs) return sessionCache.data;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(SESSIONS_FILE, 'utf-8'));
+  } catch {
+    console.error('auth-proxy: sessions file unreadable - treating as no sessions');
+    parsed = emptyStore();
+  }
+  if (!parsed || typeof parsed !== 'object' || !parsed.sessions || typeof parsed.sessions !== 'object') {
+    parsed = emptyStore();
+  }
+  const now = Date.now();
+  for (const [id, s] of Object.entries(parsed.sessions)) {
+    if (!s || typeof s.expiresAt !== 'number' || s.expiresAt <= now) delete parsed.sessions[id];
+  }
+  sessionCache = { mtimeMs: stat.mtimeMs, data: parsed };
+  return parsed;
+}
+
+function writeStore(store) {
+  try {
+    mkdirSync(dirname(SESSIONS_FILE), { recursive: true });
+    const tmp = `${SESSIONS_FILE}.tmp`;
+    writeFileSync(tmp, JSON.stringify(store), 'utf-8');
+    renameSync(tmp, SESSIONS_FILE); // atomic within the same volume
+    try {
+      sessionCache = { mtimeMs: statSync(SESSIONS_FILE).mtimeMs, data: store };
+    } catch {}
+    return true;
+  } catch (e) {
+    // Degrade, never fail the request: the session just will not be remembered.
+    console.error('auth-proxy: could not persist sessions:', e.message);
+    return false;
+  }
+}
+
+function createSession() {
+  const store = readStore();
+  const id = randomBytes(32).toString('hex');
+  const now = Date.now();
+  store.sessions[id] = { createdAt: now, lastSeenAt: now, expiresAt: now + SESSION_TTL_MS };
+  writeStore(store);
+  return id;
+}
+
+/** Sliding expiry, throttled so an active page does not rewrite the file per request. */
+function touchSession(id) {
+  const store = readStore();
+  const s = store.sessions[id];
+  if (!s) return false;
+  const now = Date.now();
+  if (typeof s.expiresAt !== 'number' || s.expiresAt <= now) return false;
+  if (now - (s.lastSeenAt || 0) > SESSION_EXTEND_AFTER_MS) {
+    s.lastSeenAt = now;
+    s.expiresAt = now + SESSION_TTL_MS;
+    writeStore(store);
+  }
+  return true;
+}
+
+function revokeSession(id) {
+  const store = readStore();
+  if (!store.sessions[id]) return false;
+  delete store.sessions[id];
+  writeStore(store);
+  return true;
+}
+
+function revokeAllSessions() {
+  const n = Object.keys(readStore().sessions).length;
+  writeStore(emptyStore());
+  return n;
+}
+
+/** Revoke every session EXCEPT one - "log out my other devices". */
+function revokeOtherSessions(keepId) {
+  const store = readStore();
+  let n = 0;
+  for (const id of Object.keys(store.sessions)) {
+    if (id === keepId) continue;
+    delete store.sessions[id];
+    n++;
+  }
+  if (n > 0) writeStore(store);
+  return n;
+}
+
+function sessionCookie(sid) {
+  return `${AUTH_COOKIE_NAME}=${sid}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`;
+}
+
+function expiredCookie() {
+  return `${AUTH_COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`;
+}
+
+/** Value of one cookie, or null. */
+function readCookie(req, name) {
+  const header = req.headers['cookie'];
+  if (!header) return null;
+  for (const cookie of header.split(';')) {
+    const eq = cookie.indexOf('=');
+    if (eq === -1) continue;
+    if (cookie.slice(0, eq).trim() !== name) continue;
+    return cookie.slice(eq + 1).trim();
+  }
+  return null;
+}
 
 const PROXY_PORT = parseInt(process.argv[2] || '4101', 10);
 const UPSTREAM_URL = process.argv[3] || 'http://localhost:4102';
 const upstream = new URL(UPSTREAM_URL);
 
 /**
- * Extract and validate credentials from request.
- * Returns true if auth matches, false otherwise.
- * Checks: Authorization header, then auth_token query param, then glitch_auth cookie.
+ * Resolve the caller's identity.
+ * Returns { ok: true, sid, via } or { ok: false }. `sid` is the session id to
+ * (re)issue as the cookie, so every authenticated response refreshes it.
+ *
+ * Order: the session cookie first (the normal path afterwards - and checking it
+ * before Basic matters, because a browser holding stale cached Basic credentials
+ * would otherwise be judged on a header it cannot stop sending), then Basic,
+ * then ?auth_token=, then a pre-sessions cookie which is upgraded in place.
  */
-function isAuthenticated(req) {
-  // Check Authorization header
+function authenticate(req) {
+  const cookieValue = readCookie(req, AUTH_COOKIE_NAME);
+  if (cookieValue && touchSession(cookieValue)) {
+    return { ok: true, sid: cookieValue, via: 'session' };
+  }
+
+  // Authorization: Basic header (browser native dialog, scripts, abort-agent).
   const authHeader = req.headers['authorization'];
   if (authHeader) {
     const match = authHeader.match(/^Basic\s+(.+)$/i);
-    if (match && match[1] === authToken) {
-      return true;
-    }
+    if (match && match[1] === authToken) return { ok: true, sid: createSession(), via: 'basic' };
   }
 
-  // Check auth_token query parameter (bookmarkable URL support)
+  // ?auth_token= query parameter (bookmarkable one-click URL).
   if (req.url) {
     try {
       const parsed = new URL(req.url, 'http://localhost');
-      const tokenParam = parsed.searchParams.get('auth_token');
-      if (tokenParam === authToken) {
-        return true;
+      if (parsed.searchParams.get('auth_token') === authToken) {
+        return { ok: true, sid: createSession(), via: 'token' };
       }
     } catch {}
   }
 
-  // Check glitch_auth HttpOnly cookie (set on any successful auth; covers
-  // SPA internal fetches that carry no Authorization header or query param)
-  const cookieHeader = req.headers['cookie'];
-  if (cookieHeader) {
-    const cookies = cookieHeader.split(';');
-    for (const cookie of cookies) {
-      const eq = cookie.indexOf('=');
-      if (eq === -1) continue;
-      const name = cookie.slice(0, eq).trim();
-      const value = cookie.slice(eq + 1).trim();
-      if (name === 'glitch_auth' && value === authToken) {
-        return true;
-      }
-    }
+  // Pre-sessions cookie: its value WAS base64(user:pass). Accept it once and let
+  // the response swap it for a session id, so this upgrade logs nobody out.
+  if (cookieValue && cookieValue === authToken) {
+    return { ok: true, sid: createSession(), via: 'legacy-cookie' };
   }
 
-  return false;
+  return { ok: false };
 }
 
 /**
@@ -120,20 +264,80 @@ function isAuthenticated(req) {
  * previously set via res.setHeader(), so we must merge set-cookie explicitly
  * here in each proxy branch rather than relying on setHeader() at the top.
  */
-function withAuthCookie(upstreamHeaders) {
+function withAuthCookie(upstreamHeaders, sid) {
+  const cookie = sessionCookie(sid);
   const merged = { ...upstreamHeaders };
   const upstreamCookies = upstreamHeaders['set-cookie'];
   if (upstreamCookies) {
     merged['set-cookie'] = Array.isArray(upstreamCookies)
-      ? [...upstreamCookies, AUTH_COOKIE]
-      : [upstreamCookies, AUTH_COOKIE];
+      ? [...upstreamCookies, cookie]
+      : [upstreamCookies, cookie];
   } else {
-    merged['set-cookie'] = AUTH_COOKIE;
+    merged['set-cookie'] = cookie;
   }
   return merged;
 }
 
 const server = http.createServer((req, res) => {
+  // ---- Session routes -------------------------------------------------------
+  // Handled before everything else, deliberately: logout must work even when the
+  // caller's session is already dead, and whoami is how a client proves a fresh
+  // credential pair works without touching the session it is already using.
+  if (req.url && req.url.startsWith('/__auth/')) {
+    const path = req.url.split('?')[0];
+    const auth = authenticate(req);
+
+    if (path === '/__auth/logout') {
+      // Idempotent: revoke whichever session the caller presented, if any.
+      const sid = readCookie(req, AUTH_COOKIE_NAME);
+      const revoked = sid ? revokeSession(sid) : false;
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Set-Cookie': expiredCookie(),
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: true, revoked }) + '\n');
+      return;
+    }
+
+    if (!auth.ok) {
+      res.writeHead(401, {
+        'WWW-Authenticate': 'Basic realm="Glitch AI", charset="UTF-8"',
+        'Content-Type': 'text/plain',
+      });
+      res.end('Authorization required');
+      return;
+    }
+
+    if (path === '/__auth/whoami') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, username: readUsername(), via: auth.via }) + '\n');
+      return;
+    }
+
+    if (path === '/__auth/logout-others') {
+      const count = revokeOtherSessions(auth.sid);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, revoked: count, kept: 'this session' }) + '\n');
+      return;
+    }
+
+    if (path === '/__auth/logout-all') {
+      const count = revokeAllSessions();
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Set-Cookie': expiredCookie(),
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: true, revoked: count }) + '\n');
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Unknown auth route');
+    return;
+  }
+
   // ---- Route /money to glitch-money dashboard (port 4110) ----
   // The money dashboard has its own token auth (glitch_dash cookie / Bearer).
   // The proxy does NOT gate /money requests — the dashboard serves its login
@@ -184,8 +388,9 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ---- Authentication gate (applies to all paths except /money above) ----
-  if (!isAuthenticated(req)) {
+  // ---- Authentication gate (applies to all paths except /money and /__auth above) ----
+  const auth = authenticate(req);
+  if (!auth.ok) {
     res.writeHead(401, {
       'WWW-Authenticate': 'Basic realm="Glitch AI", charset="UTF-8"',
       'Content-Type': 'text/plain',
@@ -222,7 +427,7 @@ const server = http.createServer((req, res) => {
       },
     };
     const proxyReq = http.request(options, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers));
+      res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers, auth.sid));
       proxyRes.pipe(res);
     });
     proxyReq.on('error', (err) => {
@@ -260,7 +465,7 @@ const server = http.createServer((req, res) => {
       },
     };
     const proxyReq = http.request(options, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers));
+      res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers, auth.sid));
       proxyRes.pipe(res);
     });
     proxyReq.on('error', (err) => {
@@ -312,7 +517,7 @@ const server = http.createServer((req, res) => {
       proxyRes.headers['pragma'] = 'no-cache';
       proxyRes.headers['expires'] = '0';
     }
-    res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers));
+    res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers, auth.sid));
     proxyRes.pipe(res);
   });
 

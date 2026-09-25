@@ -126,6 +126,6 @@ export function printLoginBanner(opts = {}) {
   write(DIM(`   Username lives in ${USERNAME_FILE} (optional, default ${AUTH_USERNAME})`));
   write(DIM(`   Password lives in ${PASSWORD_FILE}`));
   write(DIM('   Change either with: node scripts/set-credentials.mjs'));
-  write(GREEN('   (existing cookies / auth_token bookmarks die when the username or password changes)'));
+  write(GREEN('   (changing the username or password does NOT log you out - sessions are separate; use --revoke-sessions to log out)'));
   write('');
 }

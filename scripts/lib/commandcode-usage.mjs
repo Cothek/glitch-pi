@@ -177,9 +177,9 @@ function windowLine(label, w, now) {
   if (!w) return `${label.padEnd(3)}  unavailable`;
   const resets = `resets in ${countdown(w.resetAt - now, now)}`;
   return [
-    `${label.padEnd(3)} ${money(w.used).padStart(6)} / ${money(w.cap).padEnd(6)}`,
+    `${label.padEnd(3)} ${pct(w.used, w.cap).padStart(4)}`,
     bar(w.used, w.cap),
-    `${pct(w.used, w.cap).padStart(3)}`,
+    `${money(w.used)} / ${money(w.cap)}`,
     resets,
     w.exceeded ? "EXCEEDED" : "",
   ]
@@ -205,15 +205,17 @@ export function renderWidgetLines(snap, now = new Date()) {
   if (snap.planCredits) {
     const used = Math.max(0, snap.planCredits - snap.monthlyRemaining);
     const line = [
-      `mo  ${money(used).padStart(6)} / ${money(snap.planCredits).padEnd(6)}`,
+      `mo  ${pct(used, snap.planCredits).padStart(4)}`,
       bar(used, snap.planCredits),
-      `${pct(used, snap.planCredits).padStart(3)}`,
+      `${money(used)} / ${money(snap.planCredits)}`,
       snap.periodEnd ? `period ends ${new Date(snap.periodEnd).toISOString().slice(0, 10)}` : "",
     ]
       .filter(Boolean)
       .join("  ");
     lines.push(line);
-    lines.push(`    ${money(snap.monthlyRemaining)} credits remaining this period`);
+    lines.push(
+      `    ${pct(snap.monthlyRemaining, snap.planCredits)} remaining (${money(snap.monthlyRemaining)} credits)`,
+    );
   } else {
     lines.push(`mo  ${money(snap.monthlyRemaining)} credits remaining this period`);
   }
@@ -221,16 +223,26 @@ export function renderWidgetLines(snap, now = new Date()) {
   return lines;
 }
 
-/** Short text for ctx.ui.setStatus (status bar chip). */
+/**
+ * Short text for ctx.ui.setStatus (status bar chip).
+ * Percent-led: the chip answers "how much of my limit is gone?" at a glance.
+ * All three figures are percent USED, matching the dashboard bars.
+ */
 export function renderStatusText(snap, now = new Date()) {
   const nowMs = now.getTime();
+  const usedPct = (used, cap) => (cap > 0 ? `${Math.min(100, Math.round((used / cap) * 100))}%` : "?");
+
   const fiveHour = snap.fiveHour
-    ? `5h ${money(snap.fiveHour.used)}/${money(snap.fiveHour.cap)} (${countdown(snap.fiveHour.resetAt - nowMs, nowMs)})`
+    ? `5h ${usedPct(snap.fiveHour.used, snap.fiveHour.cap)} (${countdown(snap.fiveHour.resetAt - nowMs, nowMs)})`
     : "5h ?";
   const weekly = snap.weekly
-    ? `wk ${money(snap.weekly.used)}/${money(snap.weekly.cap)} (${countdown(snap.weekly.resetAt - nowMs, nowMs)})`
+    ? `wk ${usedPct(snap.weekly.used, snap.weekly.cap)} (${countdown(snap.weekly.resetAt - nowMs, nowMs)})`
     : "wk ?";
-  return `CC ${fiveHour} · ${weekly} · mo ${money(snap.monthlyRemaining)} left`;
+  const monthly = snap.planCredits
+    ? `mo ${usedPct(Math.max(0, snap.planCredits - snap.monthlyRemaining), snap.planCredits)}`
+    : "mo ?";
+
+  return `CC ${fiveHour} · ${weekly} · ${monthly}`;
 }
 
 // ---- CLI mode ---------------------------------------------------------------

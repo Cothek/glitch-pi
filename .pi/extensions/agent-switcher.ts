@@ -9,7 +9,11 @@
  * HOW IT WORKS
  *   before_agent_start mutates systemPromptOptions.customPrompt (= preamble
  *   section, the exact slot .pi/SYSTEM.md feeds) every turn. Pi diffs sections
- *   and patches the conversation mid-stream. Model / thinking / tool loadout
+ *   and patches the conversation mid-stream. Profiles are RE-READ FROM DISK on
+ *   every turn (loadProfiles in the before_agent_start handler), so an edit to
+ *   .pi/agent-profiles/<mode>.md lands on the next turn — no restart and no
+ *   /agent round-trip needed. A failed read keeps the session_start snapshot.
+ *   Model / thinking / tool loadout
  *   are applied mid-session via pi.setModel() / setThinkingLevel() /
  *   setActiveTools(), which pi records in session history and restores on
  *   resume. The switch ALSO stages .pi/SYSTEM.md + writes user/agent-mode.json
@@ -331,6 +335,17 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 	// ---- System prompt swap (every turn) --------------------------------------
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		// Re-read the profiles so edits to .pi/agent-profiles/<mode>.md take effect
+		// on the NEXT TURN instead of waiting for a session restart. The profile set
+		// is 3 small files and the prompt builder diffs the section, so a no-op turn
+		// costs almost nothing. A failed read keeps the session_start snapshot.
+		try {
+			const fresh = loadProfiles(repoRoot);
+			if (fresh.length > 0) profiles = fresh;
+		} catch {
+			/* unreadable profile dir — keep the session_start snapshot */
+		}
+
 		// Reconcile with the shared marker first: the pi-web-ui plugin switches by
 		// writing user/agent-mode.json (it has no reliable way to reach a specific
 		// conversation), so pick that up here and adopt the profile for this turn.

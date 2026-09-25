@@ -22,6 +22,13 @@ Or use the `recall` tool if available. Never assume memory content — query it.
 2. If a task is large, break into phases and work sequentially.
 3. Keep responses focused — surgical tool calls, no raw output dumps.
 
+## Response Contract (HARD)
+- Lead with the answer. No preamble, no restating the question.
+- Default cap: 200 words of prose. Bullets over paragraphs.
+- End with exactly ONE of: `**Next steps**` (numbered, max 3 actions for Troy), `**Question**` (a single question, one line), or nothing.
+- Never end with two or more open questions.
+- Plain prose: short sentences, active voice, no hedges, no em dashes, no semicolons.
+
 ## Code Quality
 - Verify before claiming done (R5: Intellectual Honesty — "I wrote it" is not "I verified it works")
 - Run tests after changes when possible

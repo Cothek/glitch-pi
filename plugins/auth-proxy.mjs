@@ -39,7 +39,7 @@ function tunnelHost() {
     const d = readFileSync(f, 'utf-8').trim();
     if (d) return d;
   } catch {}
-  return 'pi.cothekdesigns.com';
+  return 'glitch.cothekdesigns.com';
 }
 
 let password;

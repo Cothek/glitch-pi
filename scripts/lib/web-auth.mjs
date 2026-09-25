@@ -21,7 +21,7 @@ export const AUTH_USERNAME = 'opencode';
 export const WEBUI_PORT = Number(process.env.GLITCH_PI_WEBUI_PORT) || 8787;
 export const AUTH_PORT = Number(process.env.GLITCH_PI_AUTH_PORT) || 4103;
 export const PASSWORD_FILE = join(ROOT_DIR, '.server-password');
-export const DEFAULT_TUNNEL_HOST = 'pi.cothekdesigns.com';
+export const DEFAULT_TUNNEL_HOST = 'glitch.cothekdesigns.com';
 
 /** Trimmed password from .server-password, or null when the file is missing. */
 export function readPassword() {

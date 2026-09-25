@@ -21,7 +21,7 @@
 //   cloudflared.exe + config/cloudflared-config.yml are in the repo root
 //   (both gitignored). One Cloudflare tunnel (credentials in
 //   ~/.cloudflared/<uuid>.json — user-level, never inside a repo) serves the
-//   glitch / trader / pi hostnames; pi.cothekdesigns.com → auth-proxy :4103
+//   glitch / trader hostnames (pi.* kept as a legacy alias); glitch.cothekdesigns.com → auth-proxy :4103
 //   → pi-web-ui :8787.
 
 import { existsSync, readFileSync, writeFileSync, openSync, mkdirSync, appendFileSync, unlinkSync } from 'fs';
@@ -38,7 +38,7 @@ const ROOT_DIR = resolve(__dirname, '..', '..');
 const isWin = process.platform === 'win32';
 
 // The auth proxy in front of pi-web-ui. The tunnel is only useful when this
-// is listening (pi.cothekdesigns.com routes here; :4103 fronts :8787).
+// is listening (glitch.cothekdesigns.com routes here; :4103 fronts :8787).
 const AUTH_PROXY_PORT = 4103;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -105,7 +105,7 @@ export function tunnelHost() {
       if (d) return d;
     }
   } catch {}
-  return 'pi.cothekdesigns.com';
+  return 'glitch.cothekdesigns.com';
 }
 
 // The PID file is the ownership record: a tunnel started by ensureTunnel() (or
@@ -202,7 +202,7 @@ export async function ensureTunnel(log = (msg) => console.log(msg)) {
     log('cloudflared already running — leaving tunnel as-is', 'ok');
     return { running: true, started: false, reason: 'already-running' };
   }
-  // The tunnel only makes sense with the web stack up: pi.cothekdesigns.com
+  // The tunnel only makes sense with the web stack up: glitch.cothekdesigns.com
   // routes to the auth proxy (:4103), which fronts pi-web-ui (:8787).
   // TUI-only sessions run no web stack, so they spawn no tunnel to nowhere.
   if (!(await waitForPort(AUTH_PROXY_PORT))) {

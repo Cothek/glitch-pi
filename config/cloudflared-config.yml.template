@@ -7,7 +7,7 @@ tunnel: d602618b-0f68-4537-bbad-01577e1a29dc
 ingress:
   # Route glitch.cothekdesigns.com through the auth proxy (handles both SPA and terminal)
   - hostname: glitch.cothekdesigns.com
-    service: http://localhost:4100
+    service: http://localhost:4103
 
   # Glitch Trader frontend
   - hostname: glitch-trader.cothekdesigns.com
@@ -17,8 +17,8 @@ ingress:
   - hostname: glitch-trader-api.cothekdesigns.com
     service: http://localhost:4120
 
-  # Pi web UI - routed through its own auth-proxy instance (4103 -> 8787),
-  # same .server-password as Glitch. No Cloudflare Zero Trust required.
+  # Pi Web UI - legacy alias for the same auth proxy; glitch.* is canonical.
+  # Same .server-password as Glitch. No Cloudflare Zero Trust required.
   - hostname: pi.cothekdesigns.com
     service: http://localhost:4103
 

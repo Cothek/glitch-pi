@@ -11,7 +11,7 @@
 
     Then stops the Cloudflare tunnel through scripts\lib\tunnel.mjs, the same
     module that starts it. A tunnel left behind after the stack is down just
-    serves 502s for pi.cothekdesigns.com, so the two scripts must not drift.
+    serves 502s for glitch.cothekdesigns.com, so the two scripts must not drift.
     Only a tunnel this repo started (recorded in data\cloudflared-auto.pid) is
     stopped; one started by hand is reported and left running.
 

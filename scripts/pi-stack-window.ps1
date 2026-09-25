@@ -17,7 +17,7 @@
     Ctrl+C stops it the same way, and the finally block reaps the children.
 
     That is the point of windowed mode: the tunnel does not outlive the stack,
-    so pi.cothekdesigns.com never keeps pointing at a dead origin. The detached
+    so glitch.cothekdesigns.com never keeps pointing at a dead origin. The detached
     stack (start-pi-stack.ps1) is the opposite - there the tunnel is spawned
     detached too, so it survives closing every shell.
 

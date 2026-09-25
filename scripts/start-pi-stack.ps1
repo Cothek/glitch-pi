@@ -137,7 +137,7 @@ function Show-LoginBanner {
         if (-not $Host.UI.SupportsVirtualTerminal) { $credArgs += "--plain" }
         & $NodeExe $ShowCreds @credArgs
     } else {
-        Write-Host "  Remote: https://pi.cothekdesigns.com  (auth via .server-password)"
+        Write-Host "  Remote: https://glitch.cothekdesigns.com  (auth via .server-password)"
     }
 }
 
@@ -230,7 +230,7 @@ if ($stackStatus.AuthProxy) {
 }
 
 # 3. Cloudflare tunnel - only once the auth proxy really answers, because
-#    pi.cothekdesigns.com routes to :$AuthPort. A tunnel with no origin just
+#    glitch.cothekdesigns.com routes to :$AuthPort. A tunnel with no origin just
 #    serves 502s, so it is skipped rather than started blind.
 if (-not (Wait-Port $AuthPort 5)) {
     Write-Host "Cloudflare tunnel skipped - auth-proxy :$AuthPort is down (tunnel would point at nothing)" -ForegroundColor Yellow

@@ -88,7 +88,7 @@ This starts OpenCode as a web server proxied through Cloudflare Tunnel. No open 
 
 Configure your domain via `.env`: copy `.env.example` to `.env` and set `GLITCH_DOMAIN`.
 
-### Pi Web UI (`pi.cothekdesigns.com`)
+### Pi Web UI (`glitch.cothekdesigns.com`)
 
 Pi web UI mode starts two local layers: `pi-web-ui` on `:8787` and an auth proxy on `:4103` (HTTP Basic auth) that the Cloudflare tunnel points at.
 
@@ -101,7 +101,7 @@ Two start modes:
 | **windowed** (default) | One visible PowerShell window runs the whole stack. `pi-web-ui` runs in that window's foreground, the auth proxy and the Cloudflare tunnel are children on the same console. | Closing the window (or Ctrl+C in it). |
 | **headless** | All three layers start detached with `CREATE_NO_WINDOW` and survive closing every shell. | `scripts\stop-pi-stack.ps1` |
 
-The **Cloudflare tunnel** (`pi.cothekdesigns.com` -> auth proxy `:4103` -> `pi-web-ui :8787`) is part of the stack, not a separate service. It is started once both ports are confirmed bound, and skipped when the auth proxy is down, because a connector with no origin just serves 502s. Windowed mode ties it to the window; detached mode spawns it detached so it outlives the shell. `scripts\stop-pi-stack.ps1` stops it again through `scripts\lib\tunnel.mjs`, which owns the lifecycle: only a tunnel this repo started (recorded in `data\cloudflared-auto.pid`) is ever stopped, and a second start is skipped instead of adding a duplicate connector to the same tunnel (Cloudflare would accept one without complaining). The `tunnel-keeper` Pi extension is the safety net: it re-checks every 5 minutes and restarts the tunnel if it died mid-session.
+The **Cloudflare tunnel** (`glitch.cothekdesigns.com` -> auth proxy `:4103` -> `pi-web-ui :8787`, with `pi.cothekdesigns.com` kept as a legacy alias on the same origin) is part of the stack, not a separate service. It is started once both ports are confirmed bound, and skipped when the auth proxy is down, because a connector with no origin just serves 502s. Windowed mode ties it to the window; detached mode spawns it detached so it outlives the shell. `scripts\stop-pi-stack.ps1` stops it again through `scripts\lib\tunnel.mjs`, which owns the lifecycle: only a tunnel this repo started (recorded in `data\cloudflared-auto.pid`) is ever stopped, and a second start is skipped instead of adding a duplicate connector to the same tunnel (Cloudflare would accept one without complaining). The `tunnel-keeper` Pi extension is the safety net: it re-checks every 5 minutes and restarts the tunnel if it died mid-session.
 
 ```powershell
 .\scripts\start-pi-stack.ps1                  # detached (survives closing every shell)

@@ -109,7 +109,7 @@ console.log('');
 console.log('  NEW Pi web password:');
 console.log(`    ${password}`);
 console.log('');
-console.log('  Log in at https://pi.cothekdesigns.com   (username: opencode)');
+console.log('  Log in at https://glitch.cothekdesigns.com   (username: opencode)');
 console.log('  Local http://localhost:8787 needs no auth.');
 console.log('  Old cookies / ?auth_token= bookmarks are invalidated — re-auth once.');
 console.log('');

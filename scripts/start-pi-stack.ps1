@@ -51,6 +51,14 @@ $RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $NodeExe = Join-Path $RootDir "data\node\node.exe"
 $AuthProxy = Join-Path $RootDir "plugins\auth-proxy.mjs"
 $LauncherCmd = Join-Path $env:USERPROFILE "pi-web-ui-launcher.cmd"
+
+# pi-web-ui 403s browser WS upgrades whose Origin != Host (originAllowed()).
+# Behind the auth proxy / tunnel, Host reads localhost:<WebPort>, so the public
+# hostnames must be allow-listed. Kept in sync with pi-stack-window.ps1 and
+# %USERPROFILE%\pi-web-ui-launcher.cmd  -  change all three together.
+# The env var also reaches the detached pi-web-ui through the launcher .cmd,
+# but setting it here covers any future direct-node path too.
+$env:PI_WEB_ALLOW_ORIGINS = "https://pi.cothekdesigns.com,https://glitch.cothekdesigns.com"
 $LogDir = Join-Path $RootDir "data\logs"
 $TunnelScript = Join-Path $RootDir "scripts\lib\tunnel.mjs"
 

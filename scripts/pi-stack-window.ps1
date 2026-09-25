@@ -54,6 +54,12 @@ $WebEntry = Join-Path $RootDir "data\node\node_modules\pi-web-ui\bin\pi-web-ui.m
 $AuthProxy = Join-Path $RootDir "plugins\auth-proxy.mjs"
 $LauncherCmd = Join-Path $env:USERPROFILE "pi-web-ui-launcher.cmd"
 
+# pi-web-ui 403s browser WS upgrades whose Origin != Host (originAllowed()).
+# Behind the auth proxy / tunnel, Host reads localhost:<WebPort>, so the public
+# hostnames must be allow-listed. Kept in sync with start-pi-stack.ps1 and
+# %USERPROFILE%\pi-web-ui-launcher.cmd  -  change all three together.
+$env:PI_WEB_ALLOW_ORIGINS = "https://pi.cothekdesigns.com,https://glitch.cothekdesigns.com"
+
 # ---- Cloudflare tunnel (windowed) -----------------------------------------
 # Same assets the detached path resolves in scripts\lib\tunnel.mjs; the env
 # overrides are honored identically so both paths agree. This window starts

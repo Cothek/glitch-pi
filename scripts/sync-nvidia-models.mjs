@@ -2,7 +2,6 @@
 /**
  * sync-nvidia-models.mjs — NVIDIA NIM live model sync (Pi edition)
  *
- * Pi replacement for the OpenCode-era check-models.ps1 NVIDIA flow:
  * instead of a static catalog, ping the NVIDIA servers and let the live
  * /v1/models response determine the NVIDIA model list pi offers.
  *

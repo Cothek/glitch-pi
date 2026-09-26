@@ -139,8 +139,7 @@ const READ_ONLY_BASH_COMMANDS = new Set([
 ]);
 
 const DESTRUCTIVE_BASH_COMMANDS = new Set([
-  "rm ", "del ", "remove-item", "rmdir ", "rd ", "deltree",
-  "rmdir /s", "remove-item -recurse",
+  "rm", "del", "remove-item", "rmdir", "rd", "deltree",
 ]);
 
 const CODE_WRITING_AGENTS = new Set([
@@ -183,8 +182,38 @@ function isReadOnlyBashCommand(command: string): boolean {
 }
 
 function isDestructiveBashCommand(command: string): boolean {
-  const normalized = command.trim().toLowerCase();
-  return [...DESTRUCTIVE_BASH_COMMANDS].some((cmd) => normalized.includes(cmd));
+  const segments = command.split(/&&|\|\||;|\||\n/);
+  const STRIP_EXTS = /\.(exe|com|bat|cmd|ps1)$/i;
+  for (const rawSeg of segments) {
+    const seg = rawSeg.trim();
+    if (!seg) continue;
+    const tokens = seg.split(/\s+/);
+    const stripQuotes = (s: string): string =>
+      s.length >= 2 &&
+      ((s.startsWith('"') && s.endsWith('"')) ||
+        (s.startsWith("'") && s.endsWith("'")) ||
+        (s.startsWith("`") && s.endsWith("`")))
+        ? s.slice(1, -1)
+        : s;
+    const basename = (s: string): string => {
+      const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+      return i >= 0 ? s.slice(i + 1) : s;
+    };
+    const name0 = stripQuotes(tokens[0])
+      .replace(STRIP_EXTS, "")
+      .toLowerCase();
+    let cmdName = basename(name0);
+    if ((cmdName === "cmd" || cmdName === "cmd.exe") && tokens.length >= 3) {
+      const flag = tokens[1].toLowerCase();
+      if (flag === "/c" || flag === "/k") {
+        cmdName = basename(
+          stripQuotes(tokens[2]).replace(STRIP_EXTS, "").toLowerCase(),
+        );
+      }
+    }
+    if (DESTRUCTIVE_BASH_COMMANDS.has(cmdName)) return true;
+  }
+  return false;
 }
 
 function shouldBlockDestructiveBash(command: string): boolean {

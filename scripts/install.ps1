@@ -101,7 +101,7 @@ function Write-Prompt { param([string]$msg) Write-Host "  $msg" -NoNewline -Fore
 
 # Find git.exe via the PERSISTED (global) PATH -- the source of truth for
 # whether git will be available in FUTURE terminals. The session $env:PATH is
-# NOT authoritative because launch scripts (launch-glitch.bat, glitch.bat)
+# NOT authoritative because launch scripts (launch-glitch.bat)
 # prepend bundled MinGit at every launch without persisting it -- so a
 # session-only git would still leave fresh terminals broken.
 function Get-PersistedGitPath {
@@ -560,7 +560,7 @@ if (-not (Test-Path "$InstallDir\.git")) {
     }
 
     # Finalize bundled git: move the staged MinGit into the install dir so the
-    # launcher (launch-glitch.bat / glitch.bat) finds it at data\mingit on future
+    # launcher (launch-glitch.bat) finds it at data\mingit on future
     # launches. Copy + remove, NOT Move-Item: %TEMP% may be on a different volume.
     if ($gitProvisioned -and $gitStagedDir) {
         $finalGitDir = Join-Path $InstallDir "data\mingit"
@@ -1131,7 +1131,7 @@ Push-Location $InstallDir
 try {
     $seedOutput = & $checkNode scripts/plugin.mjs seed 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Success "Seeded default plugins (model-ui). Edit user\plugins.json to customize."
+        Write-Success "Seeded default plugins. Edit user\plugins.json to customize."
         if ($seedOutput) { Write-Host "  $seedOutput" -ForegroundColor DarkGray }
     } else {
         Write-Warn "Plugin seed returned non-zero (continuing): $seedOutput"

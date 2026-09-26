@@ -403,81 +403,7 @@ const server = http.createServer((req, res) => {
   // (res.writeHead replaces same-name headers set via res.setHeader, so we
   // cannot set the cookie once at the top — it must be merged per branch.)
 
-  // ---- Route /models to model UI server (port 4104) ----
-  if (req.url && (req.url === '/models' || req.url.startsWith('/models/') || req.url.startsWith('/models?'))) {
-    const modelUIUpstream = new URL('http://localhost:4104');
-    let targetPath = req.url.replace('/models', '') || '/';
-    // Strip auth_token from forwarded URL
-    try {
-      const parsed = new URL(targetPath, 'http://localhost');
-      parsed.searchParams.delete('auth_token');
-      targetPath = parsed.pathname + parsed.search;
-    } catch {}
-    const options = {
-      hostname: modelUIUpstream.hostname,
-      port: modelUIUpstream.port,
-      path: targetPath,
-      method: req.method,
-      headers: {
-        ...(Object.fromEntries(
-          Object.entries(req.headers)
-            .filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
-        )),
-        host: modelUIUpstream.host,
-      },
-    };
-    const proxyReq = http.request(options, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers, auth.sid));
-      proxyRes.pipe(res);
-    });
-    proxyReq.on('error', (err) => {
-      console.error(`Model UI proxy error for ${req.method} ${req.url}:`, err.message);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end('Model UI server unavailable');
-      }
-    });
-    req.pipe(proxyReq);
-    return;
-  }
-
-  // ---- Route /plugins/glitch-ui/* to model UI server (port 4104) ----
-  if (req.url && req.url.startsWith('/plugins/glitch-ui/')) {
-    const modelUIUpstream = new URL('http://localhost:4104');
-    let targetPath = req.url;
-    // Strip auth_token from forwarded URL
-    try {
-      const parsed = new URL(targetPath, 'http://localhost');
-      parsed.searchParams.delete('auth_token');
-      targetPath = parsed.pathname + parsed.search;
-    } catch {}
-    const options = {
-      hostname: modelUIUpstream.hostname,
-      port: modelUIUpstream.port,
-      path: targetPath,
-      method: req.method,
-      headers: {
-        ...(Object.fromEntries(
-          Object.entries(req.headers)
-            .filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
-        )),
-        host: modelUIUpstream.host,
-      },
-    };
-    const proxyReq = http.request(options, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers, auth.sid));
-      proxyRes.pipe(res);
-    });
-    proxyReq.on('error', (err) => {
-      console.error(`Model UI asset proxy error for ${req.method} ${req.url}:`, err.message);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end('Model UI asset server unavailable');
-      }
-    });
-    req.pipe(proxyReq);
-    return;
-  }
+  
 
   // Strip directory and workspace params from /agent requests
   // (server bug: workspace crashes, directory filters out custom agents)
@@ -556,7 +482,7 @@ server.on('upgrade', (req, socket, head) => {
   }
 
   // Same routing table as the HTTP branches above: /money -> :4110,
-  // /models and /plugins/glitch-ui/* -> :4104, everything else -> the upstream.
+  // everything else -> the upstream.
   // auth_token is stripped, it must never reach the origin.
   let targetPath = req.url || '/';
   try {
@@ -570,14 +496,6 @@ server.on('upgrade', (req, socket, head) => {
   let forwardCredentials = true; // the default branch injects Basic like the HTTP proxy does
   if (url === '/money' || url.startsWith('/money/') || url.startsWith('/money?')) {
     target = new URL('http://localhost:4110');
-    forwardCredentials = false;
-  } else if (
-    url === '/models' ||
-    url.startsWith('/models/') ||
-    url.startsWith('/models?') ||
-    url.startsWith('/plugins/glitch-ui/')
-  ) {
-    target = new URL('http://localhost:4104');
     forwardCredentials = false;
   } else {
     target = upstream;
@@ -649,8 +567,7 @@ server.on('upgrade', (req, socket, head) => {
 
 server.listen(PROXY_PORT, () => {
   console.log(`  Auth proxy listening on :${PROXY_PORT} -> ${UPSTREAM_URL}`);
-  console.log(`  /models -> http://localhost:4104`);
-  console.log(`  /plugins/glitch-ui/ -> http://localhost:4104`);
+  
   console.log(`  Auth: Basic header | ?auth_token= | glitch_auth cookie`);
   console.log('');
   console.log(`  === Pi web UI login ===`);

@@ -862,7 +862,7 @@ header "Seeding default plugins..."
 cd "$INSTALL_DIR"
 if command -v node >/dev/null 2>&1; then
     if seed_output=$(node scripts/plugin.mjs seed 2>&1); then
-        success "Seeded default plugins (model-ui). Edit user/plugins.json to customize."
+        success "Seeded default plugins. Edit user/plugins.json to customize."
         if [ -n "$seed_output" ]; then
             echo "  $seed_output"
         fi

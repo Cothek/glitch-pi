@@ -299,7 +299,7 @@ const RESTART_MAX_DISPLAY = 8;
 /**
  * Update-triggered restart: spawn a fresh process with the updated launch
  * script and exit the current one. This is DIFFERENT from the user-triggered
- * restart path (data/.restart-flag + in-process loop in serve.mjs/launch.mjs).
+ * restart path (data/.restart-flag + in-process loop).
  *
  * - Uses detached:true + child.unref() so the child survives parent exit
  *   on all platforms (Windows and Unix).

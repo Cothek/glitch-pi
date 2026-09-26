@@ -16,6 +16,9 @@
  * roster and says so instead of silently omitting them.
  *
  * SURFACES
+ *   0. composer button (chat bar, right of the thinking chip) -> opens the page
+ *      via kind:"view": the stock client navigates to view:"plugin:agent-models"
+ *      on click, so no client handler is involved.
  *   1. right-panel tab (manifest "view": true) -> client fetches GET /state
  *   2. GET  /plugins-api/agent-models/state     -> JSON report (catalog, models, facets)
  *   3. POST /plugins-api/agent-models/set-model -> rewrite one agent's model pin
@@ -398,6 +401,30 @@ export default definePlugin({
 						return `agent-models failed: ${err?.message ?? err}`;
 					}
 				},
+			}),
+		);
+
+		/**
+		 * Chat-bar button, right of the thinking dropdown. Host composer items sort by
+		 * (order, seq): model chip is 120, thinking 130, dsh-perm 140 — order 135 lands
+		 * between thinking and dsh-perm. kind:"view" makes the stock client's onUiAction
+		 * navigate to `view` on click (no client handler needed); the icon must be an
+		 * emoji because the stock composer renderer maps only mic/camera to real SVG.
+		 */
+		cleanup.push(
+			host.ui.register({
+				slot: "composer.actions",
+				id: "open-page",
+				label: "Agent Models",
+				hint: "Open the Agent Models page",
+				kind: "view",
+				view: "plugin:agent-models",
+				// No emoji icon: the client entry paints a glyph from the HOST icon set
+				// through a CSS mask on ::before (the host composer renderer only maps
+				// mic/camera to SVG, so a plugin cannot request a real glyph here).
+				// The label stays as aria-label/title.
+				order: 135,
+				align: "start",
 			}),
 		);
 

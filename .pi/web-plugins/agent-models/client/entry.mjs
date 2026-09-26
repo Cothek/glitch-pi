@@ -28,7 +28,7 @@ const POLL_MS = 15000;
 const STYLE_ID = "agent-models-style";
 const MOUNT_LABEL = "agent-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.3.0";
 /**
  * Render cap. Deliberately above any realistic catalog size: the catalog is ~500
  * entries and these are plain DOM rows, not a virtual list.
@@ -155,6 +155,23 @@ const STYLE_CSS = `
 .am-empty{padding:14px;border:1px dashed var(--border);border-radius:8px;color:var(--text-dim);font-size:12px}
 .am-error{border:1px solid var(--red);background:var(--red-soft, transparent);border-radius:8px;padding:10px;font-size:12px;color:var(--text)}
 .am-diag{border-top:1px solid var(--border-soft);padding-top:6px;color:var(--text-faint);font-family:var(--mono, monospace);font-size:10px;word-break:break-all}
+/* Chat-bar button (server entry registers kind:"view", label "Agent Models").
+   Sized to the model dropdown chip: 22x22 square at desktop (the .composer-tools chip box
+   is 22 tall) and 30x30 under the host's own <=560px chip rules; width shrinks with the
+   height so the button stays square.
+   The glyph comes from the HOST icon set (same Feather-style 24x24 sprite the model chip's
+   cpu and the thinking chip's zap come from): "list" - the roster this page shows. It is
+   painted with a CSS mask, not an inline SVG, for two reasons: the host's composer renderer
+   only maps mic/camera to SVG components (a plugin cannot request a glyph through "icon"),
+   and an injected SVG node would be wiped by React on the next re-render. The mask keeps
+   background-color:currentColor, so the icon follows the theme and the hover accent.
+   font-size:0 hides the item label (the renderer puts it in the button as text); it stays
+   in aria-label/title for screen readers.
+   Specificity (0,3,1) beats the host ".inputbox .btn.composer-plugin-action" (0,2,1). */
+.inputbox .btn.composer-plugin-action[aria-label="Agent Models"]{width:22px;min-width:22px;height:22px;box-sizing:border-box;flex:none;justify-content:center;align-items:center;gap:0;padding:0;border:1px solid var(--border);border-radius:8px;background:var(--chip-bg,var(--bg-elev2));color:var(--text);font-size:0;line-height:1;white-space:nowrap;user-select:none;-webkit-user-select:none}
+.inputbox .btn.composer-plugin-action[aria-label="Agent Models"]::before{content:"";display:block;width:13px;height:13px;flex:none;background-color:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='8' y1='6' x2='21' y2='6'/%3E%3Cline x1='8' y1='12' x2='21' y2='12'/%3E%3Cline x1='8' y1='18' x2='21' y2='18'/%3E%3Cline x1='3' y1='6' x2='3.01' y2='6'/%3E%3Cline x1='3' y1='12' x2='3.01' y2='12'/%3E%3Cline x1='3' y1='18' x2='3.01' y2='18'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='8' y1='6' x2='21' y2='6'/%3E%3Cline x1='8' y1='12' x2='21' y2='12'/%3E%3Cline x1='8' y1='18' x2='21' y2='18'/%3E%3Cline x1='3' y1='6' x2='3.01' y2='6'/%3E%3Cline x1='3' y1='12' x2='3.01' y2='12'/%3E%3Cline x1='3' y1='18' x2='3.01' y2='18'/%3E%3C/svg%3E") center/contain no-repeat}
+.inputbox .btn.composer-plugin-action[aria-label="Agent Models"]:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+@media (max-width:560px){.inputbox .btn.composer-plugin-action[aria-label="Agent Models"]{width:30px;min-width:30px;height:30px}.inputbox .btn.composer-plugin-action[aria-label="Agent Models"]::before{width:16px;height:16px}}
 `;
 
 function injectStyles() {
@@ -776,6 +793,18 @@ function createInstance(container, ctx) {
 			}
 		},
 	};
+}
+
+// Inject at import time, not only inside mount(): the manifest sets "preload": true,
+// so this module is imported when the first browser attaches, while mount() runs
+// only when the page actually opens. Without this, the chat-bar button would be
+// unstyled (host pill default) until the page had been opened once.
+// Never throws: a broken injection must not kill module load (the host would
+// replace the plugin pane with an opaque fallback on the next mount attempt).
+try {
+	injectStyles();
+} catch {
+	/* headless / missing document — mount() retries */
 }
 
 export default {

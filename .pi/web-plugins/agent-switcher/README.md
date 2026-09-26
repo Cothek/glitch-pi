@@ -4,7 +4,7 @@ Switch the primary Glitch agent from the web UI, mid-session, no restart.
 
 ## Surfaces
 
-1. **Composer select** — an "Agent" dropdown next to the chat input. Pick a mode, it switches the active conversation immediately.
+1. **Composer chip** — an "Agent: <mode>" chip next to the chat input. Click opens a menu, pick a mode, it switches the active conversation immediately. On mobile (≤560px) it collapses to the 🤖 icon only — the same breakpoint and metrics the host uses for the model-selector chip (min-width 34, min-height 30, caret hidden; the text node is killed by `font-size:0`, which the ::before emoji ignores). aria-label keeps the full "Agent: <mode>" for screen readers.
 2. **Agent tab** — top-bar panel: current mode, clickable mode list, refreshes every 5s.
 3. **`/agent <mode>`** in the chat box — pi extension command, listed in the slash picker.
 4. **Just ask** — say "switch to glitch omni" in chat; the `switch_agent` tool (from the pi extension) does it.

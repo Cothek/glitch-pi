@@ -18,10 +18,11 @@ Live example when this was built: 10 agents, 2 pins OK, **6 dead pins**, 2 inher
 
 ## Surfaces
 
-1. **Right-panel "Agent Models" tab** — one row per agent: name + status badge, `pin -> effective`, then the note.
-2. **`/agent-models`** in the chat box (server-side command, no browser needed).
-3. **`GET /plugins-api/agent-models/state`** — the JSON the tab renders.
-4. **`node scripts/agent-models.mjs`** — the same table on the CLI. `--json`, `--strict` (exit 1 when anything needs attention, usable as a gate), `--help`.
+1. **Chat-bar button** — a small 🧠 chip in the composer, right of the thinking dropdown (order 135: after model 120 / thinking 130, before the DSH chips). Click opens the page. Registered as `kind:"view"`, so the stock client's click handler does the navigation — no custom client code on the click path. Restyled by the client entry to the native chip look (34x30, radius 8) so it matches the mobile model-selector chip in both modes.
+2. **Right-panel "Agent Models" tab** — one row per agent: name + status badge, `pin -> effective`, then the note.
+3. **`/agent-models`** in the chat box (server-side command, no browser needed).
+4. **`GET /plugins-api/agent-models/state`** — the JSON the tab renders.
+5. **`node scripts/agent-models.mjs`** — the same table on the CLI. `--json`, `--strict` (exit 1 when anything needs attention, usable as a gate), `--help`.
 
 ## Statuses
 

@@ -2,7 +2,7 @@
 name: coder
 description: "Senior full-stack engineer for production-quality implementation. Use when the task involves building features, complex logic, server actions, data layers, API routes, or full-stack patterns across 1-20 files. <example> User: Build the user dashboard with role management Agent: I'll use the co..."
 tools: read, edit, bash, find, grep, ls, webfetch, question, todowrite, skill
-model: nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
+model: commandcode/MiniMaxAI/MiniMax-M3
 ---
 
 

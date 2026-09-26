@@ -84,6 +84,9 @@ Use `user/current-session.md` Working Memory as a live scratchpad — append obs
 ## R16: Branch Discipline
 Never modify Glitch core files on main. All core work on develop or feature branches.
 
+## R17: Auto-Rename Conversations
+At the start of every session, emit `[[conv:rename:<succinct title>]]` based on the first user message. Do it before delivering the session brief.
+
 ## R9: GitNexus Code Graph
 If the GitNexus MCP server is configured and available, use its tools (impact/context/detect_changes/rename/query) before code changes in indexed repos. If not available, fall back to regular grep/glob/read. Verify MCP availability before claiming it exists.
 

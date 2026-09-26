@@ -1,0 +1,10 @@
+{
+  "id": "restart-stack",
+  "name": "Restart Stack",
+  "version": "0.1.0",
+  "description": "Restart the glitch-pi web stack (pi-web-ui and auth proxy) from the web UI. The button does a plain restart. An agent-requested restart can also resume its conversation.",
+  "apiVersion": 2,
+  "permissions": ["ui", "http"],
+  "view": true,
+  "preload": true
+}

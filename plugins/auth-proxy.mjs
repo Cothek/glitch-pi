@@ -2,6 +2,10 @@
  * Auth Proxy — sits between cloudflare tunnel and opencode web server.
  * Enforces HTTP Basic Auth on incoming requests. Valid credentials
  * are forwarded to the upstream server with the auth header injected.
+ * When .server-token is present and non-empty, the proxy ALSO injects the token
+ * as `x-pi-token` on every non-/money forward (HTTP and WS upgrade) and drops
+ * any caller-supplied `x-pi-token` first, so the gate value arriving upstream is
+ * always the real one - never whatever the client tried to smuggle.
  *
  * Credentials accepted via:
  *   - Authorization: Basic <base64> header (browser native auth dialog)
@@ -38,13 +42,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
 const pwFile = resolve(rootDir, '.server-password');
 const userFile = resolve(rootDir, '.server-username');
+const tokenFile = resolve(rootDir, '.server-token');
 
-// Login details printed on startup. Both credentials resolve the SAME files as
-// scripts/lib/web-auth.mjs (that module is the single source of truth for the
-// banner printed by the launchers). This file stays dependency-free on purpose
-// (node builtins only) so the auth gate can never be taken down by a broken
-// import - hence the local readers instead of importing web-auth.
-// Change the resolution rules here and change them there too.
+/** .server-token when set and non-empty, else null. Missing file is not an error. */
+function readToken() {
+  try {
+    const t = readFileSync(tokenFile, 'utf-8').trim();
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+const webToken = readToken();
+
+// Login details printed on startup. All three credentials resolve the SAME
+// files as scripts/lib/web-auth.mjs (that module is the single source of
+// truth for the banner printed by the launchers). This file stays
+// dependency-free on purpose (node builtins only) so the auth gate can never
+// be taken down by a broken import - hence the local readers instead of
+// importing web-auth. Change the resolution rules here and change them there.
 const DEFAULT_USERNAME = 'opencode';
 
 /** .server-username when set, else DEFAULT_USERNAME. Missing file is not an error. */
@@ -74,6 +90,27 @@ try {
 } catch {
   console.error('Error: .server-password not found at', pwFile);
   process.exit(1);
+}
+
+// Header names are case-insensitive per RFC 7230. stripPiToken + injectPiToken
+// return a NEW headers object (never mutate the incoming one - it is shared
+// with the rest of Node's request machinery and surprises the upgrade path).
+function stripPiToken(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === 'x-pi-token') continue;
+    out[k] = v;
+  }
+  if (webToken) out['x-pi-token'] = webToken;
+  return out;
+}
+function stripOnlyPiToken(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === 'x-pi-token') continue;
+    out[k] = v;
+  }
+  return out;
 }
 const USERNAME = readUsername();
 const authToken = Buffer.from(`${USERNAME}:${password}`).toString('base64');
@@ -421,16 +458,17 @@ const server = http.createServer((req, res) => {
     } catch {}
   }
 
+  const baseHeaders = Object.fromEntries(
+    Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
+  );
+  const forwarded = stripPiToken(baseHeaders);
   const options = {
     hostname: upstream.hostname,
     port: upstream.port || 80,
     path: targetPath,
     method: req.method,
     headers: {
-      ...(Object.fromEntries(
-        Object.entries(req.headers)
-          .filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
-      )),
+      ...forwarded,
       host: upstream.host,
       authorization: `Basic ${authToken}`,
     },
@@ -501,9 +539,13 @@ server.on('upgrade', (req, socket, head) => {
     target = upstream;
   }
 
-  const headers = Object.fromEntries(
+  const baseHeaders = Object.fromEntries(
     Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
   );
+  // /money has its own auth model and must NEVER carry our token. For the
+  // default branch, strip and re-inject so the upstream sees the real value,
+  // not whatever the client tried to smuggle in.
+  const headers = forwardCredentials ? stripPiToken(baseHeaders) : stripOnlyPiToken(baseHeaders);
   headers.host = target.host;
   if (forwardCredentials) headers.authorization = `Basic ${authToken}`;
 
@@ -569,6 +611,7 @@ server.listen(PROXY_PORT, () => {
   console.log(`  Auth proxy listening on :${PROXY_PORT} -> ${UPSTREAM_URL}`);
   
   console.log(`  Auth: Basic header | ?auth_token= | glitch_auth cookie`);
+  console.log(`  Token: ${webToken ? 'injected on upstream forward (x-pi-token)' : 'off (no .server-token)'}`);
   console.log('');
   console.log(`  === Pi web UI login ===`);
   console.log(`   Username:  ${USERNAME}`);

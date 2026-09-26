@@ -29,6 +29,19 @@ import { randomBytes } from 'node:crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
+// Token gate: pi-web-ui requires one of x-pi-token / ?token= / Bearer /
+// pi_web_token cookie on every WS upgrade when PI_WEB_TOKEN is set. Resolve
+// from the repo root, never from process.cwd() - this script is also run
+// from outside the repo by agents.
+function readServerToken() {
+  try {
+    const t = readFileSync(join(ROOT, '.server-token'), 'utf-8').trim();
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- args -------------------------------------------------------------------
 const args = process.argv.slice(2);
 const flag = (name) => {
@@ -41,7 +54,11 @@ const PATH = flag('--path');
 const TEXT = flag('--text');
 let FILE = flag('--file');
 const URL_OVERRIDE = flag('--url');
-const WS_URL = URL_OVERRIDE || 'ws://localhost:8787/ws';
+let WS_URL = URL_OVERRIDE || 'ws://localhost:8787/ws';
+if (!URL_OVERRIDE) {
+  const tok = readServerToken();
+  if (tok) WS_URL += `?token=${encodeURIComponent(tok)}`;
+}
 
 if (!LIST && !ID && !PATH) {
   console.error('usage: --list | (--id <conversationId> | --path <sessionFile>) (--text "..." | --file <prompt.md>) [--url ws://...]');

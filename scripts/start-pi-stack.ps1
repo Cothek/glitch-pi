@@ -59,6 +59,32 @@ $LauncherCmd = Join-Path $env:USERPROFILE "pi-web-ui-launcher.cmd"
 # The env var also reaches the detached pi-web-ui through the launcher .cmd,
 # but setting it here covers any future direct-node path too.
 $env:PI_WEB_ALLOW_ORIGINS = "https://pi.cothekdesigns.com,https://glitch.cothekdesigns.com"
+
+# ---- PI_WEB_TOKEN (shared token gate on :8787) ------------------------------
+# Loaded from .server-token (generated on first boot by either start script).
+# Reaches pi-web-ui through env inheritance: the detached path uses
+# start-detached.ps1 (Win32 CreateProcess inherits the parent env), and the
+# windowed path is a child of start-pi-stack.ps1 -Windowed (same env block).
+# Never log the value - it is the gate secret.
+$TokenFile = Join-Path $RootDir ".server-token"
+function Ensure-ServerToken {
+    if (Test-Path $TokenFile) {
+        $existing = (Get-Content -Path $TokenFile -Raw -ErrorAction SilentlyContinue)
+        if ($existing) { $existing = $existing.Trim() }
+        if ($existing) {
+            $env:PI_WEB_TOKEN = $existing
+            Write-Host "  web token loaded from .server-token"
+            return
+        }
+    }
+    $bytes = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+    $hex = ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($TokenFile, $hex, $utf8NoBom)
+    $env:PI_WEB_TOKEN = $hex
+    Write-Host "  web token generated"
+}
+Ensure-ServerToken | Out-Null
 $LogDir = Join-Path $RootDir "data\logs"
 $TunnelScript = Join-Path $RootDir "scripts\lib\tunnel.mjs"
 

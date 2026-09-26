@@ -22,6 +22,10 @@ Thumbs.db
 # Auto-generated server password
 .server-password
 
+# Auto-generated shared token for pi-web-ui (PI_WEB_TOKEN); closes the
+# unauthenticated LAN/direct surface once it is exported by the start scripts.
+.server-token
+
 # Optional login username (absent = the 'opencode' default)
 .server-username
 

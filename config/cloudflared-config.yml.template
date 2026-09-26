@@ -17,10 +17,5 @@ ingress:
   - hostname: glitch-trader-api.cothekdesigns.com
     service: http://localhost:4120
 
-  # Pi Web UI - legacy alias for the same auth proxy; glitch.* is canonical.
-  # Same .server-password as Glitch. No Cloudflare Zero Trust required.
-  - hostname: pi.cothekdesigns.com
-    service: http://localhost:4103
-
   # Catch-all: return 404 for any other hostname
   - service: http_status:404

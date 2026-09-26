@@ -6,15 +6,12 @@
  *   - project: .pi/agents/*.md   (Glitch's 10 defs)
  *   - user:    ~/.pi/agent/agents/*.md
  *
- * Spawn strategy (Plan 2 §5.2 ranking):
- *   1. Pi SDK (createAgentSession) — in-process when available
- *   2. spawn `pi --mode json -p --no-session` — proven fallback
- *   3. tmux — not implemented
- *
- * runViaSdk() uses createAgentSession + SessionManager.inMemory. On any
- * failure (missing export, model resolution, prompt error) it returns null
- * and the caller falls through to spawnPiJson().
- *
+ * Spawn strategy: spawn `pi --mode json -p --no-session` — the proven, single
+ * code path. The earlier in-process SDK path (createAgentSession, Plan 2 §5.2)
+ * was removed: it depended on @earendil-works/pi-ai/compat whose deprecated
+ * getModel() only resolves built-in catalog models, so every agent with a
+ * commandcode pin silently fell through to spawn anyway. One debuggable path
+ * beats one real path plus a phantom.
  * Modes: single { agent, task } only for Phase 2 exit. Parallel/chain later.
  */
 
@@ -256,115 +253,6 @@ async function spawnPiJson(
   }
 }
 
-/**
- * SDK path (Plan 2 §5.2 #1): createAgentSession + SessionManager.inMemory.
- * Returns null on any failure so the caller falls through to spawnPiJson.
- */
-async function runViaSdk(
-  agent: AgentConfig,
-  task: string,
-  cwd: string,
-  parentModel: string | undefined,
-  parentThinking: string | undefined,
-  signal: AbortSignal | undefined,
-): Promise<SpawnResult | null> {
-  try {
-    const sdk: any = await import("@earendil-works/pi-coding-agent");
-    const createAgentSession = sdk?.createAgentSession;
-    const SessionManager = sdk?.SessionManager;
-    if (typeof createAgentSession !== "function" || !SessionManager?.inMemory) return null;
-
-    // Same precedence as the spawn path, from the same module.
-    const plan = planDispatch({
-      agentModel: agent.model,
-      agentThinking: agent.thinkingLevel,
-      parentModel,
-      parentThinking,
-    });
-    const modelId = plan.model;
-
-    let model: unknown;
-    if (modelId) {
-      const slash = modelId.indexOf("/");
-      if (slash > 0) {
-        try {
-          const compat: any = await import("@earendil-works/pi-ai/compat");
-          model = compat?.getModel?.(modelId.slice(0, slash), modelId.slice(slash + 1));
-        } catch {
-          model = undefined;
-        }
-      }
-    }
-    // Unresolvable explicit model → let spawn handle it (keeps known-good path)
-    if (!plan.inherits && !model) return null;
-
-    const systemPrompt = agent.systemPrompt.trim();
-    const prompt = systemPrompt ? `${systemPrompt}\n\nTask: ${task}` : `Task: ${task}`;
-
-    const opts: Record<string, unknown> = {
-      sessionManager: SessionManager.inMemory(cwd),
-      cwd,
-    };
-    if (model) opts.model = model;
-    if (agent.tools && agent.tools.length > 0) opts.tools = agent.tools;
-    if (plan.thinking) {
-      try {
-        opts.thinkingLevel = plan.thinking;
-      } catch {
-        /* optional */
-      }
-    }
-
-    const { session } = await createAgentSession(opts);
-    const result: SpawnResult = { exitCode: 0, messages: [], stderr: "" };
-    let onAbort: (() => void) | undefined;
-
-    try {
-      onAbort = () => {
-        try {
-          (session as any).abort?.();
-        } catch {
-          /* ignore */
-        }
-      };
-      if (signal) {
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      }
-
-      await session.prompt(prompt);
-
-      const msgs: AgentMessage[] = (session as any).state?.messages ?? [];
-      for (const msg of msgs) {
-        result.messages.push(msg);
-        if (msg.role === "assistant") {
-          if (msg.stopReason) result.stopReason = msg.stopReason;
-          if ((msg as any).errorMessage) result.errorMessage = (msg as any).errorMessage;
-        }
-      }
-
-      if (signal?.aborted) {
-        result.exitCode = 1;
-        result.stopReason = result.stopReason ?? "aborted";
-      }
-      if (!getFinalOutput(result.messages) && result.exitCode === 0 && !result.errorMessage) {
-        // Empty success → prefer spawn retry rather than returning blank
-        return null;
-      }
-      return result;
-    } finally {
-      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-      try {
-        (session as any).dispose?.();
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    return null; // fall through to spawn
-  }
-}
-
 const TaskParams = Type.Object({
   agent: Type.String({ description: "Agent name: coder, reviewer, testing, ui-designer, vision, vision-alt, memory, memory-paid, pentester, glitch-omni" }),
   task: Type.String({ description: "Complete task description for the sub-agent. Include file paths, constraints, and expected output format."}),
@@ -409,11 +297,8 @@ export default function (pi: ExtensionAPI) {
       const parentModel = (pi as any).__dispatchModel as string | undefined;
       const parentThinking = (pi as any).__dispatchThinking as string | undefined;
 
-      // Try SDK first (Plan 2 §5.2), fall back to spawn
-      let result = await runViaSdk(agent, params.task, cwd, parentModel, parentThinking, signal);
-      if (!result) {
-        result = await spawnPiJson(agent, params.task, cwd, parentModel, parentThinking, signal);
-      }
+      // spawn `pi --mode json` is the single dispatch path (SDK path removed).
+      const result = await spawnPiJson(agent, params.task, cwd, parentModel, parentThinking, signal);
 
       const failed =
         result.exitCode !== 0 ||

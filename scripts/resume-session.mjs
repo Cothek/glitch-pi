@@ -118,7 +118,7 @@ sock.on('open', () => {
   // Give the server a moment to switch before prompting.
   setTimeout(() => {
     send({ type: 'prompt', text: promptText, queue: false });
-    log(`prompt sent (${promptText.length} chars) to conversation ${ID}`);
+    log(`prompt sent (${promptText.length} chars) to ${ID ? `conversation ${ID}` : `session ${PATH}`}`);
     // Drain briefly so the server has accepted the prompt before we go.
     setTimeout(() => {
       clearTimeout(watchdog);

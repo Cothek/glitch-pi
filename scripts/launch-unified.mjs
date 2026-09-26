@@ -17,7 +17,12 @@ const ROOT_DIR = resolve(SCRIPT_DIR, '..');
 // appended to data/launch.log (ANSI-stripped, ISO-timestamped).
 initLaunchLog();
 
-const PrefFile = join(ROOT_DIR, 'user', 'launch-preference.json');
+// Launch-time selections are MACHINE-LOCAL state: they live in data/ (the
+// parent repo gitignores data/), NOT in the user/ memory repo which is
+// committed and synced. The user/ path remains as a legacy migration fallback
+// read only, and is untracked there going forward.
+const PrefFile = join(ROOT_DIR, 'data', 'launch-preference.json');
+const LegacyPrefFile = join(ROOT_DIR, 'user', 'launch-preference.json');
 
 const MAGENTA = '\x1b[35m';
 const CYAN = '\x1b[36m';
@@ -203,14 +208,22 @@ function normalizeMode(mode) {
   return null;
 }
 
+function readPref() {
+  // data/ store wins; adopt the legacy user/ file only when data/ is absent.
+  return readJson(PrefFile) || readJson(LegacyPrefFile);
+}
+
 function getSavedMode() {
-  const pref = readJson(PrefFile);
+  const pref = readPref();
   if (pref && pref.last_mode) return normalizeMode(pref.last_mode);
   return null;
 }
 
 function saveMode(mode) {
-  writeJson(PrefFile, { last_mode: mode, saved_at: new Date().toISOString() });
+  // Merge, never clobber: launch-pi.mjs stores last_pi_mode / pi_stack_mode
+  // in the same file.
+  const pref = readPref() || {};
+  writeJson(PrefFile, { ...pref, last_mode: mode, saved_at: new Date().toISOString() });
 }
 
 const DELIVERIES = [
@@ -390,13 +403,26 @@ async function main() {
     process.exit(0);
   }
 
-  // ---- Branch check: FIRST thing, before repo updates ----
-  await checkBranchBeforeLaunch();
+  // Reuse-saved gate: restarts and automation must never hang on a prompt
+  // (the branch menu, the update prompt, and every launcher menu). Triggered
+  // by --reuse-saved, env GLITCH_REUSE_SAVED=1, or a non-TTY stdin (detached
+  // runs). Saved selections win; an explicit choice anywhere still persists.
+  const REUSE_SAVED = args.includes('--reuse-saved') || process.env.GLITCH_REUSE_SAVED === '1' || !process.stdin.isTTY;
 
-  // ---- Check for repo updates before anything else ----
-  const branchOkSet = process.env.GLITCH_BRANCH_OK !== undefined && process.env.GLITCH_BRANCH_OK !== '';
-  const syncResult = await checkRepoUpdates({ cwd: ROOT_DIR, interactive: true, allowBranchSwitch: !branchOkSet });
-  handleRestartOnUpdate(spawn, syncResult, ROOT_DIR);
+  // ---- Branch check + repo updates: interactive only ------------------------
+  // Under reuse-saved, never prompt for a branch switch or an update mid-
+  // restart - the point is relaunching exactly what the user last selected.
+  if (REUSE_SAVED) {
+    log(DARK_GRAY, '  (reuse-saved: branch and update prompts skipped)');
+  } else {
+    // ---- Branch check: FIRST thing, before repo updates ----
+    await checkBranchBeforeLaunch();
+
+    // ---- Check for repo updates before anything else ----
+    const branchOkSet = process.env.GLITCH_BRANCH_OK !== undefined && process.env.GLITCH_BRANCH_OK !== '';
+    const syncResult = await checkRepoUpdates({ cwd: ROOT_DIR, interactive: true, allowBranchSwitch: !branchOkSet });
+    handleRestartOnUpdate(spawn, syncResult, ROOT_DIR);
+  }
 
   const restartFlagPath = join(ROOT_DIR, 'data', '.restart-timestamp');
   // Clean up restart flag after successful launch (5 second delay to ensure we're past the critical startup phase)
@@ -515,10 +541,14 @@ async function main() {
       savedDelivery = null;
     }
 
-    // Level 1: Glitch mode (skip the menu when only one delivery is available)
-    const deliveryId = AVAILABLE_DELIVERIES.length === 1
-      ? AVAILABLE_DELIVERIES[0].id
-      : await showGlitchModeMenu(savedDelivery);
+    // Reuse-saved never opens the menus: the saved delivery wins, else the
+    // first available delivery (Pi, on this fork). Interactive behavior is
+    // unchanged outside the gate.
+    const deliveryId = REUSE_SAVED
+      ? (savedDelivery || AVAILABLE_DELIVERIES[0].id)
+      : (AVAILABLE_DELIVERIES.length === 1
+          ? AVAILABLE_DELIVERIES[0].id
+          : await showGlitchModeMenu(savedDelivery));
 
     // Safe / Pi are deliveries with no tier — skip the model menu entirely.
     if (deliveryId === 'safe' || deliveryId === 'pi') {
@@ -526,7 +556,7 @@ async function main() {
     } else {
       // Level 2: Model tier (use saved model only if delivery didn't change)
       const modelDefault = deliveryId === savedDelivery ? savedModel : null;
-      const modelId = await showModelMenu(modelDefault);
+      const modelId = REUSE_SAVED ? (modelDefault || MODELS[0].id) : await showModelMenu(modelDefault);
       modeId = `${deliveryId}-${modelId}`;
     }
   }
@@ -545,7 +575,9 @@ async function main() {
     process.exit(1);
   }
 
-  saveMode(modeId);
+  // Persist explicit choices only; a reused selection is never re-saved
+  // (matches launch-pi's "automation never clobbers a real pick" contract).
+  if (!REUSE_SAVED) saveMode(modeId);
   logToFile(`Mode selected: ${modeId}`);
   log(GREEN, ` Launching ${getModeLabel(modeId)}...`);
   logToFile(`Launching ${getModeLabel(modeId)}`);

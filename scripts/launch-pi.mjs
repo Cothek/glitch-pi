@@ -92,16 +92,24 @@ function pwsh(args, opts = {}) {
 
 // ---- Pi interface choice (TUI vs Web) ----
 // Stored alongside launch-unified.mjs's last_mode in user/launch-preference.json.
-const PI_PREF_FILE = join(ROOT_DIR, 'user', 'launch-preference.json');
+const PI_PREF_FILE = join(ROOT_DIR, 'data', 'launch-preference.json');
+const PI_LEGACY_PREF_FILE = join(ROOT_DIR, 'user', 'launch-preference.json');
 
-function readPiPref() {
+// Machine-local store: data/ is gitignored; the user/ memory repo is tracked
+// and synced, so it must not hold launch selections. Legacy user/ file is a
+// one-time migration read only.
+function readPrefFile(path) {
   try {
-    let content = readFileSync(PI_PREF_FILE, 'utf-8');
+    let content = readFileSync(path, 'utf-8');
     if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
     return JSON.parse(content);
   } catch {
     return null;
   }
+}
+
+function readPiPref() {
+  return readPrefFile(PI_PREF_FILE) || readPrefFile(PI_LEGACY_PREF_FILE);
 }
 
 function getSavedPiMode() {
@@ -403,6 +411,11 @@ async function main() {
   } else if (wantWeb) {
     piMode = 'web';
     modeChosen = true;
+  } else if (process.env.GLITCH_REUSE_SAVED === '1' || args.includes('--reuse-saved')) {
+    // Automation/restart: saved choice wins, 'web' fallback (the web stack is
+    // the thing being restarted). Never persisted: reuse cannot clobber a real
+    // pick. Distinct from the plain non-TTY fallback below (stays 'tui').
+    piMode = getSavedPiMode() || 'web';
   } else if (process.stdin.isTTY) {
     piMode = await showPiModeMenu(getSavedPiMode());
     modeChosen = true;
@@ -424,6 +437,9 @@ async function main() {
   } else if (wantHeadless) {
     stackMode = 'headless';
     stackModeChosen = true;
+  } else if (process.env.GLITCH_REUSE_SAVED === '1' || args.includes('--reuse-saved')) {
+    // Restart/automation: saved stack mode wins, detached headless otherwise.
+    stackMode = getSavedStackMode() || 'headless';
   } else {
     stackMode = getSavedStackMode() || (process.stdout.isTTY ? 'windowed' : 'headless');
   }

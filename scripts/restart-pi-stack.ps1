@@ -52,8 +52,9 @@ function Get-PortPid([int]$Port) {
     $found = @()
     foreach ($line in (netstat -ano | Select-String ":$Port\s" | Select-String "LISTENING")) {
         $parts = ($line.ToString().Trim() -split '\s+')
-        $pid = $parts[-1]
-        if ($pid -match '^\d+$') { $found += [int]$pid }
+        # NOTE: $pid is READ-ONLY ($PID automatic variable). Never assign to it.
+        $procPid = $parts[-1]
+        if ($procPid -match '^\d+$') { $found += [int]$procPid }
     }
     return @($found | Select-Object -Unique)
 }
@@ -82,12 +83,22 @@ while ((Get-Date) -lt $deadline) {
 }
 Stamp "ports :$WebPort and :$AuthPort free"
 
-# ---- 2. Start the stack (idempotent) -----------------------------------------
-# start-pi-stack.ps1 waits for each bind itself, ensures the tunnel, and
-# skips anything that is already up (e.g. cloudflared from a prior run).
-Stamp "starting stack via start-pi-stack.ps1"
-& (Join-Path $RootDir "scripts\start-pi-stack.ps1") -WebPort $WebPort -AuthPort $AuthPort -NoBrowser
-Stamp "start-pi-stack.ps1 finished"
+# ---- 2. Start via the FULL startup chain ------------------------------------
+# Troy's directive: a restart goes through the real startup script, with the
+# saved selections auto-applied and no interactive prompts. GLITCH_REUSE_SAVED
+# gates every interactive stop in launch-unified.mjs / launch-pi.mjs (branch
+# check, repo-update prompt, the TUI/Web menu): saved choices win, nothing is
+# persisted over a later real pick. The full chain also brings back the
+# pieces a bare pi-web-ui launch skips (agent config, sync, login banner) -
+# a bare launcher.cmd restart left the agent switcher missing.
+Stamp "starting full startup chain via launch-unified.mjs (saved selections)"
+$env:GLITCH_REUSE_SAVED = "1"
+# The unified launcher shells out to bare 'node'; make the bundled portable
+# node resolvable the same way launch-glitch.bat does.
+$env:PATH = (Join-Path $RootDir "data\node") + ";" + $env:PATH
+& $NodeExe (Join-Path $RootDir "scripts\launch-unified.mjs") --reuse-saved
+if ($LASTEXITCODE -ne 0) { Stamp "FAILED: full startup chain exited $LASTEXITCODE"; exit 1 }
+Stamp "full startup chain finished"
 
 # ---- 3. Health check: HTTP 200 from the web server ---------------------------
 $up = $false

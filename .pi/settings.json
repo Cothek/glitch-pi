@@ -9,5 +9,8 @@
     "+.pi/extensions/nvidia-model-sync.ts",
     "+.pi/extensions/tunnel-keeper.ts",
     "+.pi/extensions/commandcode-usage.ts"
+  ],
+  "packages": [
+    "npm:pi-mcp-adapter"
   ]
 }

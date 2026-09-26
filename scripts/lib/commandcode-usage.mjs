@@ -154,6 +154,15 @@ function money(n) {
   return `$${n.toFixed(2)}`;
 }
 
+/** "Oct 23" from an ISO timestamp. UTC parts, so the local timezone cannot shift the day. */
+function shortDate(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
 /** "4h 58m" / "2d 23h" / "<1m" / "—" */
 function countdown(msRemaining, now) {
   if (!msRemaining || msRemaining <= 0) return "—";
@@ -204,11 +213,12 @@ export function renderWidgetLines(snap, now = new Date()) {
 
   if (snap.planCredits) {
     const used = Math.max(0, snap.planCredits - snap.monthlyRemaining);
+    const endDate = shortDate(snap.periodEnd);
     const line = [
       `mo  ${pct(used, snap.planCredits).padStart(4)}`,
       bar(used, snap.planCredits),
       `${money(used)} / ${money(snap.planCredits)}`,
-      snap.periodEnd ? `period ends ${new Date(snap.periodEnd).toISOString().slice(0, 10)}` : "",
+      endDate ? `period ends ${endDate}` : "",
     ]
       .filter(Boolean)
       .join("  ");
@@ -237,8 +247,9 @@ export function renderStatusText(snap, now = new Date()) {
   const weekly = snap.weekly
     ? `wk ${usedPct(snap.weekly.used, snap.weekly.cap)} (${countdown(snap.weekly.resetAt - nowMs, nowMs)})`
     : "wk ?";
+  const monthlyEnd = shortDate(snap.periodEnd);
   const monthly = snap.planCredits
-    ? `mo ${usedPct(Math.max(0, snap.planCredits - snap.monthlyRemaining), snap.planCredits)}`
+    ? `mo ${usedPct(Math.max(0, snap.planCredits - snap.monthlyRemaining), snap.planCredits)}${monthlyEnd ? ` (${monthlyEnd})` : ""}`
     : "mo ?";
 
   return `CC ${fiveHour} · ${weekly} · ${monthly}`;
@@ -260,8 +271,8 @@ export function renderDetailText(snap, now = new Date()) {
   if (snap.planCredits) {
     const used = Math.max(0, snap.planCredits - snap.monthlyRemaining);
     const p = Math.min(100, Math.round((used / snap.planCredits) * 100));
-    const end = snap.periodEnd ? `, ends ${new Date(snap.periodEnd).toISOString().slice(0, 10)}` : "";
-    parts.push(`mo ${p}% (${money(used)}/${money(snap.planCredits)}${end})`);
+    const endDate = shortDate(snap.periodEnd);
+    parts.push(`mo ${p}% (${money(used)}/${money(snap.planCredits)}${endDate ? `, ends ${endDate}` : ""})`);
   } else {
     parts.push(`mo ${money(snap.monthlyRemaining)} credits left`);
   }

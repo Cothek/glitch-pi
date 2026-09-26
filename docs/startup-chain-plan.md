@@ -249,6 +249,32 @@ falls back to saved prefs without prompting.
 
 ## Phase 5 — Add-on control panel (from D1/D5, 2026-09-26)
 
+**STATUS 2026-09-26 (session 01a0dddd): CORE BUILT + VERIFIED.**
+- `scripts/addon-control.mjs` — lifecycle engine (list/status/start/stop/autostart/start-auto).
+  Verified live: money start -> 4110 LISTENING -> second start idempotent (same PID) ->
+  stop -> port free; browser-use start -> 4105 LISTENING -> stop clean.
+- `scripts/pi-web-plugins/addons/` — manifest + index.mjs (15s status poll, one background
+  task per RUNNING add-on with a stop button, routes GET /state + POST /start|/stop|/autostart,
+  `/addons` slash command, auto-start of flagged add-ons on activate). Linked live:
+  the installer reports `addons: linked`.
+- Client tab deliberately SKIPPED: the Background tasks panel already provides the same
+  start/stop buttons and `/addons` prints the full table, so a tab would duplicate both.
+  It stays a one-file follow-up (defineView pattern) if Troy wants inline auto-start
+  checkboxes and clickable port links.
+- `data/browser-use/config.json` set to `{"headless": false}` for the visible, interactive
+  browser Troy asked for.
+
+**OPEN GAP (verified — blocks real browsing):** browser-use runs in **STUB MODE**. Its log
+says `browser-use installed: false` / "Running in stub mode — install browser-use to enable
+automation". `plugins/browser-use/node_modules` does not exist, so its declared dependency
+(`browser-use: latest`) was never installed. Chromium IS present (ms-playwright holds
+chromium-1223..1243), so the only missing piece is the package install:
+`cd plugins/browser-use && npm install` (or `scripts/install-browser-use.ps1`). Until that
+runs, the panel manages a server that cannot automate anything.
+
+**NOTE:** `data/` is gitignored, so `config.json` (headless:false) is machine-local. Durable
+fix: have `addon-control.mjs` ensure that key when starting browser-use, or ship a template.
+
 Goal: start/stop the companion apps from inside the Pi web UI, with optional
 auto-start when the stack comes up.
 

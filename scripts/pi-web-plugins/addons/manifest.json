@@ -1,0 +1,7 @@
+{
+  "id": "addons",
+  "name": "Add-ons",
+  "version": "1.0.0",
+  "description": "Start/stop the companion add-ons (Money Dashboard, Glitch Trader, Browser Use) and mark them to auto-start.",
+  "view": true
+}

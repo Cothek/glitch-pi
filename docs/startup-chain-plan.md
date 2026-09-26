@@ -124,6 +124,53 @@ Verification:
 - `git grep` for each deleted filename returns nothing in live code.
 - Full launch of a TUI session once, confirm log lines in data/launch.log.
 
+### Phase 1a — DONE (commit 4acc4cc)
+
+14 files removed; `launch-unified.mjs` now dispatches Pi only (OpenCode-era mode
+keys redirect with a log line). Preserved intact: --reuse-saved gate, pref
+read/merge, fork guard, branch/update checks. **28 of 42 candidates were SKIPPED**
+by the per-file protocol — every one has a real consumer. My original list was
+built from launch-chain greps only and missed a whole consumer generation.
+
+### Phase 1b — consumer-first teardown (the actual remainder of Phase 1)
+
+**A. Dead consumers to delete FIRST (they block the main list):**
+- `switch-mode.mjs` / `.bat` / `.sh` — no callers; imports `lib/user-profile.mjs`
+- `scripts/test/*.test.mjs` — 4 tests whose subjects are dead
+  (launch-integration, inject-providers, lmstudio-context-detector,
+  detect-lmstudio-context)
+- `validate-config.mjs` / `.ps1` — validate opencode.json, call glitch.mjs
+- `resolve-models.mjs`, `switch-model.ps1`, `sync-nvidia-models.mjs`
+- `check-review-pass.mjs`, `test-review-pass.mjs`, `write-review-pass.mjs`
+- `test-vision-dispatch.mjs`, `test-vision-logger.mjs`
+- `audit-data.mjs`, `audit-data-review.mjs` — reference model-ui
+-
+  -> unblocks: launch.mjs / launch-free / launch-local / launch-safe, serve.mjs,
+  glitch.mjs+bat+sh, user-profile.mjs, review-pass-helper.mjs, vision-logger.mjs,
+  check-models.ps1, detect-lmstudio-context.mjs, lmstudio-context-detector.mjs,
+  inject-providers.mjs, plugins/model-ui/, plugins/glitch-ui/
+
+**B. Live files needing a reference cleanup first:**
+- `lib/git-sync.mjs` (alive) references `serve.mjs`
+- `bootstrap.ps1`, `install.ps1`/`.sh`, `setup.ps1`, `setup-tunnel.ps1`/`.sh`,
+  `check-install.mjs`, `audit-root.mjs`, `restart-pi-stack.ps1`, `switch-agent.mjs`
+  reference `glitch.bat`
+- `plugins/auth-proxy.mjs` routes `/plugins/glitch-ui/*` to the dead model-ui
+  port (URL strings only, not a file dependency — safe to delete the dirs)
+
+**C. NEW RESCUES found by the protocol (live consumer — do NOT delete):**
+- `scripts/lib/sqlite-driver.mjs` — **actually imported** by
+  `lib/mulahazah-helpers.mjs`, which the live mulahazah.ts extension uses
+  (network of the same near-miss class as janitor / plugin-manager / startVisibleWindow)
+- `config/tools.json` — `ensure-tools.mjs`, used on demand by audit/critique skills
+- `config/providers.json` — `discover-local-models.mjs`, `ensure-local-model.mjs`
+  (verify those two are alive before deciding)
+
+**D. Doc-only "consumers" (safe to delete despite the grep hits):**
+`serve-glitch.sh`, `check-updates.ps1`, `config/tools-playwright.json`,
+`config/tools-security.json`, `config/tui.json`, `plugins/mcp-server/`
+(its only hit was a `.gitignore` entry).
+
 ## Phase 2 — Gap closure (the ADDs)
 
 | # | Gap | Change | Where |

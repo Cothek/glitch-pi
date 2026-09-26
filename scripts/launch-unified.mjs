@@ -5,7 +5,7 @@ import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync, execSync, spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { checkRepoUpdates, handleRestartOnUpdate } from './lib/git-sync.mjs';
+import { checkRepoUpdates, checkUserRepoUpdates, handleRestartOnUpdate } from './lib/git-sync.mjs';
 import { initLaunchLog, logToFile } from './lib/launch-log.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -390,6 +390,21 @@ async function main() {
                      OpenCode-era keys (normal-*, web-*, safe) are accepted
                      for backward compatibility and redirect to Pi.
     --reset          Clear saved preference and show menu
+    --reuse-saved    Restart mode: skip ALL prompts (branch, update, menu).
+                     Triggered automatically when stdin is not a TTY, or when
+                     env GLITCH_REUSE_SAVED=1 is set. Also skips dependency
+                     updates so a restart never applies updates on its own.
+    --skip-updates   Skip dependency updates (npm + binaries) this run.
+                     Equivalent to env GLITCH_SKIP_UPDATES=1. Wins over
+                     --apply-updates when both are passed, matching
+                     scripts/restart-pi-stack.ps1 where -SkipUpdates
+                     overrides -ApplyUpdates. A true no-op: no import,
+                     no network, no status-file write.
+    --apply-updates  Apply ALL available dependency updates without prompting.
+                     Equivalent to env GLITCH_APPLY_UPDATES=1. Mutually
+                     exclusive with --reuse-saved in spirit (--reuse-saved
+                     wins); meant for an explicit "update then relaunch".
+                     Ignored when --skip-updates is also passed.
 
   The launcher remembers your last choice. Next time, just press Enter.
     `);
@@ -403,10 +418,13 @@ async function main() {
   const REUSE_SAVED = args.includes('--reuse-saved') || process.env.GLITCH_REUSE_SAVED === '1' || !process.stdin.isTTY;
 
   // ---- Branch check + repo updates: interactive only ------------------------
-  // Under reuse-saved, never prompt for a branch switch or an update mid-
-  // restart - the point is relaunching exactly what the user last selected.
+  // Under reuse-saved, never prompt for a branch switch, a repo update, or a
+  // dependency update mid-restart. The point is relaunching exactly what the
+  // user last selected; a restart must never apply updates on its own. An
+  // explicit restart with updates is handled by scripts/restart-pi-stack.ps1
+  // -ApplyUpdates, which runs the checker BEFORE the kill (see that script).
   if (REUSE_SAVED) {
-    log(DARK_GRAY, '  (reuse-saved: branch and update prompts skipped)');
+    log(DARK_GRAY, '  (reuse-saved: branch, repo-update, and dependency-update prompts skipped)');
   } else {
     // ---- Branch check: FIRST thing, before repo updates ----
     await checkBranchBeforeLaunch();
@@ -415,6 +433,65 @@ async function main() {
     const branchOkSet = process.env.GLITCH_BRANCH_OK !== undefined && process.env.GLITCH_BRANCH_OK !== '';
     const syncResult = await checkRepoUpdates({ cwd: ROOT_DIR, interactive: true, allowBranchSwitch: !branchOkSet });
     handleRestartOnUpdate(spawn, syncResult, ROOT_DIR);
+  }
+
+  // ---- Dependency updates (npm + standalone binaries) ----------------------
+  // Only runs on the non-REUSE_SAVED path. The earlier `if (REUSE_SAVED)`
+  // branch logs a skip note and falls through; it does not return. The
+  // operative gate is the `if (!REUSE_SAVED)` check immediately below.
+  // Every call is dynamic import + try/catch so a missing or broken
+  // checker (the other coder owns scripts/check-updates.mjs) never blocks
+  // startup. Headless runs (no TTY) are covered by the REUSE_SAVED gate
+  // above, which sets REUSE_SAVED=true on every non-TTY stdin; this block
+  // therefore only ever runs with a TTY attached, by design. Skip wins
+  // over Apply when both are passed, to match
+  // scripts/restart-pi-stack.ps1 where -SkipUpdates overrides
+  // -ApplyUpdates.
+  if (!REUSE_SAVED) {
+    const skipUpdates = args.includes('--skip-updates') || process.env.GLITCH_SKIP_UPDATES === '1';
+    const applyUpdates = !skipUpdates && (args.includes('--apply-updates') || process.env.GLITCH_APPLY_UPDATES === '1');
+    const checkerPath = join(SCRIPT_DIR, 'check-updates.mjs');
+
+    if (skipUpdates) {
+      // --skip-updates / GLITCH_SKIP_UPDATES=1 is a real no-op: no import,
+      // no network, no status-file write. Matches scripts/restart-pi-stack.ps1
+      // where -SkipUpdates overrides -ApplyUpdates.
+      log(DARK_GRAY, '  (updates: skipped via --skip-updates / GLITCH_SKIP_UPDATES)');
+    } else if (!existsSync(checkerPath)) {
+      // Module not present yet (the other coder owns it). Brief note on
+      // interactive runs so the user knows updates were skipped on purpose.
+      if (process.stdin.isTTY) {
+        log(DARK_GRAY, '  (dependency updates: checker not present, skipping)');
+      }
+    } else {
+      // The dynamic import runs only on the apply or interactive branches;
+      // skip stays a true no-op above. Both branches funnel through the
+      // same try/catch so a missing or broken checker never blocks startup.
+      try {
+        const checker = await import('./check-updates.mjs');
+        if (applyUpdates) {
+          log(DARK_GRAY, '  (updates: applying all without prompt)');
+          await checker.checkAndPromptUpdates({ cwd: ROOT_DIR, interactive: false, autoApplyAll: true });
+        } else {
+          // Interactive TTY: prompt the user.
+          await checker.checkAndPromptUpdates({ cwd: ROOT_DIR, interactive: true, autoApplyAll: false });
+        }
+      } catch (e) {
+        log(DARK_YELLOW, `  (dependency-update check failed: ${e && e.message ? e.message : 'unknown error'} - continuing)`);
+      }
+    }
+
+    // ---- Gap G3: sync the user/ memory repo on launch ---------------------
+    // The user/ repo is where main-memory.md and the diary live; if it is a
+    // git repo with an upstream, we want it pulled on the same path as the
+    // main repo so cross-machine memory stays fresh. Skipped under REUSE_SAVED
+    // (the parent branch already returns above). Non-fatal: a broken memory
+    // sync must never block startup.
+    try {
+      await checkUserRepoUpdates({ cwd: join(ROOT_DIR, 'user'), interactive: true });
+    } catch (e) {
+      log(DARK_YELLOW, `  (user/ repo sync failed: ${e && e.message ? e.message : 'unknown error'} - continuing)`);
+    }
   }
 
   const restartFlagPath = join(ROOT_DIR, 'data', '.restart-timestamp');

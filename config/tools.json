@@ -1,5 +1,65 @@
 {
   "$schema": "config/tools-schema.json",
-  "description": "External binary tool dependencies for Glitch AI. Launch scripts check this manifest and auto-download missing tools.",
-  "tools": []
+  "description": "External binary and npm tool dependencies for Glitch PI. Launch scripts check this manifest and the update subsystem compares installed vs latest for each entry. The bundled Node tree at data/node is the npm global prefix; installs go into data/node/node_modules without modifying data/node itself.",
+  "tools": [
+    {
+      "name": "pi-coding-agent",
+      "type": "npm",
+      "package": "@earendil-works/pi-coding-agent",
+      "binary": "pi",
+      "version": "",
+      "platforms": {},
+      "restartRequired": true,
+      "updateType": "sync",
+      "latestUrl": ""
+    },
+    {
+      "name": "pi-web-ui",
+      "type": "npm",
+      "package": "pi-web-ui",
+      "binary": "pi-web-ui",
+      "version": "",
+      "platforms": {},
+      "restartRequired": true,
+      "updateType": "sync",
+      "latestUrl": ""
+    },
+    {
+      "name": "gitnexus",
+      "type": "npm",
+      "package": "gitnexus",
+      "binary": "gitnexus",
+      "version": "",
+      "platforms": {},
+      "restartRequired": false,
+      "updateType": "sync",
+      "latestUrl": ""
+    },
+    {
+      "name": "cloudflared",
+      "type": "binary",
+      "binary": "cloudflared.exe",
+      "version": "",
+      "restartRequired": true,
+      "updateType": "sync",
+      "latestUrl": "https://github.com/cloudflare/cloudflared/releases/latest",
+      "platforms": {
+        "win32": {
+          "url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe",
+          "archive": "",
+          "extract": ["cloudflared.exe"]
+        },
+        "linux": {
+          "url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+          "archive": "",
+          "extract": ["cloudflared"]
+        },
+        "darwin": {
+          "url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64",
+          "archive": "",
+          "extract": ["cloudflared"]
+        }
+      }
+    }
+  ]
 }

@@ -25,6 +25,18 @@
 .PARAMETER ContinueText   Inline continuation prompt text (optional).
 .PARAMETER ContinueFile   File containing the continuation prompt (optional).
 .PARAMETER DelaySec       Seconds to wait before killing the stack. Default 0.
+.PARAMETER ApplyUpdates  Restart with ALL dependency updates accepted. Runs the
+                         new check-updates.mjs BEFORE killing the stack so a
+                         non-zero exit never leaves the stack down. Default
+                         behaviour (neither switch) is to skip all updates,
+                         matching scripts/launch-unified.mjs --reuse-saved.
+.PARAMETER SkipUpdates   Explicit no-op default. Logged so the next reader
+                         sees the policy. If both -ApplyUpdates and
+                         -SkipUpdates are passed, -SkipUpdates wins.
+.PARAMETER UpdateFilter  Comma-separated subset of dependency names to limit
+                         -ApplyUpdates to (e.g. "pi-coding-agent,cloudflared").
+                         Empty = apply everything. Ignored unless
+                         -ApplyUpdates is also passed.
 
 .EXAMPLE
     .\scripts\restart-pi-stack.ps1
@@ -37,7 +49,10 @@ param(
     [string]$ContinuePath = "",
     [string]$ContinueText = "",
     [string]$ContinueFile = "",
-    [int]$DelaySec = 0
+    [int]$DelaySec = 0,
+    [switch]$ApplyUpdates,
+    [switch]$SkipUpdates,
+    [string]$UpdateFilter = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +75,37 @@ function Get-PortPid([int]$Port) {
 }
 
 if ($DelaySec -gt 0) { Stamp "waiting ${DelaySec}s before restart (caller asked for a head start)"; Start-Sleep -Seconds $DelaySec }
+
+# ---- 0. Dependency updates (before the kill, if requested) -----------------
+# Default (neither -ApplyUpdates nor -SkipUpdates) is to skip updates: a
+# restart must never apply updates on its own. -SkipUpdates makes the no-op
+# default explicit. If both switches are passed, -SkipUpdates wins.
+if ($ApplyUpdates -and $SkipUpdates) {
+    Stamp "-ApplyUpdates and -SkipUpdates both passed; -SkipUpdates wins (no updates)"
+} elseif ($ApplyUpdates) {
+    $checkerPath = Join-Path $RootDir "scripts\check-updates.mjs"
+    if (-not (Test-Path $checkerPath)) {
+        Stamp "update checker not present at $checkerPath; skipping -ApplyUpdates"
+    } else {
+        $checkerArgs = @($checkerPath, "--apply", "--yes")
+        if ($UpdateFilter -ne "") { $checkerArgs += @("--filter", $UpdateFilter) }
+        Stamp "applying dependency updates before restart (filter='$UpdateFilter')"
+        & $NodeExe @checkerArgs
+        if ($LASTEXITCODE -ne 0) {
+            # Do NOT leave the stack down on a checker failure - the user
+            # asked for a restart, not an update. Log and continue.
+            Stamp "update checker exited $LASTEXITCODE; continuing restart anyway"
+        } else {
+            Stamp "dependency updates applied"
+        }
+        # Do NOT set $env:GLITCH_APPLY_UPDATES here: the launcher below stays
+        # --reuse-saved because updates were already applied in this same run.
+        # If we set the env var the launcher would re-apply the same updates
+        # (idempotent but wasteful) and would also try to prompt on TTY.
+    }
+} else {
+    Stamp "dependency updates skipped (default restart policy; pass -ApplyUpdates to apply)"
+}
 
 # ---- 1. Stop the stack by port-owning PID ----------------------------------
 $targets = @{}
@@ -101,11 +147,29 @@ if ($LASTEXITCODE -ne 0) { Stamp "FAILED: full startup chain exited $LASTEXITCOD
 Stamp "full startup chain finished"
 
 # ---- 3. Health check: HTTP 200 from the web server ---------------------------
+# pi-web-ui requires PI_WEB_TOKEN on every HTTP request when the gate is on,
+# so the health check must carry it too (the 60s window and HTTP-200 success
+# rule are unchanged). Token stays out of any log line.
+$tokenPath = Join-Path $RootDir ".server-token"
+$tokenValue = $null
+if (Test-Path $tokenPath) {
+    $tokenValue = (Get-Content -Path $tokenPath -Raw -ErrorAction SilentlyContinue)
+    if ($tokenValue) { $tokenValue = $tokenValue.Trim() }
+    if (-not $tokenValue) { $tokenValue = $null }
+}
 $up = $false
 $deadline = (Get-Date).AddSeconds(60)
 while ((Get-Date) -lt $deadline) {
     try {
-        $resp = Invoke-WebRequest -Uri "http://localhost:$WebPort/" -UseBasicParsing -TimeoutSec 3
+        $reqArgs = @{
+            Uri = "http://localhost:$WebPort/"
+            UseBasicParsing = $true
+            TimeoutSec = 3
+        }
+        if ($tokenValue) {
+            $reqArgs.Headers = @{ 'X-PI-Token' = $tokenValue }
+        }
+        $resp = Invoke-WebRequest @reqArgs
         if ($resp.StatusCode -eq 200) { $up = $true; break }
     } catch { }
     Start-Sleep -Seconds 1

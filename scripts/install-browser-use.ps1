@@ -127,8 +127,8 @@ if ((Test-Path $ConfigPath) -and -not $Force) {
   Write-Ok "Config already exists at $ConfigPath (use -Force to overwrite)"
 } else {
   $defaultConfig = @{
-    enabled = $false
-    headless = $true
+    enabled = $true
+    headless = $false
     llm = @{
       active_provider = "openrouter"
       active_model = "google/gemini-2.0-flash-001"
@@ -167,9 +167,10 @@ if ((Test-Path $ConfigPath) -and -not $Force) {
       max_attempts = 3
       backoff_base_ms = 2000
     }
+    # VERIFIED 2026-09-26: dispatchToVision() POSTs to http://localhost:<vision_port>/api/analyze, and NOTHING in this repo serves that route (grep across plugins/, scripts/, .pi/). Port 4100 was the opencode-era auth proxy; Pi's auth proxy is 4103 and does not implement /api/analyze either. So vision dispatch has no target in Pi — leave it off until something serves POST /api/analyze.
     vision = @{
       enabled = $true
-      dispatch_to_vision = $true
+      dispatch_to_vision = $false
       vision_port = 4100
     }
     history = @{

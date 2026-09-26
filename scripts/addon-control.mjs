@@ -126,14 +126,30 @@ function readPidFile(id) {
   if (!existsSync(f)) return null;
   try {
     const raw = readFileSync(f, "utf8").trim();
+    if (!raw) return null;
+    // New shape: {"pid":<n>,"startedAt":"<ISO>"}. Legacy shape: bare integer.
+    // A bare integer means no startedAt — the caller treats that as grace-expired
+    // so a stale PID file written by an older installer still reads sensibly.
+    try {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object") {
+        const n = Number(obj.pid);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        const ts = typeof obj.startedAt === "string" ? Date.parse(obj.startedAt) : NaN;
+        return { pid: n, startedAt: Number.isFinite(ts) ? ts : null };
+      }
+    } catch {
+      /* fall through to legacy parse */
+    }
     const n = Number(raw);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    return Number.isFinite(n) && n > 0 ? { pid: n, startedAt: null } : null;
   } catch {
     return null;
   }
 }
 function writePidFile(id, pid) {
-  writeFileSync(pidFile(id), String(pid));
+  const payload = JSON.stringify({ pid, startedAt: new Date().toISOString() });
+  writeFileSync(pidFile(id), payload);
 }
 function deletePidFile(id) {
   const f = pidFile(id);
@@ -285,16 +301,37 @@ async function verbList() {
 }
 
 async function statusOne(addon) {
-  const pid = readPidFile(addon.id);
+  const pidRec = readPidFile(addon.id);
+  const pid = pidRec ? pidRec.pid : null;
   const alive = pid ? isAlive(pid) : false;
   const ports = await checkPorts(addon);
   const flags = readFlags();
   const autostart = !!(flags[addon.id] && flags[addon.id].autostart);
-  const up = alive && ports.some((p) => p.listening);
+  const allListening = ports.every((p) => p.listening);
+  // `up` keeps its current meaning: alive AND at least one port listening. New
+  // `state` is the richer three-valued indicator the panel reads.
+  const up = alive && allListening;
+  let state;
+  if (alive && allListening) {
+    state = "up";
+  } else if (alive && !allListening) {
+    // Grace only applies when we know when the process started. Legacy PID files
+    // have no startedAt -> assume expired: a long-running boot that simply never
+    // bound a port still reads as "down" so the panel can act on it.
+    const startedAt = pidRec?.startedAt;
+    if (startedAt != null && Date.now() - startedAt < (addon.bootGraceMs ?? 0)) {
+      state = "starting";
+    } else {
+      state = "down";
+    }
+  } else {
+    state = "down";
+  }
   return {
     id: addon.id,
     label: addon.label,
     up,
+    state,
     pid: alive ? pid : null,
     ports,
     autostart,
@@ -327,11 +364,18 @@ async function verbStart(id) {
   }
 
   // skip-if-alive: pid alive AND at least one port listening
-  const existingPid = readPidFile(addon.id);
-  if (existingPid && isAlive(existingPid)) {
+  const existing = readPidFile(addon.id);
+  if (existing && isAlive(existing.pid)) {
     const ports = await checkPorts(addon);
-    if (ports.some((p) => p.listening)) {
-      return emit({ id, ok: true, action: "already_up", pid: existingPid, ports });
+    if (ports.every((p) => p.listening)) {
+      return emit({ id, ok: true, action: "already_up", pid: existing.pid, ports });
+    }
+    // Process alive but port(s) not yet bound. If we are still inside bootGraceMs,
+    // do NOT spawn a duplicate — the first attempt is still booting. Outside grace
+    // (or no startedAt -> grace expired by default), clear the stale file and
+    // proceed with a fresh spawn.
+    if (existing.startedAt != null && Date.now() - existing.startedAt < (addon.bootGraceMs ?? 0)) {
+      return emit({ id, ok: true, action: "already_starting", pid: existing.pid });
     }
     deletePidFile(addon.id);
   }
@@ -349,8 +393,9 @@ async function verbStop(id) {
   const addon = REGISTRY_BY_ID.get(id);
   if (!addon) return emit({ id, ok: false, error: `unknown add-on "${id}"` });
 
-  const pid = readPidFile(addon.id);
-  if (!pid) return emit({ id, ok: true, action: "not_running" });
+  const existing = readPidFile(addon.id);
+  if (!existing) return emit({ id, ok: true, action: "not_running" });
+  const pid = existing.pid;
   if (!isAlive(pid)) {
     deletePidFile(addon.id);
     return emit({ id, ok: true, action: "not_running" });
@@ -402,7 +447,7 @@ async function verbStartAuto() {
       }
       const r = await verbStart(addon.id);
       if (r && r.ok && (r.action === "started" || r.action === "already_up")) {
-        started.push({ id: addon.id, pid: r.pid ?? readPidFile(addon.id) });
+        started.push({ id: addon.id, pid: r.pid ?? readPidFile(addon.id)?.pid });
       } else {
         skipped.push({ id: addon.id, reason: r?.error ?? "unknown" });
       }

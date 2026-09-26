@@ -249,14 +249,9 @@ const MODELS = [
 ];
 
 const SCRIPT_MAP = {
-  'normal-paid': { script: 'launch.mjs', args: [] },
-  'normal-free': { script: 'launch-free.mjs', args: [] },
-  'normal-local': { script: 'launch-local.mjs', args: [] },
-  'web-paid': { script: 'launch.mjs', args: ['--serve'] },
-  'web-free': { script: 'launch-free.mjs', args: ['--serve'] },
-  'web-local': { script: 'launch-local.mjs', args: ['--serve'] },
-  'safe': { script: 'launch-safe.mjs', args: [] },
-  // Pi is a delivery with no model tier (like safe) — Phase 4 migration path.
+  // Pi is the sole delivery in this fork (Phase 4 migration path).
+  // OpenCode-era modes (normal-paid/free/local, web-*, safe) have no SCRIPT_MAP
+  // entry and are redirected to Pi by the mode-validation block below.
   'pi': { script: 'launch-pi.mjs', args: [] },
 };
 
@@ -391,11 +386,9 @@ async function main() {
   Options:
     --help, -h       Show this help
     --mode <key>     Skip menu, launch specific mode directly
-                     Combined format: <glitch-mode>-<tier>  (e.g. normal-paid, web-free)
-                     Safe mode: safe                       (no tier)
-                     Pi mode:   pi                         (no tier)
-                     Old format: <tier>                    (assumes normal mode)
-                     Tiers: paid, free, local
+                     Pi mode (this fork): pi                (sole delivery)
+                     OpenCode-era keys (normal-*, web-*, safe) are accepted
+                     for backward compatibility and redirect to Pi.
     --reset          Clear saved preference and show menu
 
   The launcher remembers your last choice. Next time, just press Enter.
@@ -567,12 +560,22 @@ async function main() {
     process.exit(1);
   }
 
-  const config = SCRIPT_MAP[modeId];
+  let config = SCRIPT_MAP[modeId];
   if (!config) {
-    log(RED, ` Unknown mode: ${modeId}`);
-    logToFile(`ERROR: Unknown mode: ${modeId}`);
-    log(YELLOW, ' Valid format: <glitch-mode>-<tier> (e.g. normal-paid, web-free)');
-    process.exit(1);
+    // OpenCode-era modes (normal-*, web-*, safe) reach this block in the
+    // Pi-only fork — normalizeMode validated the key but SCRIPT_MAP only
+    // carries Pi. Redirect to Pi with a clear log line instead of erroring.
+    log(YELLOW, `  OpenCode-era mode '${modeId}' is gone in this fork — launching Pi.`);
+    logToFile(`OpenCode-era mode '${modeId}' redirected to Pi`);
+    modeId = 'pi';
+    config = SCRIPT_MAP[modeId];
+    if (!config) {
+      // Truly invalid key (should be unreachable: normalizeMode returns null
+      // for unrecognized input, caught by the !modeId guard above).
+      log(RED, ` Unknown mode: ${modeId}`);
+      logToFile(`ERROR: Unknown mode: ${modeId}`);
+      process.exit(1);
+    }
   }
 
   // Persist explicit choices only; a reused selection is never re-saved

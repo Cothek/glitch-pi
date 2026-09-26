@@ -53,22 +53,83 @@ function truncateOutput(output: string): string {
   return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted.]`;
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-  const currentScript = process.argv[1];
-  const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-  if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
-    return { command: process.execPath, args: [currentScript, ...args] };
+/** Walk up from `start` to the nearest directory holding .git or .pi. */
+function findRepoRoot(start: string): string {
+  let dir = start;
+  while (true) {
+    if (fs.existsSync(path.join(dir, ".git")) || fs.existsSync(path.join(dir, ".pi"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return start;
+    dir = parent;
   }
+}
+
+/**
+ * Resolve a runnable pi CLI invocation for dispatch.
+ *
+ * HISTORY (2026-09-26): the old version reused `process.argv[1]` whenever that
+ * file existed. Under the web UI, Pi runs embedded inside pi-web-ui, so argv[1]
+ * is pi-web-ui/bin/pi-web-ui.mjs — the dispatcher then re-ran the WEB UI with
+ * `--mode json` and every dispatch died with `✖ 未知选项: --mode`. The
+ * `data/node/pi.cmd` fallback could not rescue it either: spawn() with
+ * shell:false cannot execute a .cmd on Windows (EINVAL).
+ *
+ * Order mirrors scripts/launch-pi.mjs resolvePiInvocation():
+ *   1. <runtime> + .../pi-coding-agent/dist/bundle/cli.js (spaces-safe, no shell)
+ *   2. the current script, ONLY when it really is the pi CLI (cli.js)
+ *   3. data/node/pi.cmd through cmd.exe
+ *   4. `pi` from PATH
+ */
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  const repoRoot = findRepoRoot(process.cwd());
+  const isWin = process.platform === "win32";
   const execName = path.basename(process.execPath).toLowerCase();
   const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
-  if (!isGenericRuntime) {
-    return { command: process.execPath, args };
+
+  const cliCandidates = [
+    process.env.PI_CLI_JS,
+    path.join(
+      repoRoot, "data", "node", "node_modules",
+      "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js",
+    ),
+    path.join(
+      repoRoot, "node_modules",
+      "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js",
+    ),
+  ].filter((p): p is string => typeof p === "string" && p.length > 0);
+
+  const localNode = path.join(repoRoot, "data", "node", isWin ? "node.exe" : "node");
+  for (const cliJs of cliCandidates) {
+    if (!fs.existsSync(cliJs)) continue;
+    if (fs.existsSync(localNode)) return { command: localNode, args: [cliJs, ...args] };
+    if (isGenericRuntime) return { command: process.execPath, args: [cliJs, ...args] };
   }
-  // Prefer local pi.cmd when present (glitch-pi data/node layout)
-  const localPi = path.join(process.cwd(), "data", "node", "pi.cmd");
+
+  // Current script — only when it IS the pi CLI. argv[1] is usually the host
+  // process (pi-web-ui), and running that with pi flags is what broke dispatch.
+  const currentScript = process.argv[1];
+  if (
+    currentScript &&
+    !currentScript.startsWith("/$bunfs/root/") &&
+    /(^|[\\/])cli\.js$/i.test(currentScript) &&
+    fs.existsSync(currentScript)
+  ) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
+
+  // Non-generic runtime = pi compiled to a binary: it accepts pi args directly.
+  if (!isGenericRuntime) return { command: process.execPath, args };
+
+  const localPi = path.join(repoRoot, "data", "node", isWin ? "pi.cmd" : "pi");
   if (fs.existsSync(localPi)) {
+    // .cmd/.bat need a shell. cmd.exe with /d /s /c keeps the path quoted, so
+    // spaces in "E:\Glitch AI\..." stay intact (same trick as launch-pi.mjs).
+    if (isWin) {
+      return { command: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", localPi, ...args] };
+    }
     return { command: localPi, args };
   }
+
   return { command: "pi", args };
 }
 

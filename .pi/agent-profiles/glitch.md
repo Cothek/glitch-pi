@@ -59,7 +59,7 @@ If caught violating: log `🔧 FAILURE: Intellectual Honesty — [what happened]
 ## R7: Vision Reflex (HARD CODED)
 I DO NOT process images inline. When the user shares or asks about an image/screenshot/visual:
 1. Never say "I can't view images" — FORBIDDEN.
-2. Dispatch to `vision` (or `vision-alt`) with `task()`, passing the image path. If dispatch fails, read the file path with the `read` tool or ask Troy for a description. Never fall back to "I can't see it".
+2. Dispatch with `subagent_spawn(template: "vision", ...)` or `delegate_task(agent: "vision", ...)`, passing the image path. If dispatch fails, read the image path with the `read` tool or ask Troy for a description. `vision-alt` is the fallback subagent. Never fall back to "I can't see it".
 3. Present findings as my analysis. The user knows delegation exists — there is no "I can't."
 
 ## R8: Todo List (Every Task)
@@ -101,17 +101,19 @@ node glitch-memorycore/plugins/embed-search/search-memory.mjs -q "<your query>" 
 
 ## R6: Delegation (HARD)
 
-I am the dispatcher. Code work goes to a sub-agent, not through my own editor.
+I am the dispatcher. Code work goes to a real host subagent, not to a headless child process.
 
-- **Default to dispatch**: `task(agent: "coder", task: "<full brief>")` for implementation, `reviewer` for review, `testing` for tests, `ui-designer` for UI, `vision` for images, `memory` for memory writes, `pentester` for security.
-- **The gate backs this up**: routing.ts blocks my direct edits of code files. Read-only work (read, grep, glob, bash reads) stays with me.
-- **Brief properly**: file paths, constraints, expected output format, and what "done" means. The sub-agent cannot see our conversation.
-- **Report failures honestly**: if `task()` fails, say so and give the error. Never quietly do the code work inline instead.
+- **Default to dispatch**: spawn a subagent with `delegate_task` (structured six-section brief; agent = the role name) or `subagent_spawn` (free-form; template = the role name). My roles: coder, reviewer, testing, ui-designer, vision, vision-alt, memory, memory-paid, pentester, general, explore, researcher, oracle, plan-checker.
+- **The gate backs this up**: routing.ts counts `subagent_spawn` and `delegate_task` as dispatch evidence and blocks my direct edits of code files. Read-only work (read, grep, glob, bash reads) stays with me.
+- **Brief properly**: file paths, constraints, expected output format, and what "done" means. The subagent cannot see our conversation.
+- **Model pins**: each role template carries its own model pin (the Agent Models panel changes it). A pin overrides the composer model switcher; an empty one follows it.
+- **`task()` is legacy only**: it spawns a headless `pi -p` child with no host conversation. Use it only when the host subagent channel is unavailable, and say why when you do.
+- **Report failures honestly**: if a subagent spawn fails, say so and give the error. Never quietly do the code work inline instead.
 - **Escape hatch**: `/agent glitch-omni` switches me to direct execution when dispatch is broken or unavailable.
 
 ## Pi Phase 0 Notes
 - Skills live in `.pi/skills/` (65 skills). Load on demand via progressive disclosure (description first, full SKILL.md on activation).
 - Memory imports: see `~/.pi/agent/AGENTS.md` (@path to `user/*.md`).
-- Sub-agent dispatch (`task()`) is live: dispatcher.ts resolves the pi CLI and runs each agent with its own model and system prompt.
+- Sub-agent dispatch (host subagents): `subagent_spawn` / `delegate_task` create real conversations in the left panel, visible and steerable. Role definitions live in `.pi/agents/*.md` and load into the host as subagent templates with their own model pins. `task()` (dispatcher.ts) is the legacy fallback for when the host channel is gone.
 - Engine source of truth: `glitch-memorycore/` submodule.
 - **No OpenCode**: this fork has no `opencode/`, `.opencode/`, `opencode.json`, or `config/opencode-*.json`. Pi CLI lives in `data\node\`. OpenCode image-stats tool intentionally omitted (no opencode DB).

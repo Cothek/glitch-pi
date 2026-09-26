@@ -280,7 +280,7 @@ function extractFilePath(input: any): string {
 
 function extractAgentName(input: any): string {
   if (!input || typeof input !== "object") return "unknown";
-  return String(input.subagent_type || input.agent || input.subagent || "unknown");
+  return String(input.subagent_type || input.agent || input.subagent || input.template || input.type || "unknown");
 }
 
 function writeReviewPassMarker(agentName: string): void {
@@ -304,6 +304,9 @@ function writeReviewPassMarker(agentName: string): void {
 
 export default function (pi: ExtensionAPI) {
   const lastTaskTime = new Map<string, number>();
+  // Global "any dispatch" stamp. edit/bash calls carry no agent key, so the
+  // per-agent map alone can never satisfy their window check.
+  let lastDispatchTime = 0;
   let pendingReview = false;
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
@@ -353,7 +356,7 @@ export default function (pi: ExtensionAPI) {
         const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimaryMode();
 
         // --- dispatch tracking on task-like custom tools ---
-        if (event.toolName === "task" || event.toolName === "dispatch") {
+        if (event.toolName === "task" || event.toolName === "dispatch" || event.toolName === "subagent_spawn" || event.toolName === "delegate_task") {
           // task dispatch itself is allowed; timestamp recorded after via tool_execution_end
         }
 
@@ -397,7 +400,7 @@ export default function (pi: ExtensionAPI) {
 
           // Dispatch-First (dispatch-reflex)
           if (!isExemptFile(filePath) && isCodeFile(filePath)) {
-            const lastTask = lastTaskTime.get(agentName) || 0;
+            const lastTask = Math.max(lastTaskTime.get(agentName) || 0, lastDispatchTime);
             const timeSinceTask = Date.now() - lastTask;
             if (timeSinceTask > DISPATCH_WINDOW_MS) {
               if (isGlitchOmni) {
@@ -406,8 +409,8 @@ export default function (pi: ExtensionAPI) {
                 return {
                   block: true,
                   reason:
-                    `⛔ Dispatch-First Violation: Direct edit on ${filePath} without prior task() dispatch.\n` +
-                    `You MUST dispatch to the appropriate sub-agent (task() with subagent_type: "coder" for code) before editing files directly.\n` +
+                    `⛔ Dispatch-First Violation: Direct edit on ${filePath} without prior subagent dispatch.\n` +
+                    `You MUST dispatch to a sub-agent first (delegate_task or subagent_spawn, e.g. delegate_task with agent: "coder" for code) before editing files directly.\n` +
                     "Exempt: memory files (user/*.md), config files (opencode.json), and git operations.",
                 };
               }
@@ -439,7 +442,7 @@ export default function (pi: ExtensionAPI) {
 
           // Destructive bash → dispatch-first
           if (shouldBlockDestructiveBash(command)) {
-            const lastTask = lastTaskTime.get(agentName) || 0;
+            const lastTask = Math.max(lastTaskTime.get(agentName) || 0, lastDispatchTime);
             const timeSinceTask = Date.now() - lastTask;
             if (timeSinceTask > DISPATCH_WINDOW_MS) {
               if (isGlitchOmni) {
@@ -448,9 +451,9 @@ export default function (pi: ExtensionAPI) {
                 return {
                   block: true,
                   reason:
-                    "⛔ Dispatch-First Violation: Direct destructive bash command without prior task() dispatch.\n" +
+                    "⛔ Dispatch-First Violation: Direct destructive bash command without prior subagent dispatch.\n" +
                     `Command: ${command}\n` +
-                    'You MUST dispatch to the appropriate sub-agent (task() with subagent_type: "general") before running destructive commands.\n' +
+                    'You MUST dispatch to a sub-agent first (delegate_task or subagent_spawn, e.g. delegate_task with agent: "general") before running destructive commands.\n' +
                     "Exempt: read-only commands, git operations (git add, commit, push, pull).",
                 };
               }
@@ -486,10 +489,11 @@ export default function (pi: ExtensionAPI) {
     try {
       const tool = event.toolName || "unknown";
 
-      if (tool === "task" || tool === "dispatch") {
+      if (tool === "task" || tool === "dispatch" || tool === "subagent_spawn" || tool === "delegate_task") {
         const args = (event as any).args ?? (event as any).input ?? {};
         const agentName = extractAgentName(args);
         lastTaskTime.set(agentName, Date.now());
+        lastDispatchTime = Date.now();
 
         if (CODE_WRITING_AGENTS.has(agentName)) {
           pendingReview = true;

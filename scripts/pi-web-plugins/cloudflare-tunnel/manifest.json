@@ -1,0 +1,7 @@
+{
+  "id": "cloudflare-tunnel",
+  "name": "Cloudflare Tunnel",
+  "version": "1.0.0",
+  "description": "Tracks the glitch-pi Cloudflare tunnel in the Background tasks panel and adds stop/start control.",
+  "view": false
+}

@@ -136,3 +136,4 @@ CLAUDE.md
 
 # agent-models plugin runtime data: pre-write backups + the generated cost table
 .pi/agent-models/
+.pi-approved; # pi-web-ui plugin permission marker (host-created, machine-local)

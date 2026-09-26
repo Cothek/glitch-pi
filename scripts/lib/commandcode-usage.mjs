@@ -223,8 +223,7 @@ export function renderWidgetLines(snap, now = new Date()) {
   return lines;
 }
 
-/**
- * Short text for ctx.ui.setStatus (status bar chip).
+/** Short text for ctx.ui.setStatus (status bar chip).
  * Percent-led: the chip answers "how much of my limit is gone?" at a glance.
  * All three figures are percent USED, matching the dashboard bars.
  */
@@ -245,6 +244,30 @@ export function renderStatusText(snap, now = new Date()) {
   return `CC ${fiveHour} · ${weekly} · ${monthly}`;
 }
 
+/**
+ * One-line detail for the /cc-usage toast: percent first, dollars and reset
+ * times as context. This is the surface that replaced the widget panel.
+ */
+export function renderDetailText(snap, now = new Date()) {
+  const nowMs = now.getTime();
+  const fmtWindow = (label, w) => {
+    if (!w) return `${label} ?`;
+    const p = w.cap > 0 ? `${Math.min(100, Math.round((w.used / w.cap) * 100))}%` : "?";
+    return `${label} ${p} (${money(w.used)}/${money(w.cap)}, resets ${countdown(w.resetAt - nowMs, nowMs)})`;
+  };
+
+  const parts = [fmtWindow("5h", snap.fiveHour), fmtWindow("wk", snap.weekly)];
+  if (snap.planCredits) {
+    const used = Math.max(0, snap.planCredits - snap.monthlyRemaining);
+    const p = Math.min(100, Math.round((used / snap.planCredits) * 100));
+    const end = snap.periodEnd ? `, ends ${new Date(snap.periodEnd).toISOString().slice(0, 10)}` : "";
+    parts.push(`mo ${p}% (${money(used)}/${money(snap.planCredits)}${end})`);
+  } else {
+    parts.push(`mo ${money(snap.monthlyRemaining)} credits left`);
+  }
+  return parts.join(" · ");
+}
+
 // ---- CLI mode ---------------------------------------------------------------
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -256,4 +279,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   console.log(renderWidgetLines(snapshot).join("\n"));
   console.log();
   console.log(renderStatusText(snapshot));
+  console.log(renderDetailText(snapshot));
 }

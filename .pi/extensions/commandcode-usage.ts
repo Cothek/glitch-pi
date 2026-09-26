@@ -1,12 +1,13 @@
 /**
  * commandcode-usage.ts — live Command Code plan-usage monitor for Pi.
  *
- * Renders a widget (under the file tree in the web UI, above the editor in
- * the TUI) plus a status-bar chip showing the three plan limits from
- * https://commandcode.ai/settings/usage:
- *   - 5-hour window   (used / cap, resets countdown)
- *   - weekly window   (used / cap, resets countdown)
- *   - monthly credits (used / plan cap, period end)
+ * Renders a status-bar chip (the web UI footer) with the three plan limits from
+ * https://commandcode.ai/settings/usage, as percent USED:
+ *   CC 5h 1% (2h 24m) · wk 8% (5d 13h) · mo 4%
+ *
+ * The dollar detail is available on demand via /cc-usage (toast). There is
+ * deliberately NO widget panel: in the web UI a widget renders under the file
+ * tree, i.e. the bottom-right region, which Troy does not want occupied.
  *
  * Data comes from the command-code CLI's own alpha API using the same API key
  * Pi already uses for the commandcode provider. Fetch/render logic lives in
@@ -16,7 +17,7 @@
  *   - Fetch on session start, then every 2 min (unref'd timer); countdowns
  *     re-render from cache every 30 s without a network call.
  *   - Extra fetch on agent_end — a reply just finished, so spend likely moved.
- *   - `/cc-usage` forces a refresh and toasts the result.
+ *   - `/cc-usage` forces a refresh and toasts the percent + dollar detail.
  *   - Sub-agents (GLITCH_SUBAGENT=1) skip entirely — the primary session owns
  *     the poll. Nothing here may ever throw (tunnel-keeper rule).
  *
@@ -26,8 +27,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	fetchUsageSnapshot,
+	renderDetailText,
 	renderStatusText,
-	renderWidgetLines,
 	type UsageSnapshot,
 } from "../../scripts/lib/commandcode-usage.mjs";
 
@@ -47,20 +48,14 @@ export default function commandcodeUsageExtension(pi: ExtensionAPI) {
 	let inflight = false;
 
 	/** Push the current snapshot (or clear when there is none) into widget + status. */
+	/** Push the current snapshot into the footer chip, or clear it when there is none. */
 	function paint(): void {
 		const c = ctx;
 		if (!c) return;
 		try {
-			if (snap) {
-				const now = new Date();
-				c.ui.setWidget(WIDGET_KEY, renderWidgetLines(snap, now), { placement: "belowEditor" });
-				c.ui.setStatus(STATUS_KEY, renderStatusText(snap, now));
-			} else {
-				c.ui.setWidget(WIDGET_KEY, undefined);
-				c.ui.setStatus(STATUS_KEY, undefined);
-			}
+			c.ui.setStatus(STATUS_KEY, snap ? renderStatusText(snap, new Date()) : undefined);
 		} catch {
-			// A widget problem must never break a session.
+			// A status problem must never break a session.
 		}
 	}
 
@@ -87,6 +82,13 @@ export default function commandcodeUsageExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, c) => {
 		ctx = (c as unknown) as AnyCtx;
+		// Earlier builds painted a widget panel (it renders under the file tree in
+		// the bottom-right region). Clear any panel left over from that load.
+		try {
+			c.ui.setWidget(WIDGET_KEY, undefined);
+		} catch {
+			// Never fatal.
+		}
 		void refresh();
 		paint();
 	});
@@ -113,14 +115,14 @@ export default function commandcodeUsageExtension(pi: ExtensionAPI) {
 	// ---- /cc-usage command --------------------------------------------------
 
 	pi.registerCommand("cc-usage", {
-		description: "Refresh the Command Code usage widget (5h / weekly / monthly limits)",
+		description: "Refresh the Command Code usage chip (5h / weekly / monthly limits)",
 		handler: async (_args, c) => {
 			ctx = (c as unknown) as AnyCtx;
 			const ok = await refresh();
 			paint();
 			c.ui.notify(
-				ok
-					? "Command Code usage refreshed"
+				ok && snap
+					? renderDetailText(snap, new Date())
 					: "Command Code usage unavailable — check API key / network",
 				ok ? "info" : "warning",
 			);

@@ -189,6 +189,12 @@ export function createPlugin() {
   const STATUS_TTL_MS = 5_000;
   const STATUS_TIMEOUT_MS = 60_000;
   const APPLY_TIMEOUT_MS = 180_000;
+  /**
+   * Daily sync interval. 24 hours in milliseconds. The engine writes the
+   * state file, never touches models.json, so this is read-only for the
+   * user's config. When new chat models appear, a notification fires.
+   */
+  const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
   /** In-memory state id whitelist. Populated from STATE_FILE and refreshed after
    *  every successful engine call that returns a fresh models[]. */
@@ -502,6 +508,58 @@ export function createPlugin() {
       status(true).catch((err) => {
         host.log?.("warn", `nvidia-models initial status failed: ${err?.message ?? err}`);
       });
+
+      // ---- Scheduled catalog sync (daily) ----
+      // WHY daily and not at startup or on a shorter timer: the NVIDIA catalog
+      // changes slowly, and hourly polling would hammer the API for no gain.
+      // The sync verb NEVER writes models.json; it only refreshes the state
+      // file. Only when genuinely new CHAT models appear does a notification
+      // go out, so embedding/guard/translation noise stays silent forever.
+      cleanup.push(
+        host.schedule(SYNC_INTERVAL_MS, async () => {
+          try {
+            const result = await runEngine(["--sync"], [], APPLY_TIMEOUT_MS, host);
+            localStatusCache.value = null;
+            if (!result.ok || !result.added_since_last_sync?.length) return;
+
+            // Read the freshly-synced state file to find out which added ids
+            // are actually chat models (tier A/B/C), not category X noise.
+            const STATE_FILE = stateFile();
+            if (!existsSync(STATE_FILE)) return;
+            let catalog;
+            try {
+              catalog = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+            } catch {
+              return;
+            }
+            const byTier = new Map(
+              (catalog.models ?? []).map((m) => [m.id, m.tier ?? "X"]),
+            );
+            const addedChat = result.added_since_last_sync.filter(
+              (id) => byTier.get(id) && byTier.get(id) !== "X",
+            );
+            if (!addedChat.length) return;
+
+            host.notify(
+              "info",
+              `NVIDIA: ${addedChat.length} new free model${addedChat.length === 1 ? "" : "s"} available: ${addedChat.join(", ")}`,
+            );
+            host.log?.(
+              "info",
+              `scheduled sync found ${addedChat.length} new chat model(s): ${addedChat.join(", ")}`,
+            );
+          } catch (err) {
+            host.log?.(
+              "warn",
+              `nvidia-models scheduled sync failed: ${err?.message ?? err}`);
+          }
+        }, {
+          id: "nvidia-models-daily-sync",
+          label: "NVIDIA free-model catalog sync",
+          persistent: true,
+          catchUp: "once",
+        }),
+      );
       cleanup.push(() => {
         localStatusCache.value = null;
       });

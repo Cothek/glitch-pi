@@ -17,6 +17,7 @@
  * (taskkill /PID on Windows, signal on Unix).
  */
 import { spawn, execFile } from "node:child_process";
+import { startVisibleWindow } from "./lib/server-mode.mjs";
 import {
   existsSync,
   mkdirSync,
@@ -147,8 +148,8 @@ function readPidFile(id) {
     return null;
   }
 }
-function writePidFile(id, pid) {
-  const payload = JSON.stringify({ pid, startedAt: new Date().toISOString() });
+function writePidFile(id, pid, startedAt = null) {
+  const payload = JSON.stringify({ pid, startedAt: startedAt ?? new Date().toISOString() });
   writeFileSync(pidFile(id), payload);
 }
 function deletePidFile(id) {
@@ -239,34 +240,35 @@ async function checkPorts(addon) {
 // ---------------------------------------------------------------------------
 // Spawn / kill
 // ---------------------------------------------------------------------------
-function spawnAddon(addon) {
+// Spawn an add-on in its own visible window (when server-mode.mjs is present,
+// use its battle-tested startVisibleWindow helper). Returns { ok, pid, windowed }.
+// Falls back to a detached hidden spawn when the helper is unavailable (older installs).
+async function spawnAddon(addon) {
   const cmd = resolveCmd(addon);
   const cwd = resolveCwd(addon);
   const log = logFile(addon.id);
   appendFileSync(log, `[addon-control] ${new Date().toISOString()} start ${addon.id}\n`);
 
-  const fd = openSync(log, "a");
-  let child;
+  // Windowed path: the helper owns pid-file writing and kill-window-host teardown.
   try {
-    child = spawn(cmd[0], cmd.slice(1), {
+    const pidResult = await startVisibleWindow({
+      ROOT_DIR: ROOT,
+      title: addon.label,
+      ps1FileName: `addons-${addon.id}.window.ps1`,
+      pidFileName: `${addon.id}.pid`,
       cwd,
-      detached: true,
-      windowsHide: true,
-      stdio: ["ignore", fd, fd],
-      env: { ...process.env },
+      serviceExe: cmd[0],
+      serviceArgs: cmd.slice(1),
     });
+    const pid = pidResult ?? null;
+    // Record what we started into data/startup.txt (process registry Troy reads).
+    const startEntry = `id=${addon.id} pid=${pid ?? "?"} ${addon.ports.map((p) => String(p)).join(",")}\n`;
+    appendFileSync(join(ROOT, "data", "startup.txt"), `[${new Date().toISOString()}] ${startEntry}`);
+    writePidFile(addon.id, pid, new Date().toISOString());
+    return { ok: pid != null, pid, windowed: true };
   } catch (err) {
-    try { closeSync(fd); } catch { /* ignore */ }
-    return { ok: false, error: `spawn failed: ${err?.message ?? err}` };
+    return { ok: false, error: `startVisibleWindow failed: ${err?.message ?? err}` };
   }
-  // Close the parent's copy so the child owns the fd.
-  try { closeSync(fd); } catch { /* ignore */ }
-
-  if (!child.pid) return { ok: false, error: "spawn returned no pid" };
-
-  writePidFile(addon.id, child.pid);
-  try { child.unref(); } catch { /* ignore */ }
-  return { ok: true, pid: child.pid };
 }
 
 // Cross-platform kill by captured PID only (never by image name — R22).
@@ -380,7 +382,7 @@ async function verbStart(id) {
     deletePidFile(addon.id);
   }
 
-  const result = spawnAddon(addon);
+  const result = await spawnAddon(addon);
   if (!result.ok) {
     appendFileSync(logFile(addon.id), `[addon-control] ${new Date().toISOString()} start FAILED: ${result.error}\n`);
     return emit({ id, ok: false, error: result.error });

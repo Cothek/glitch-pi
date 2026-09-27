@@ -62,12 +62,15 @@ const COSTS_PATH = ".pi/agent-models/costs.json";
 /** Report cache: cheap to rebuild, but /state is polled by the tab. */
 const STATE_TTL_MS = 5000;
 
+const EXCLUDED_AGENTS = new Set(["glitch-omni", "memory-paid"]);
+
 async function listAgentFiles(host) {
 	try {
 		const entries = await host.fs.list(AGENTS_DIR);
 		return entries
 			.filter((e) => e.type === "file" && e.name.endsWith(".md"))
 			.map((e) => e.name)
+			.filter((name) => !EXCLUDED_AGENTS.has(name.replace(/\.md$/, "")))
 			.sort((a, b) => a.localeCompare(b));
 	} catch {
 		return [];

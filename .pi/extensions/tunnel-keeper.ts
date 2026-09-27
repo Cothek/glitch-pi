@@ -19,20 +19,55 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const KEEPER_INTERVAL_MS = 5 * 60 * 1000;
-
+// Cross-session lease: only one session spawns the tunnel script at a time.
+// If a lease exists and is fresh (younger than the window), this session
+// skips silently — the other session is CURRENTLY doing the work.
+const LEASE_FRESH_MS = 4 * 60 * 1000;
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(extensionDir, "..", "..");
 const TUNNEL_SCRIPT = join(REPO_ROOT, "scripts", "lib", "tunnel.mjs");
+const LEASE_FILE = join(REPO_ROOT, "data", ".tunnel-keeper.lease");
+
+/** Read the lease. returns true if it's fresh. */
+function isLeaseFresh(): boolean {
+  try {
+    if (!existsSync(LEASE_FILE)) return false;
+    const raw = readFileSync(LEASE_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.t !== "string") return false;
+    const delta = Date.now() - new Date(parsed.t).getTime();
+    return delta >= 0 && delta < LEASE_FRESH_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** Claim the lease. Atomically for this process only. */
+function tryClaimLease(): boolean {
+  try {
+    mkdirSync(dirname(LEASE_FILE), { recursive: true });
+    writeFileSync(
+      LEASE_FILE,
+      JSON.stringify({ t: new Date().toISOString(), pid: process.pid }),
+      "utf-8",
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function ensureTunnelProcess(reason: string): void {
   try {
     if (!existsSync(TUNNEL_SCRIPT)) return;
+    if (isLeaseFresh()) return;
+    if (!tryClaimLease()) return;
     const child = spawn(process.execPath, [TUNNEL_SCRIPT, "--reason", reason], {
       detached: true,
       stdio: "ignore",

@@ -88,37 +88,37 @@ const STATE_LABEL = {
  * reloads. Same fix here.
  */
 const STYLE_CSS = `
-.ad-wrap{font:13px/1.5 var(--sans, system-ui, sans-serif);color:var(--text);padding:12px;display:flex;flex-direction:column;gap:10px;height:100%;box-sizing:border-box;min-height:0}
-.ad-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
-.ad-title{font-weight:600}
-.ad-sub{color:var(--text-faint);font-size:11px}
-.ad-spacer{flex:1}
-.ad-btn{height:26px;padding:0 9px;font-size:12px;border-radius:7px;border:1px solid var(--border);background:var(--bg-elev2);color:var(--text-dim);cursor:pointer;font-family:inherit;line-height:1.4}
-.ad-btn:hover{border-color:var(--accent);color:var(--text)}
-.ad-btn:disabled{opacity:.5;cursor:default}
-.ad-btn.ad-primary{border-color:var(--accent);color:var(--text);background:var(--bg-elev2)}
-.ad-btn.ad-danger{border-color:var(--red);color:var(--red)}
-.ad-btn.ad-danger:hover{background:var(--bg-elev)}
-.ad-list{display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;min-height:0}
-.ad-row{border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2);padding:10px 12px;display:flex;flex-direction:column;gap:6px;flex:none}
-.ad-row-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.ad-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ad-state{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:var(--text-dim);border:1px solid var(--border);border-radius:5px;padding:1px 6px;flex:none}
-.ad-state-dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
-.ad-ports{font-family:var(--mono, monospace);font-size:11px;color:var(--text-faint);display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
-.ad-port{border:1px solid var(--border-soft);border-radius:4px;padding:0 5px}
-.ad-port.ad-port-up{color:var(--green);border-color:var(--green)}
-.ad-pid{font-family:var(--mono, monospace);font-size:10.5px;color:var(--text-faint)}
-.ad-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.ad-auto{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim);cursor:pointer;user-select:none;-webkit-user-select:none}
-.ad-auto input{margin:0;accent-color:var(--accent)}
-.ad-link{font-size:11px;color:var(--accent);text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:2px 8px;display:inline-flex;align-items:center;gap:4px}
-.ad-link:hover{background:var(--accent-soft);border-color:var(--accent)}
-.ad-note{font-size:11px;color:var(--text-faint)}
-.ad-note.ad-warn{color:var(--amber)}
-.ad-empty{padding:14px;border:1px dashed var(--border);border-radius:8px;color:var(--text-dim);font-size:12px}
-.ad-error{border:1px solid var(--red);background:transparent;border-radius:8px;padding:10px;font-size:12px;color:var(--text);display:flex;flex-direction:column;gap:6px}
-.ad-diag{border-top:1px solid var(--border-soft);padding-top:6px;color:var(--text-faint);font-family:var(--mono, monospace);font-size:10px;word-break:break-all}
+.aox-wrap{font:13px/1.5 var(--sans, system-ui, sans-serif);color:var(--text);padding:12px;display:flex;flex-direction:column;gap:10px;height:100%;box-sizing:border-box;min-height:0}
+.aox-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.aox-title{font-weight:600}
+.aox-sub{color:var(--text-faint);font-size:11px}
+.aox-spacer{flex:1}
+.aox-btn{height:26px;padding:0 9px;font-size:12px;border-radius:7px;border:1px solid var(--border);background:var(--bg-elev2);color:var(--text-dim);cursor:pointer;font-family:inherit;line-height:1.4}
+.aox-btn:hover{border-color:var(--accent);color:var(--text)}
+.aox-btn:disabled{opacity:.5;cursor:default}
+.aox-btn.aox-primary{border-color:var(--accent);color:var(--text);background:var(--bg-elev2)}
+.aox-btn.aox-danger{border-color:var(--red);color:var(--red)}
+.aox-btn.aox-danger:hover{background:var(--bg-elev)}
+.aox-list{display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;min-height:0}
+.aox-row{border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2);padding:10px 12px;display:flex;flex-direction:column;gap:6px;flex:none}
+.aox-row-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.aox-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aox-state{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:var(--text-dim);border:1px solid var(--border);border-radius:5px;padding:1px 6px;flex:none}
+.aox-state-dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.aox-ports{font-family:var(--mono, monospace);font-size:11px;color:var(--text-faint);display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.aox-port{border:1px solid var(--border-soft);border-radius:4px;padding:0 5px}
+.aox-port.aox-port-up{color:var(--green);border-color:var(--green)}
+.aox-pid{font-family:var(--mono, monospace);font-size:10.5px;color:var(--text-faint)}
+.aox-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.aox-auto{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim);cursor:pointer;user-select:none;-webkit-user-select:none}
+.aox-auto input{margin:0;accent-color:var(--accent)}
+.aox-link{font-size:11px;color:var(--accent);text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:2px 8px;display:inline-flex;align-items:center;gap:4px}
+.aox-link:hover{background:var(--accent-soft);border-color:var(--accent)}
+.aox-note{font-size:11px;color:var(--text-faint)}
+.aox-note.aox-warn{color:var(--amber)}
+.aox-empty{padding:14px;border:1px dashed var(--border);border-radius:8px;color:var(--text-dim);font-size:12px}
+.aox-error{border:1px solid var(--red);background:transparent;border-radius:8px;padding:10px;font-size:12px;color:var(--text);display:flex;flex-direction:column;gap:6px}
+.aox-diag{border-top:1px solid var(--border-soft);padding-top:6px;color:var(--text-faint);font-family:var(--mono, monospace);font-size:10px;word-break:break-all}
 `;
 
 function injectStyles() {
@@ -217,22 +217,22 @@ if (typeof window !== "undefined") {
 
 function stateNode(row) {
   const state = STATE_LABEL[row.state] ?? "down";
-  const wrap = el("span", "ad-state", state);
+  const wrap = el("span", "aox-state", state);
   wrap.style.color = STATE_COLOR[row.state] ?? STATE_COLOR.down;
-  const dot = el("span", "ad-state-dot");
+  const dot = el("span", "aox-state-dot");
   wrap.appendChild(dot);
   return wrap;
 }
 
 function portsNode(row) {
-  const wrap = el("div", "ad-ports");
+  const wrap = el("div", "aox-ports");
   const ports = Array.isArray(row.ports) ? row.ports : [];
   if (!ports.length) {
-    wrap.appendChild(el("span", "ad-note", "no ports"));
+    wrap.appendChild(el("span", "aox-note", "no ports"));
     return wrap;
   }
   for (const p of ports) {
-    const port = el("span", `ad-port${p.listening ? " ad-port-up" : ""}`, String(p.port));
+    const port = el("span", `aox-port${p.listening ? " aox-port-up" : ""}`, String(p.port));
     port.title = p.listening ? `${p.port} listening` : `${p.port} not listening`;
     wrap.appendChild(port);
   }
@@ -240,14 +240,14 @@ function portsNode(row) {
 }
 
 function rowNode(row, state, actions) {
-  const r = el("div", "ad-row");
-  r.setAttribute("data-ad-id", row.id);
+  const r = el("div", "aox-row");
+  r.setAttribute("data-aox-id", row.id);
 
-  const top = el("div", "ad-row-top");
-  top.appendChild(el("div", "ad-name", row.label || row.id));
+  const top = el("div", "aox-row-top");
+  top.appendChild(el("div", "aox-name", row.label || row.id));
   top.appendChild(stateNode(row));
   if (row.pid != null) {
-    const pid = el("div", "ad-pid", `pid ${row.pid}`);
+    const pid = el("div", "aox-pid", `pid ${row.pid}`);
     pid.title = row.logPath || "";
     top.appendChild(pid);
   }
@@ -255,11 +255,11 @@ function rowNode(row, state, actions) {
 
   r.appendChild(portsNode(row));
 
-  const actionRow = el("div", "ad-actions");
+  const actionRow = el("div", "aox-actions");
   // Start/Stop — exactly one, whichever applies to the current state.
   // "starting" gets a "Stop" button too so Troy can cancel a stuck boot.
   if (row.state === "up") {
-    const stop = el("button", "ad-btn ad-danger", "Stop");
+    const stop = el("button", "aox-btn aox-danger", "Stop");
     stop.type = "button";
     stop.title = `Stop ${row.label}`;
     stop.disabled = actions.busy === row.id;
@@ -271,7 +271,7 @@ function rowNode(row, state, actions) {
     });
     actionRow.appendChild(stop);
   } else {
-    const start = el("button", "ad-btn ad-primary", row.state === "starting" ? "Starting..." : "Start");
+    const start = el("button", "aox-btn aox-primary", row.state === "starting" ? "Starting..." : "Start");
     start.type = "button";
     start.title = `Start ${row.label}`;
     start.disabled = actions.busy === row.id || row.state === "starting";
@@ -285,7 +285,7 @@ function rowNode(row, state, actions) {
   }
 
   // Auto-start checkbox.
-  const autoLabel = el("label", "ad-auto");
+  const autoLabel = el("label", "aox-auto");
   const autoBox = document.createElement("input");
   autoBox.type = "checkbox";
   autoBox.checked = !!row.autostart;
@@ -306,7 +306,7 @@ function rowNode(row, state, actions) {
   // Web-UI link — only when one is registered for this add-on.
   const link = WEB_UI[row.id];
   if (link) {
-    const a = el("a", "ad-link", link.label);
+    const a = el("a", "aox-link", link.label);
     a.href = link.url;
     a.target = "_blank";
     a.rel = "noopener noreferrer";
@@ -318,7 +318,7 @@ function rowNode(row, state, actions) {
 
   // Per-row note: last action's outcome (success or error).
   if (state.rowNote?.id === row.id) {
-    const note = el("div", state.rowNote.kind === "error" ? "ad-note ad-warn" : "ad-note", state.rowNote.text);
+    const note = el("div", state.rowNote.kind === "error" ? "aox-note aox-warn" : "aox-note", state.rowNote.text);
     r.appendChild(note);
   }
 
@@ -371,13 +371,13 @@ function createInstance(container, ctx) {
     },
   };
 
-  const root = el("div", "ad-wrap");
+  const root = el("div", "aox-wrap");
   container.appendChild(root);
 
-  const head = el("div", "ad-head");
-  const title = el("div", "ad-title", "Add-ons");
-  const sub = el("div", "ad-sub");
-  const refresh = el("button", "ad-btn", "Refresh");
+  const head = el("div", "aox-head");
+  const title = el("div", "aox-title", "Add-ons");
+  const sub = el("div", "aox-sub");
+  const refresh = el("button", "aox-btn", "Refresh");
   refresh.type = "button";
   refresh.title = "Re-poll the lifecycle owner (start/stop a row directly from this panel)";
   refresh.addEventListener("click", () => {
@@ -385,10 +385,10 @@ function createInstance(container, ctx) {
     state.diag.lastAt = new Date().toLocaleTimeString();
     void load(true);
   });
-  head.append(title, sub, el("div", "ad-spacer"), refresh);
+  head.append(title, sub, el("div", "aox-spacer"), refresh);
 
-  const list = el("div", "ad-list");
-  const diagLine = el("div", "ad-diag");
+  const list = el("div", "aox-list");
+  const diagLine = el("div", "aox-diag");
   root.append(head, list, diagLine);
 
   function renderDiag() {
@@ -414,9 +414,9 @@ function createInstance(container, ctx) {
       list.textContent = "";
 
       if (state.error && !state.addons.length) {
-        const box = el("div", "ad-error");
+        const box = el("div", "aox-error");
         box.appendChild(el("div", undefined, `State unavailable: ${state.error}`));
-        const retry = el("button", "ad-btn", "Retry");
+        const retry = el("button", "aox-btn", "Retry");
         retry.type = "button";
         retry.addEventListener("click", () => {
           state.diag.lastAction = "retry";
@@ -444,7 +444,7 @@ function createInstance(container, ctx) {
       sub.textContent = `${addons.length} add-ons | ${counts.up} up | ${counts.starting} starting | ${counts.down} down`;
 
       if (!addons.length) {
-        list.appendChild(el("div", "ad-empty", "No add-ons registered."));
+        list.appendChild(el("div", "aox-empty", "No add-ons registered."));
         renderDiag();
         return;
       }
@@ -453,9 +453,9 @@ function createInstance(container, ctx) {
       if (state.error) {
         // Error after a successful first load: keep showing the cached rows
         // but add a non-blocking banner so Troy knows the next refresh failed.
-        const box = el("div", "ad-error");
+        const box = el("div", "aox-error");
         box.appendChild(el("div", undefined, `Last refresh failed: ${state.error}`));
-        const retry = el("button", "ad-btn", "Retry");
+        const retry = el("button", "aox-btn", "Retry");
         retry.type = "button";
         retry.addEventListener("click", () => {
           state.diag.lastAction = "retry";
@@ -469,7 +469,7 @@ function createInstance(container, ctx) {
     } catch (err) {
       // Never let a render error produce a blank pane.
       list.textContent = "";
-      list.appendChild(el("div", "ad-error", `Render failed: ${errorText(err)}`));
+      list.appendChild(el("div", "aox-error", `Render failed: ${errorText(err)}`));
       renderDiag();
     }
   }
@@ -563,7 +563,7 @@ export default {
       // The host would otherwise replace the pane with an opaque fallback;
       // render the real reason here instead.
       try {
-        const box = el("div", "ad-error", `addons failed to mount: ${errorText(err)}`);
+        const box = el("div", "aox-error", `addons failed to mount: ${errorText(err)}`);
         container.appendChild(box);
       } catch {
         /* nothing left to do */

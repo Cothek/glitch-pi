@@ -99,12 +99,16 @@ function buildCatalog(agentDir) {
 	return { ids, source, configured: configured.size, official: official.size };
 }
 
+const EXCLUDED_AGENTS = new Set(["glitch-omni", "memory-paid"]);
+
 function readAgents(repoRoot) {
 	const dir = join(repoRoot, PROJECT_AGENTS_DIR);
 	if (!existsSync(dir)) return { agents: [], dir };
 	const agents = [];
 	for (const name of readdirSync(dir).sort()) {
 		if (!name.endsWith(".md")) continue;
+		const base = name.replace(/\.md$/, "");
+		if (EXCLUDED_AGENTS.has(base)) continue;
 		try {
 			agents.push(parseAgentFile(readFileSync(join(dir, name), "utf8"), name));
 		} catch {

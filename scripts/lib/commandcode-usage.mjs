@@ -175,6 +175,18 @@ function countdown(msRemaining, now) {
   return `${days}d ${hours % 24}h`;
 }
 
+/** "15d" / "1d" / "Today" / "Expired" / "?" */
+function daysLeft(iso, nowMs) {
+  if (!iso) return "?";
+  const endMs = new Date(iso).getTime();
+  if (Number.isNaN(endMs)) return "?";
+  const diffMs = endMs - nowMs;
+  if (diffMs <= 0) return "Expired";
+  const days = Math.ceil(diffMs / 86_400_000);
+  if (days === 0) return "Today";
+  return `${days}d`;
+}
+
 function ageText(fetchedAt, now) {
   const mins = Math.max(0, Math.floor((now - fetchedAt) / 60_000));
   if (mins < 1) return "just now";
@@ -213,12 +225,11 @@ export function renderWidgetLines(snap, now = new Date()) {
 
   if (snap.planCredits) {
     const used = Math.max(0, snap.planCredits - snap.monthlyRemaining);
-    const endDate = shortDate(snap.periodEnd);
     const line = [
       `mo  ${pct(used, snap.planCredits).padStart(4)}`,
       bar(used, snap.planCredits),
       `${money(used)} / ${money(snap.planCredits)}`,
-      endDate ? `period ends ${endDate}` : "",
+      `${daysLeft(snap.periodEnd, nowMs)}`,
     ]
       .filter(Boolean)
       .join("  ");
@@ -247,9 +258,8 @@ export function renderStatusText(snap, now = new Date()) {
   const weekly = snap.weekly
     ? `wk ${usedPct(snap.weekly.used, snap.weekly.cap)} (${countdown(snap.weekly.resetAt - nowMs, nowMs)})`
     : "wk ?";
-  const monthlyEnd = shortDate(snap.periodEnd);
   const monthly = snap.planCredits
-    ? `mo ${usedPct(Math.max(0, snap.planCredits - snap.monthlyRemaining), snap.planCredits)}${monthlyEnd ? ` (${monthlyEnd})` : ""}`
+    ? `mo ${usedPct(Math.max(0, snap.planCredits - snap.monthlyRemaining), snap.planCredits)} (${daysLeft(snap.periodEnd, nowMs)})`
     : "mo ?";
 
   return `CC ${fiveHour} · ${weekly} · ${monthly}`;
@@ -271,8 +281,7 @@ export function renderDetailText(snap, now = new Date()) {
   if (snap.planCredits) {
     const used = Math.max(0, snap.planCredits - snap.monthlyRemaining);
     const p = Math.min(100, Math.round((used / snap.planCredits) * 100));
-    const endDate = shortDate(snap.periodEnd);
-    parts.push(`mo ${p}% (${money(used)}/${money(snap.planCredits)}${endDate ? `, ends ${endDate}` : ""})`);
+    parts.push(`mo ${p}% (${money(used)}/${money(snap.planCredits)}, ${daysLeft(snap.periodEnd, nowMs)})`);
   } else {
     parts.push(`mo ${money(snap.monthlyRemaining)} credits left`);
   }

@@ -274,7 +274,7 @@ export default definePlugin({
 		cleanup.push(
 			host.registerCommand({
 				name: "agents",
-				description: "Switch the primary agent mode (glitch | glitch-omni | glitch-lightweight)",
+				description: "Switch the primary agent mode (glitch | glitch-free | glitch-omni | glitch-lightweight)",
 				argumentHint: "<mode>",
 				async run(args) {
 					const mode = String(args ?? "").trim();

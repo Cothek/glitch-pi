@@ -1,7 +1,7 @@
 /**
  * agent-switcher.ts — Pi extension: mid-session primary agent switching
  *
- * Switches the primary agent persona (glitch | glitch-omni | glitch-lightweight)
+ * Switches the primary agent persona (glitch | glitch-free | glitch-omni | glitch-lightweight)
  * INSIDE the active session, no restart required. Replaces the restart-only
  * scripts/switch-agent.mjs staging flow as the primary switching path (the
  * script stays as offline fallback).
@@ -37,7 +37,7 @@
  * USAGE
  *   /agent              picker (works in TUI and web UI / RPC)
  *   /agent glitch-omni  direct switch
- *   Ctrl+Shift+A        cycle glitch → glitch-lightweight → glitch-omni → …
+ *   Ctrl+Shift+A        cycle glitch → glitch-free → glitch-lightweight → glitch-omni → …
  *
  * NOTES
  *   - Web UI (RPC) compatible: only ctx.ui.select/notify/setStatus dialogs are
@@ -281,7 +281,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 	// ---- /agent command -----------------------------------------------------
 
 	pi.registerCommand("agent", {
-		description: "Switch primary agent mode mid-session (glitch | glitch-omni | glitch-lightweight)",
+		description: "Switch primary agent mode mid-session (glitch | glitch-free | glitch-omni | glitch-lightweight)",
 		getArgumentCompletions: (prefix: string) => {
 			const items = profiles.map((p) => ({
 				value: p.id,
@@ -319,7 +319,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 	// ---- Ctrl+Shift+A cycle ---------------------------------------------------
 
 	pi.registerShortcut(Key.ctrlShift("a"), {
-		description: "Cycle agent mode (glitch → glitch-lightweight → glitch-omni)",
+		description: "Cycle agent mode (glitch → glitch-free → glitch-lightweight → glitch-omni)",
 		handler: async (ctx) => {
 			const order = profiles;
 			if (order.length === 0) {
@@ -393,7 +393,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 				"Switch the primary agent mode for this session (mid-session, no restart). " +
 				"Use when the user asks to change agent, persona, or mode. " +
 				"The new mode's full profile takes over from the next turn.",
-			promptSnippet: "Switch the primary agent mode (glitch / glitch-omni / glitch-lightweight)",
+			promptSnippet: "Switch the primary agent mode (glitch / glitch-free / glitch-omni / glitch-lightweight)",
 			parameters: Type.Object({
 				mode: StringEnum(profiles.map((p) => p.id), {
 					description: "Target agent mode id",

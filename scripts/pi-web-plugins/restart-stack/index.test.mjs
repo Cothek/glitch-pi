@@ -94,3 +94,57 @@ test("originOk: refuses a matching hostname on a different port", () => {
 test("originOk: refuses the literal string 'null'", () => {
   assert.equal(originOk({ host: "127.0.0.1:8787", origin: "null" }), false);
 });
+
+// --- allowlist branch (PI_WEB_ALLOW_ORIGINS) ---------------------------------
+
+test("originOk: allowlist exact match returns true even when Host differs", () => {
+  assert.equal(
+    originOk({
+      host: "localhost:8787",
+      origin: "https://glitch.cothekdesigns.com",
+      allowlist: ["https://glitch.cothekdesigns.com"],
+    }),
+    true,
+  );
+});
+
+test("originOk: allowlist miss returns false even with a populated list", () => {
+  assert.equal(
+    originOk({
+      host: "localhost:8787",
+      origin: "https://glitch.cothekdesigns.com",
+      allowlist: [],
+    }),
+    false,
+  );
+});
+
+test("originOk: allowlist match is case-insensitive", () => {
+  assert.equal(
+    originOk({
+      host: "localhost:8787",
+      origin: "HTTPS://GLITCH.COTHEKDESIGNS.COM",
+      allowlist: ["https://glitch.cothekdesigns.com"],
+    }),
+    true,
+  );
+});
+
+test("originOk: literal 'null' is refused even with a populated allowlist", () => {
+  assert.equal(
+    originOk({
+      host: "localhost:8787",
+      origin: "null",
+      allowlist: ["https://glitch.cothekdesigns.com", "https://pi.cothekdesigns.com"],
+    }),
+    false,
+  );
+});
+
+test("originOk: missing origin returns true regardless of allowlist", () => {
+  const list = ["https://glitch.cothekdesigns.com"];
+  assert.equal(originOk({ host: "localhost:8787", origin: undefined, allowlist: list }), true);
+  assert.equal(originOk({ host: "localhost:8787", origin: "", allowlist: list }), true);
+  assert.equal(originOk({ host: "localhost:8787", origin: null, allowlist: list }), true);
+  assert.equal(originOk({ host: "localhost:8787", origin: undefined, allowlist: [] }), true);
+});

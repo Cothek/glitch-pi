@@ -32,6 +32,13 @@ const REQUEST = join(ROOT, "scripts", "restart-request.mjs");
 const WEB_PORT = Number(process.env.GLITCH_PI_WEBUI_PORT ?? 8787);
 const AUTH_PORT = Number(process.env.GLITCH_PI_AUTH_PORT ?? 4103);
 
+// Mirrors the host's WS allowlist (pi-web-ui originAllowed) because the
+// auth-proxy rewrites the forwarded Host header to the local upstream.
+const ORIGIN_ALLOWLIST = (process.env.PI_WEB_ALLOW_ORIGINS ?? "")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
 // 4 minutes covers the kill + relaunch + 60s health window + a buffer.
 // A second POST inside this window answers 409 with retryAfterMs.
 const PENDING_MS = 240_000;
@@ -52,13 +59,17 @@ const PENDING_MS = 240_000;
  *
  * Pure: no FS, no env, no network. Exported so the test can import it.
  *
- * @param {{host: string|undefined|null, origin: string|undefined|null}} args
+ * @param {{host: string|undefined|null, origin: string|undefined|null, allowlist?: readonly string[]}} args
  * @returns {boolean}
  */
-export function originOk({ host, origin } = {}) {
+export function originOk({ host, origin, allowlist } = {}) {
   if (origin == null || origin === "") return true;
   const o = String(origin).trim().toLowerCase();
   if (o === "null") return false;
+  // Allowlist exact match (already lowercased at module load) covers tunnel
+  // origins whose Host header was rewritten by the auth-proxy to localhost.
+  const list = allowlist ?? ORIGIN_ALLOWLIST;
+  if (Array.isArray(list) && list.includes(o)) return true;
   let oHost = "";
   let oPort = "";
   try {

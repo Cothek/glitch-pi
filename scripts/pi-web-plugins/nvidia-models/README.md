@@ -16,8 +16,8 @@ atomic-write, read-back verification, and the model-count check.
 2. **Composer button** (slot `composer.actions`, order 136: after model
    chip 120, agent-models 135). Registered as `kind: "view"`, so the stock
    client navigates to `view: "plugin:nvidia-models"` on click — no custom
-   client code on the click path. Restyled to the native chip look (30x30
-   desktop and narrow, matching the host's 30px composer buttons) by the
+   client code on the click path. Restyled to the native chip look (25x25
+   desktop and narrow, matching the native composer dropdowns) by the
    client entry so it sits next to the
    model-selector and `agent-models` chips.
 3. **`/nvidia-models`** in the chat box (server-side slash command, no

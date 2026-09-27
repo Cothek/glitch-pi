@@ -18,7 +18,7 @@ Live example when this was built: 10 agents, 2 pins OK, **6 dead pins**, 2 inher
 
 ## Surfaces
 
-1. **Chat-bar button** — a small 🧠 chip in the composer, right of the thinking dropdown (order 135: after model 120 / thinking 130, before the DSH chips). Click opens the page. Registered as `kind:"view"`, so the stock client's click handler does the navigation — no custom client code on the click path. Restyled by the client entry to the native chip look (30x30, radius 8) so it matches the host's 30px composer buttons in both modes.
+1. **Chat-bar button** — a small 🧠 chip in the composer, right of the thinking dropdown (order 135: after model 120 / thinking 130, before the DSH chips). Click opens the page. Registered as `kind:"view"`, so the stock client's click handler does the navigation — no custom client code on the click path. Restyled by the client entry to the native chip look (25x25, radius 8) so it matches the native composer dropdowns.
 2. **Right-panel "Agent Models" tab** — one row per agent: name + status badge, `pin -> effective`, then the note.
 3. **`/agent-models`** in the chat box (server-side command, no browser needed).
 4. **`GET /plugins-api/agent-models/state`** — the JSON the tab renders.

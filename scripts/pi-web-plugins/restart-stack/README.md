@@ -6,11 +6,15 @@ the web UI, or trigger it from an agent shell call.
 ## Surfaces
 
 - Right-panel "Restart Stack" tab: status (PID + listening state per port) and
-  one button. The button is always a plain restart, never a resume.
+  two buttons. "Restart stack" is always a plain restart; "Restart + updates"
+  forwards `apply_updates:true` so the restarter runs `check-updates.mjs
+  --apply --yes` before the kill. Neither button ever resumes.
 - `GET  /plugins-api/restart-stack/state`     netstat snapshot of both ports.
-- `POST /plugins-api/restart-stack/restart`   fire a plain restart. The body
-  is `{}` (a small `delay_seconds` is the only accepted field).
-- Slash command `/restart-stack [resume] [note]` for the agent terminal.
+- `POST /plugins-api/restart-stack/restart`   fire a plain or updates restart.
+  The body accepts ONLY `delay_seconds` and `apply_updates`; resume, session,
+  and note are still refused with HTTP 400.
+- Slash command `/restart-stack [resume|updates] [note]` for the agent terminal.
+  `/restart-stack updates` is the agent-side equivalent of the +updates button.
 
 ## HTTP route refuses resume, session, and note
 

@@ -11,6 +11,8 @@
  * Two call sites:
  *   - pi-web-ui plugin (POST /restart): plain restart, no resume. The plugin
  *     already knows the session file if needed, but the UI never passes one.
+ *     The plugin may pass --apply-updates to run scripts/check-updates.mjs
+ *     before the kill.
  *   - agent shell: `node scripts/restart-request.mjs --resume --note "..."`.
  *     With --resume, --session <jsonl> is required (or PI_SESSION_FILE in env).
  *     mtime is unreliable, so we never guess: two session files in one project
@@ -92,7 +94,7 @@ export function sanitizeNote(text) {
  * Pure: no FS, no env, no spawning. The test imports this with zero side
  * effects.
  */
-export function buildInnerCommand({ root, delaySec, continuePath, continueId, continueText }) {
+export function buildInnerCommand({ root, delaySec, continuePath, continueId, continueText, applyUpdates }) {
   const r = String(root ?? "");
   const d = Math.max(0, Math.floor(Number(delaySec) || 0));
   const ps = join(r, "scripts", "restart-pi-stack.ps1");
@@ -106,6 +108,13 @@ export function buildInnerCommand({ root, delaySec, continuePath, continueId, co
     } else if (continueId) {
       cmd += ` -ContinueId "${continueId}" -ContinueText "${continueText}"`;
     }
+  }
+  // -ApplyUpdates: the engine runs scripts/check-updates.mjs --apply --yes
+  // BEFORE the kill and continues the restart even on a checker failure.
+  // We only emit the switch when applyUpdates is truthy, so the default
+  // plain-restart path is byte-identical to its prior output.
+  if (applyUpdates) {
+    cmd += ` -ApplyUpdates`;
   }
   return cmd;
 }
@@ -135,6 +144,7 @@ export function parseArgs(argv) {
     delay: DEFAULT_DELAY,
     session: null,
     sessionId: null,
+    applyUpdates: false,
     json: false,
     dryRun: false,
     help: false,
@@ -174,6 +184,8 @@ export function parseArgs(argv) {
         return out;
       }
       out.sessionId = v;
+    } else if (a === "--apply-updates") {
+      out.applyUpdates = true;
     } else if (a === "--json") {
       out.json = true;
     } else if (a === "--dry-run") {
@@ -198,6 +210,7 @@ function printHelp() {
     "  --delay <sec>       seconds before the kill (default 15, max 120)",
     "  --session <path>    session jsonl path (overrides PI_SESSION_FILE)",
     "  --session-id <id>   live conversation id (rarely stable)",
+    "  --apply-updates     run scripts/check-updates.mjs --apply --yes before the kill",
     "  --json              print one JSON object instead of a short line",
     "  --dry-run           print the inner command, do not spawn",
     "  --help, -h          show this help",
@@ -280,6 +293,7 @@ function main() {
     continuePath: sessionFile || "",
     continueId: sessionId || "",
     continueText: note,
+    applyUpdates: parsed.applyUpdates,
   });
 
   const pidFile = join(LOGS, `${NAME}.pid`);
@@ -294,6 +308,7 @@ function main() {
         delaySeconds: delay,
         sessionFile: sessionFile || null,
         sessionId: sessionId || null,
+        applyUpdates: parsed.applyUpdates === true,
         innerCommand: inner,
         pid: null,
         outLog,
@@ -353,6 +368,7 @@ function main() {
         delaySeconds: delay,
         sessionFile: sessionFile || null,
         sessionId: sessionId || null,
+        applyUpdates: parsed.applyUpdates === true,
         innerCommand: inner,
         pid,
         outLog,
@@ -362,7 +378,7 @@ function main() {
     );
   } else {
     process.stdout.write(
-      `restart queued${parsed.resume ? " (resume)" : ""} delay=${delay}s pid=${pid ?? "?"} log=${outLog}\n`,
+      `restart queued${parsed.resume ? " (resume)" : ""}${parsed.applyUpdates ? " (+updates)" : ""} delay=${delay}s pid=${pid ?? "?"} log=${outLog}\n`,
     );
   }
   process.exit(0);

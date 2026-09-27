@@ -173,3 +173,31 @@ test("isSafeSessionValue: refuses a value containing a newline", () => {
   assert.equal(isSafeSessionValue("C:\\x\ncalc"), false);
   assert.equal(isSafeSessionValue("C:\\x\rcalc"), false);
 });
+
+test("parseArgs: --apply-updates defaults to false and is a bare switch", () => {
+  const out = parseArgs([]);
+  assert.equal(out.applyUpdates, false);
+  assert.equal(out.error, null);
+});
+
+test("parseArgs: --apply-updates sets the flag to true", () => {
+  const out = parseArgs(["--apply-updates"]);
+  assert.equal(out.applyUpdates, true);
+  assert.equal(out.error, null);
+});
+
+test("buildInnerCommand: appends -ApplyUpdates only when applyUpdates is true", () => {
+  const base = {
+    root: "E:\\Glitch AI\\glitch-pi",
+    delaySec: 15,
+    continuePath: "",
+    continueText: "",
+  };
+  const plain = buildInnerCommand({ ...base, applyUpdates: false });
+  assert.doesNotMatch(plain, /-ApplyUpdates/);
+  const withUpdates = buildInnerCommand({ ...base, applyUpdates: true });
+  assert.match(withUpdates, / -ApplyUpdates/);
+  // Both branches keep the same -DelaySec <n> prefix.
+  assert.match(plain, /-DelaySec 15/);
+  assert.match(withUpdates, /-DelaySec 15/);
+});

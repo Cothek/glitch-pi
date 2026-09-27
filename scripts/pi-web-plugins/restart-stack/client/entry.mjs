@@ -2,11 +2,13 @@
  * restart-stack - pi-web-ui plugin (client entry) - v0.1.0
  *
  * Right-panel "Restart Stack" tab. Renders the current state of pi-web-ui
- * (:8787) and auth-proxy (:4103) plus one button that always issues a PLAIN
- * restart. The UI never passes a resume field or a continuation note: a user
- * has no good way to compose one, and a stray value here is the difference
- * between "reboot the page" and "reboot and inject a prompt into a different
- * conversation". Agents use the CLI or the slash command for resume.
+ * (:8787) and auth-proxy (:4103) plus two buttons: "Restart stack" (plain)
+ * and "Restart + updates" (sets apply_updates:true on the POST body). The
+ * UI never passes a resume field or a continuation note: a user has no
+ * good way to compose one, and a stray value here is the difference
+ * between "reboot the page" and "reboot and inject a prompt into a
+ * different conversation". Agents use the CLI or the slash command for
+ * resume.
  *
  * PATTERN SOURCES (read both before changing this file):
  *   - .pi/web-plugins/agent-switcher/client/entry.mjs - bridge + once-only
@@ -23,7 +25,11 @@
  *
  * ACTIONS go through the plugin's HTTP routes:
  *   GET    /plugins-api/restart-stack/state    -> { ok, up, webPid, authPid, ... }
- *   POST   /plugins-api/restart-stack/restart  -> {} (always plain restart)
+ *   POST   /plugins-api/restart-stack/restart  -> {delay_seconds?, apply_updates?}
+ *                                              (apply_updates is the ONLY
+ *                                              optional field besides delay;
+ *                                              resume / session / note are
+ *                                              refused at the boundary.)
  *
  * THEME TOKENS reused from the host stylesheet (same set addons uses):
  * --border, --border-soft, --text, --text-dim, --text-faint, --bg, --bg-elev,
@@ -76,12 +82,19 @@ const STYLE_CSS = `
 .rs-btn:disabled{opacity:.55;cursor:default}
 .rs-btn.rs-primary{border-color:var(--accent);color:var(--text);background:var(--bg-elev2)}
 .rs-btn.rs-primary:hover{background:var(--accent-soft)}
+.rs-btn.rs-secondary{border-color:var(--border);color:var(--text);background:var(--bg-elev2)}
+.rs-btn.rs-secondary:hover{border-color:var(--accent);color:var(--text);background:var(--accent-soft)}
 .rs-banner{border:1px solid var(--amber);background:transparent;border-radius:8px;padding:10px;font-size:12px;color:var(--text);display:flex;flex-direction:column;gap:6px}
 .rs-banner.rs-error{border-color:var(--red)}
 .rs-error{border:1px solid var(--red);background:transparent;border-radius:8px;padding:10px;font-size:12px;color:var(--text)}
 .rs-last{border:1px solid var(--border-soft);border-radius:8px;padding:8px 10px;font-size:11.5px;color:var(--text-faint);display:flex;flex-direction:column;gap:4px}
 .rs-banner:empty,.rs-last:empty{display:none}
 .rs-diag{border-top:1px solid var(--border-soft);padding-top:6px;color:var(--text-faint);font-family:var(--mono, monospace);font-size:10px;word-break:break-all}
+.rs-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);background:color-mix(in srgb, var(--bg) 60%, transparent);display:flex;align-items:center;justify-content:center;z-index:9999}
+.rs-modal{min-width:280px;max-width:420px;background:var(--bg-elev2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px;font:13px/1.5 var(--sans, system-ui, sans-serif);box-shadow:0 8px 28px rgba(0,0,0,.35)}
+.rs-modal-title{font-weight:600;color:var(--text)}
+.rs-modal-body{color:var(--text-dim);font-size:12.5px}
+.rs-modal-actions{display:flex;justify-content:flex-end;gap:8px}
 `;
 
 function injectStyles() {
@@ -108,6 +121,77 @@ function errorText(err) {
 }
 
 /**
+ * In-page confirm dialog. Replaces window.confirm() so a Restart Stack
+ * button does not block the renderer. Promise resolves true only when the
+ * primary button is clicked; Escape, backdrop click, and Cancel all
+ * resolve false. Returns false (and warns) if the DOM or style steps fail
+ * so a broken dialog can never silently trigger a restart.
+ *
+ * Generalized from confirmRestart() so the same helper drives both the
+ * plain and the +updates buttons. The cancel-primary focus discipline,
+ * Escape handler, and backdrop cancel rules are unchanged.
+ *
+ * @param {{title:string, body:string, confirmLabel?: string, primaryClass?: string}} cfg
+ * @returns {Promise<boolean>}
+ */
+function confirmDialog({ title, body, confirmLabel = "Confirm", primaryClass = "rs-primary" } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const close = (value) => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener("keydown", onKey, true);
+      if (backdrop && backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+      resolve(value);
+    };
+    const onKey = (ev) => {
+      if (ev.key === "Escape") {
+        ev.stopPropagation();
+        close(false);
+      }
+    };
+    let backdrop = null;
+    try {
+      backdrop = el("div", "rs-modal-backdrop");
+      const panel = el("div", "rs-modal");
+      panel.setAttribute("role", "dialog");
+      panel.setAttribute("aria-modal", "true");
+      panel.setAttribute("aria-labelledby", "rs-modal-title");
+      const titleNode = el("div", "rs-modal-title", String(title ?? ""));
+      titleNode.id = "rs-modal-title";
+      panel.appendChild(titleNode);
+      panel.appendChild(el("div", "rs-modal-body", String(body ?? "")));
+      const row = el("div", "rs-modal-actions");
+      const cancel = el("button", "rs-btn", "Cancel");
+      cancel.type = "button";
+      const confirm = el("button", `rs-btn ${primaryClass}`, String(confirmLabel ?? "Confirm"));
+      confirm.type = "button";
+      cancel.addEventListener("click", () => close(false));
+      confirm.addEventListener("click", () => close(true));
+      backdrop.addEventListener("click", (ev) => {
+        if (ev.target === backdrop) close(false);
+      });
+      row.append(cancel, confirm);
+      panel.appendChild(row);
+      backdrop.appendChild(panel);
+      document.body.appendChild(backdrop);
+      document.addEventListener("keydown", onKey, true);
+      // Focus Cancel on open so an accidental Enter after opening cannot
+      // restart the stack. Confirmation requires a deliberate click on the
+      // primary button.
+      cancel.tabIndex = -1;
+      cancel.focus();
+    } catch (err) {
+      const diag = globalThis.__restartStackClient;
+      const msg = `restart-stack:confirm: ${errorText(err)}`;
+      if (diag && Array.isArray(diag.errors)) diag.errors.push(msg);
+      else console.warn(msg);
+      close(false);
+    }
+  });
+}
+
+/**
  * GET /plugins-api/restart-stack/state. Never throws: returns
  * {ok, state?, error?} so the caller can keep polling during the restart
  * window without surfacing a dialog. A fetch failure while the stack is
@@ -126,18 +210,24 @@ async function fetchState() {
 }
 
 /**
- * POST /plugins-api/restart-stack/restart. Always sends {}: the UI must
- * never resume. A resume field would let a tab ask the launcher to inject
- * a prompt into whichever conversation PI_SESSION_FILE happens to name -
- * the wrong default for a button. That rule is documented in the README
- * too; the test for the plugin server asserts it via the body shape.
+ * POST /plugins-api/restart-stack/restart. The UI sends {delay_seconds? ,
+ * apply_updates?} and NOTHING else. resume / session / note would let a
+ * tab ask the launcher to inject a prompt into whichever conversation
+ * PI_SESSION_FILE happens to name - the wrong default for a button. That
+ * rule is enforced at the boundary (HTTP 400) and documented in the
+ * README; the test asserts it via the body shape.
+ *
+ * @param {{ applyUpdates?: boolean, delaySeconds?: number }} [opts]
  */
-async function postRestart() {
+async function postRestart(opts = {}) {
+  const body = {};
+  if (opts.applyUpdates === true) body.apply_updates = true;
+  if (Number.isFinite(opts.delaySeconds)) body.delay_seconds = Math.floor(opts.delaySeconds);
   try {
     const res = await fetch(`${API_BASE}/restart`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify(body),
     });
     const payload = await res.json().catch(() => null);
     if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
@@ -325,15 +415,38 @@ function createInstance(container, ctx) {
     button.title = "Restart pi-web-ui and the auth proxy. Plain restart, no resume.";
     button.disabled = state.busy || state.restarting;
     button.addEventListener("click", async () => {
-      const ok = window.confirm(
-        "Restart the Glitch web stack? This page will disconnect for about a minute.",
-      );
+      const ok = await confirmDialog({
+        title: "Restart stack",
+        body: "Restart pi-web-ui and the auth proxy. The page will disconnect for about a minute.",
+        confirmLabel: "Restart stack",
+        primaryClass: "rs-primary",
+      });
       if (!ok) return;
       state.diag.lastAction = "click";
       state.diag.lastAt = new Date().toLocaleTimeString();
-      await runRestart();
+      await runRestart({ applyUpdates: false });
     });
     actions.appendChild(button);
+
+    const updatesButton = el("button", "rs-btn rs-secondary", "Restart + updates");
+    updatesButton.type = "button";
+    updatesButton.title = "Apply pending Updates (approved automatically) and then restart the stack.";
+    updatesButton.disabled = state.busy || state.restarting;
+    updatesButton.addEventListener("click", async () => {
+      const ok = await confirmDialog({
+        title: "Restart + updates",
+        body:
+          "Any pending Updates will be applied (and approved automatically) before the restart. " +
+          "The page will disconnect for about a minute.",
+        confirmLabel: "Restart + updates",
+        primaryClass: "rs-primary",
+      });
+      if (!ok) return;
+      state.diag.lastAction = "click+updates";
+      state.diag.lastAt = new Date().toLocaleTimeString();
+      await runRestart({ applyUpdates: true });
+    });
+    actions.appendChild(updatesButton);
   }
 
   function render() {
@@ -367,24 +480,24 @@ function createInstance(container, ctx) {
     }
   }
 
-  async function runRestart() {
+  async function runRestart({ applyUpdates = false } = {}) {
     state.busy = true;
     state.restarting = true;
     state.restartStartedAt = Date.now();
     // Clear any prior failure before this attempt's banner state is rendered.
     state.failMessage = null;
     render();
-    const payload = await postRestart();
+    const payload = await postRestart({ applyUpdates });
     if (state.destroyed) return;
     state.busy = false;
     if (payload?.ok) {
-      state.diag.lastWrite = `restart @ ${new Date().toLocaleTimeString()}`;
+      state.diag.lastWrite = `restart${applyUpdates ? "+updates" : ""} @ ${new Date().toLocaleTimeString()}`;
       // The server answers 200 BEFORE the actual kill happens (the kill is
       // detached). Stay in restarting mode and poll /state every 2s until
       // the snapshot answers again - then reload to land the new bundle.
       startFastPoll();
     } else {
-      state.diag.lastWrite = `restart FAILED: ${payload?.error ?? "unknown"}`;
+      state.diag.lastWrite = `restart${applyUpdates ? "+updates" : ""} FAILED: ${payload?.error ?? "unknown"}`;
       // Roll back the banner; let the user try again. Store the message in
       // state instead of appending to the banner element: renderBanner()
       // does banner.textContent = "" first and would erase an inline

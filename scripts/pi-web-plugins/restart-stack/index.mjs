@@ -6,15 +6,18 @@
  * folder, created by scripts/install-pi-web-plugins.mjs — edit here only.
  *
  * Surfaces:
- *   1. Right-panel "Restart Stack" tab: status + one button.
- *      The button does a plain restart (no resume, no note). The UI is the
- *      wrong place to ask a user to compose a continuation prompt.
+ *   1. Right-panel "Restart Stack" tab: status + two buttons.
+ *      Plain restart (no resume, no note) and "Restart + updates" which
+ *      forwards apply_updates:true. The UI is the wrong place to ask a
+ *      user to compose a continuation prompt.
  *   2. GET  /plugins-api/restart-stack/state  -> netstat snapshot.
  *   3. POST /plugins-api/restart-stack/restart -> spawns the launcher
  *      detached and returns immediately. The process answering this request
- *      is the process the restart will kill.
- *   4. Slash command /restart-stack [resume] [note] for the agent terminal.
- *      "resume" is the first whitespace token; the rest becomes the note.
+ *      is the process the restart will kill. Body accepts ONLY
+ *      {delay_seconds?, apply_updates?}.
+ *   4. Slash command /restart-stack [resume|updates] [note] for the agent
+ *      terminal. The first whitespace token picks the mode; the rest
+ *      becomes the note when "resume" is the mode.
  *
  * No agent tool: the plugin process cannot tell which conversation called it,
  * and there is no reliable id without the caller passing --session itself.
@@ -269,7 +272,9 @@ export default {
         // belong to the CLI and the slash command, because the session
         // string and the note reach a cmd.exe-parsed command verbatim —
         // the H1/H2 injection vector. Refusing them at the boundary kills
-        // the LAN-reachable injection path entirely.
+        // the LAN-reachable injection path entirely. apply_updates is the
+        // one extra boolean the UI is allowed to pass; it is a switch on
+        // restart-pi-stack.ps1, not user text, so it is safe to echo back.
         const body = req?.body ?? {};
         const wantsResume = body?.resume === true
           || (typeof body?.session === "string" && body.session.trim() !== "")
@@ -313,8 +318,12 @@ export default {
         if (delay < 0) delay = 0;
         if (delay > 120) delay = 120;
 
+        const applyUpdates = body?.apply_updates === true;
+
         const argv = ["--json", "--delay", String(Math.floor(delay))];
-        const result = await fireRestart({ argv, mode: "plain" });
+        if (applyUpdates) argv.push("--apply-updates");
+        const mode = applyUpdates ? "updates" : "plain";
+        const result = await fireRestart({ argv, mode });
         if (!result.ok) {
           if (result.retryAfterMs != null) {
             return json(res, 409, {
@@ -335,7 +344,8 @@ export default {
         // for by a half-dead pi-web-ui.
         return json(res, 200, {
           ok: true,
-          mode: "plain",
+          mode,
+          applyUpdates,
           delaySeconds: Math.floor(delay),
           logPaths: lastLogPaths,
         });
@@ -346,30 +356,47 @@ export default {
       host.registerCommand({
         name: "restart-stack",
         description: "Restart the glitch-pi web stack (pi-web-ui and auth proxy)",
-        argumentHint: "[resume] [note]",
+        argumentHint: "[resume|updates] [note]",
         async run(args) {
           const text = String(args ?? "").trim();
           const firstSpace = text.indexOf(" ");
           const head = firstSpace === -1 ? text : text.slice(0, firstSpace);
           const tail = firstSpace === -1 ? "" : text.slice(firstSpace + 1).trim();
-          const resume = head.toLowerCase() === "resume";
+          // The head token picks the mode; tail is the note for resume.
+          // "updates", "updates <note>", "resume <note>", "resume updates",
+          // and "resume updates <note>" are all accepted so the user does
+          // not have to remember the order. resume always wins when present
+          // because it is the more restrictive path.
+          const headLower = head.toLowerCase();
+          const resume = headLower === "resume";
+          const updates = !resume && (headLower === "updates" || tail.toLowerCase().startsWith("updates"));
+          let noteForMode = tail;
+          if (resume && tail.toLowerCase().startsWith("updates")) {
+            noteForMode = tail.replace(/^updates\s*/i, "");
+          } else if (updates && headLower === "updates") {
+            noteForMode = tail;
+          } else if (updates) {
+            noteForMode = tail.replace(/^updates\s*/i, "");
+          }
           const argv = ["--json", "--delay", "8"];
+          if (updates) argv.push("--apply-updates");
           if (resume) {
-            argv.push("--resume");
             const session = process.env.PI_SESSION_FILE || "";
             if (!session) {
               return "no session file: set PI_SESSION_FILE or pass --session via the CLI";
             }
-            argv.push("--session", session);
-            if (tail) argv.push("--note", tail);
+            argv.push("--resume", "--session", session);
+            if (noteForMode) argv.push("--note", noteForMode);
           }
           // Slash command shares the same pending window as the HTTP route
           // via fireRestart. A concurrent UI restart blocks the agent path
           // with the same "already in flight" message.
-          const result = await fireRestart({ argv, mode: resume ? "resume" : "plain" });
+          const mode = resume ? "resume" : updates ? "updates" : "plain";
+          const result = await fireRestart({ argv, mode });
           if (result.ok) {
             const where = result.parsed.outLog ? ` log=${result.parsed.outLog}` : "";
-            return `restart queued${resume ? " (resume)" : ""} delay=${result.parsed.delaySeconds}s pid=${result.parsed.pid ?? "?"}${where}`;
+            const tag = mode === "resume" ? " (resume)" : mode === "updates" ? " (+updates)" : "";
+            return `restart queued${tag} delay=${result.parsed.delaySeconds}s pid=${result.parsed.pid ?? "?"}${where}`;
           }
           return `restart failed: ${result.error ?? "unknown"}`;
         },

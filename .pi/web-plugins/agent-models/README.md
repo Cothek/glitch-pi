@@ -48,9 +48,9 @@ Every option carries a cost chip, and so does each row (the price of its current
 
 Alongside the price each option carries its **tier** and capability badges, and the picker filters on all of it:
 ```
-All providers 507 | openrouter 392 | commandcode 59 | nvidia 56
-All tiers 507 | budget 222 | mid 151 | free 79 | premium 55
-Any capability 507 | Vision 315 | 200K+ context 372
+All providers 476 | openrouter 392 | commandcode 59 | nvidia 25
+All tiers 476 | budget 222 | mid 151 | free 48 | premium 55
+Any capability 476 | Vision 314 | 200K+ context 372
 ```
 
 Tiers are DERIVED, not published: `blended = 0.75*in + 0.25*out`, then free = 0, budget < 1, mid < 5, premium >= 5. The thresholds live in `scripts/agent-model-costs.mjs` and the tier is stored in the data, so changing them is a one-line edit with no UI change. Vision comes from the live host model list; 200K+ context comes from the cost table.
@@ -69,7 +69,7 @@ Coverage on this machine, stated plainly:
 
 - `commandcode` - **all 59 configured models are priced**, from Command Code's own published GOAT plan rates ($0.50/$3.00 for Qwen 3.6 Plus, $0.15/$0.50 for glm-5.3-flash). Their docs page embeds a structured catalog; `scripts/commandcode-prices.mjs` extracts it into `config/commandcode-prices.json` (checked in, re-run when prices change). It also carries context window, vision and reasoning per model, and lists 82 models against the 59 pi has configured.
 - `openrouter` - 392 models with real list prices, from the official catalog cache.
-- `nvidia` - 56 models, every field 0 = genuinely free.
+- `nvidia` - 25 curated models (filtered from 56 live NIM ids by `scripts/sync-nvidia-models.mjs`; `NVIDIA_CURATED=0` restores the full list), every field 0 = genuinely free.
 
 Precedence, lowest to highest: `models-store.json`, `models.json`, `config/commandcode-prices.json`, then `.pi/agent-models/prices.json`. Anything still unpriced gets an **openrouter same-slug estimate**, shown with a `~` and named in the tooltip. On this machine that count is legitimately 0 because the docs cover everything, so the path is proven by a synthetic probe instead of by hope.
 

@@ -115,4 +115,4 @@ node glitch-memorycore/plugins/embed-search/search-memory.mjs -q "<your query>" 
 - Memory imports: see `~/.pi/agent/AGENTS.md` (@path to `user/*.md`).
 - Engine source of truth: `glitch-memorycore/` submodule.
 - **No OpenCode**: this fork has no `opencode/`, `.opencode/`, `opencode.json`, or `config/opencode-*.json`. Pi CLI lives in `data\node\`. OpenCode image-stats tool intentionally omitted (no opencode DB).
-- **Sub-agent dispatch works but Omni does not use it**: `task()` is wired up (dispatcher.ts resolves the pi CLI); this mode executes directly by design.
+- **Sub-agent dispatch is HARD-BLOCKED in this mode**: routing.ts blocks `task`/`subagent_spawn`/`delegate_task` with an error when the primary mode is glitch-omni. Direct execution is enforced, not requested.

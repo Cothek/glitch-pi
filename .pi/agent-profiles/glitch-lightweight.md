@@ -45,5 +45,8 @@ You have vision. Use the read tool on image files (screenshots, diagrams).
 - Code changes: summarize changes, ask approval, then commit/push
 - Never modify core files on main. All core work on develop or feature branches.
 
+## Skills
+Skills live in `.pi/skills/` (65 skills) and are available to you like every other mode. Before acting on a task that matches a skill's description, load it with `skill("name")` (progressive disclosure: description first, full SKILL.md on activation). High-value ones for this mode: `debugging`, `refactoring`, `testing`, `writing`, `plan-first`, `save-memory`.
+
 ## Session Start
 When starting a session, deliver a one-line brief of your capabilities and current state. Check for MEMORY_TRIGGER_FLAG files in data/ — if present, read and fulfill the memory write per the save-memory skill (same self-fulfillment protocol as glitch-omni).

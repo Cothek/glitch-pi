@@ -100,6 +100,14 @@ function isOmniPrimaryMode(): boolean {
   return readAgentMode() === "glitch-omni";
 }
 
+// Direct-execution primary modes (omni, lightweight) must NEVER dispatch
+// sub-agents — they do everything themselves by design. Enforced as a hard
+// block (not a system-prompt request) because the model ignores the prose.
+function isDirectExecPrimaryMode(): boolean {
+  const mode = readAgentMode();
+  return mode === "glitch-omni" || mode === "glitch-lightweight";
+}
+
 // --- Detection sets (verbatim from OpenCode plugins) ---
 
 const COMPLEXITY_KEYWORDS = [
@@ -386,7 +394,20 @@ export default function (pi: ExtensionAPI) {
 
         // --- dispatch tracking on task-like custom tools ---
         if (event.toolName === "task" || event.toolName === "dispatch" || event.toolName === "subagent_spawn" || event.toolName === "delegate_task") {
-          // task dispatch itself is allowed; timestamp recorded after via tool_execution_end
+          // Hard no-dispatch gate for direct-execution modes (omni/lightweight).
+          // The mode file is re-read per call, so mid-session /agent switches
+          // take effect immediately.
+          if (isDirectExecPrimaryMode()) {
+            return {
+              block: true,
+              reason:
+                `⛔ No-Dispatch Violation: ${event.toolName} is forbidden in ${readAgentMode()} mode.\n` +
+                "Glitch Omni / Glitch Lightweight execute everything directly — no sub-agent dispatch, ever.\n" +
+                "Do the work yourself with edit/write/bash/read. If the task needs a capability you lack, tell Troy directly.\n" +
+                "To use sub-agents, ask Troy to switch modes: /agent glitch.",
+            };
+          }
+          // task dispatch itself is allowed in dispatch-first modes; timestamp recorded after via tool_execution_end
         }
 
         // --- edit / write gates ---

@@ -18,7 +18,7 @@
  *     loading — an unlisted extension is never loaded).
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,23 @@ const extensionDir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(extensionDir, "..", "..");
 const TUNNEL_SCRIPT = join(REPO_ROOT, "scripts", "lib", "tunnel.mjs");
 const LEASE_FILE = join(REPO_ROOT, "data", ".tunnel-keeper.lease");
+
+/**
+ * CHEAP in-process cloudflared check: one tasklist.exe call (~10ms) instead of
+ * booting a whole node child for tunnel.mjs (~300ms + module loads). This gate
+ * eliminates the node churn: when the tunnel is healthy (the common case),
+ * this session spawns NOTHING at all.
+ */
+function isCloudflaredRunningCheap(): Promise<boolean> {
+  return new Promise((res) => {
+    execFile(
+      "tasklist",
+      ["/NH", "/FI", "IMAGENAME eq cloudflared.exe"],
+      { timeout: 5_000, windowsHide: true },
+      (err, stdout) => res(!err && String(stdout ?? "").includes("cloudflared.exe")),
+    );
+  });
+}
 
 /** Read the lease. returns true if it's fresh. */
 function isLeaseFresh(): boolean {
@@ -63,9 +80,13 @@ function tryClaimLease(): boolean {
   }
 }
 
-function ensureTunnelProcess(reason: string): void {
+async function ensureTunnelProcess(reason: string): Promise<void> {
   try {
     if (!existsSync(TUNNEL_SCRIPT)) return;
+    // 1. Cheap in-process check first: tunnel healthy => spawn NOTHING at all
+    //    (the common case; this is what eliminates the node churn).
+    if (await isCloudflaredRunningCheap()) return;
+    // 2. Cross-session lease: only one session repairs at a time.
     if (isLeaseFresh()) return;
     if (!tryClaimLease()) return;
     const child = spawn(process.execPath, [TUNNEL_SCRIPT, "--reason", reason], {
@@ -83,8 +104,8 @@ export default function tunnelKeeperExtension(_pi: ExtensionAPI) {
   // Sub-agents inherit the primary session's keeper — skip to avoid watchdog stampedes.
   if (process.env.GLITCH_SUBAGENT === "1") return;
 
-  ensureTunnelProcess("session-start");
+  void ensureTunnelProcess("session-start");
 
-  const timer = setInterval(() => ensureTunnelProcess("periodic"), KEEPER_INTERVAL_MS);
+  const timer = setInterval(() => void ensureTunnelProcess("periodic"), KEEPER_INTERVAL_MS);
   if (typeof timer.unref === "function") timer.unref();
 }

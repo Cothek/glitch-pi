@@ -50,14 +50,16 @@ $ErrorActionPreference = "Stop"
 $RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $NodeExe = Join-Path $RootDir "data\node\node.exe"
 $AuthProxy = Join-Path $RootDir "plugins\auth-proxy.mjs"
-$LauncherCmd = Join-Path $env:USERPROFILE "pi-web-ui-launcher.cmd"
+$WebEntry = Join-Path $RootDir "data\node\node_modules\pi-web-ui\bin\pi-web-ui.mjs"
+$StackWindowsLib = Join-Path $RootDir "scripts\lib\stack-windows.ps1"
+if (Test-Path $StackWindowsLib) { . $StackWindowsLib }
 
 # pi-web-ui 403s browser WS upgrades whose Origin != Host (originAllowed()).
 # Behind the auth proxy / tunnel, Host reads localhost:<WebPort>, so the public
-# hostnames must be allow-listed. Kept in sync with pi-stack-window.ps1 and
-# %USERPROFILE%\pi-web-ui-launcher.cmd  -  change all three together.
-# The env var also reaches the detached pi-web-ui through the launcher .cmd,
-# but setting it here covers any future direct-node path too.
+# hostnames must be allow-listed. Kept in sync with pi-stack-window.ps1 -
+# change both together. (The old %USERPROFILE%\pi-web-ui-launcher.cmd shim is
+# no longer used: both start modes spawn node directly and inherit this env
+# block, so there is no third copy of this list to update.)
 $env:PI_WEB_ALLOW_ORIGINS = "https://pi.cothekdesigns.com,https://glitch.cothekdesigns.com"
 
 # ---- PI_WEB_TOKEN (shared token gate on :8787) ------------------------------
@@ -184,6 +186,15 @@ if ($Status) {
     exit 0
 }
 
+# Close parked stack windows left over from past windowed runs: a
+# pi-stack-window.ps1 window parks forever (-NoExit) after its stack dies,
+# so stale copies accumulate across stop/restart cycles. A window is stale
+# when it does NOT own the live :WebPort/:AuthPort listeners and is older
+# than 90s (a young window may still be booting its children).
+if (Get-Command Stop-StaleStackWindows -ErrorAction SilentlyContinue) {
+    Stop-StaleStackWindows -WebPort $WebPort -AuthPort $AuthPort
+}
+
 # ---------------------------------------------------------------- WINDOWED --
 if ($Windowed) {
     $manager = Join-Path $RootDir "scripts\start-pi-stack-window.ps1"
@@ -230,10 +241,6 @@ if ($Windowed) {
 }
 
 # ---------------------------------------------------------------- DETACHED --
-if (-not (Test-Path $LauncherCmd)) {
-    Write-Error "Missing launcher: $LauncherCmd"
-    exit 1
-}
 if (-not (Test-Path (Join-Path $RootDir ".server-password"))) {
     Write-Error ".server-password not found - auth proxy cannot start"
     exit 1
@@ -244,7 +251,14 @@ if ($stackStatus.PiWebUi) {
     Write-Host "pi-web-ui already UP on :$WebPort (skipping)"
 } else {
     Write-Host "Starting pi-web-ui on 0.0.0.0:$WebPort..."
-    & (Join-Path $RootDir "scripts\start-detached.ps1") -Command $LauncherCmd -Name "pi-web-ui"
+    # Direct node spawn (same entry as the windowed path). The old
+    # pi-web-ui-launcher.cmd shim in %USERPROFILE% could go missing (it is
+    # machine-local state outside the repo) and silently broke this whole
+    # detached path with 'Missing launcher' - the repo's own entry point
+    # cannot. PI_WEB_TOKEN / PI_WEB_ALLOW_ORIGINS are inherited via the
+    # environment, exactly as start-detached.ps1 passes it through.
+    $webCmd = "`"$NodeExe`" `"$WebEntry`" --port $WebPort --host 0.0.0.0 --cwd `"$RootDir`""
+    & (Join-Path $RootDir "scripts\start-detached.ps1") -Command $webCmd -Name "pi-web-ui"
     if (-not (Wait-Port $WebPort 60)) {
         Write-Host "  pi-web-ui did not bind :$WebPort within 60s - check $LogDir\pi-web-ui.err.log" -ForegroundColor Yellow
     }
@@ -281,7 +295,8 @@ Write-Host "  auth-proxy ($AuthPort): $(if ($stackStatus.AuthProxy) {'UP'} else 
 Write-Host "  tunnel (cloudflared): $(Get-TunnelLine)"
 if ($stackStatus.PiWebUi -and $stackStatus.AuthProxy) {
     Show-LoginBanner
-    Write-Host "  Started detached - nothing to close. To stop:" -ForegroundColor DarkGray
+    Write-Host "  Started detached - nothing to close. Stop from the web UI's" -ForegroundColor DarkGray
+    Write-Host "  Background tasks panel, or:" -ForegroundColor DarkGray
     Write-Host "    .\scripts\stop-pi-stack.ps1" -ForegroundColor DarkGray
     exit 0
 } else {

@@ -59,9 +59,14 @@ export default {
         // The host deletes this entry right after stop() returns, and the stale
         // handle's update() then no-ops silently. Drop the handle first so the
         // next poll re-registers the entry with the new state
-        // (up -> down, down -> up). Two presses therefore = restart.
+        // (up -> down, down -> up).
         reg = null;
-        await tunnelVerb(s.up ? "stop" : "start");
+        // Re-read the LIVE state at press time: the host's update() refreshes
+        // only the label, so a "(down)" label can sit on a stop callback that
+        // still carries an up-snapshot (and the reverse). The button must act
+        // on the tunnel's real state, not on the last poll's snapshot.
+        const fresh = await tunnelState();
+        await tunnelVerb(fresh.up ? "stop" : "start");
       };
       if (reg) reg.update({ label, status });
       else reg = host.registerBackgroundTask({ id: TASK_ID, label, status, stop });

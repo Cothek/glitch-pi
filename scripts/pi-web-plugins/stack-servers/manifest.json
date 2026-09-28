@@ -1,0 +1,1 @@
+{"id": "stack-servers", "name": "Stack Servers", "version": "1.0.0", "description": "Tracks the glitch-pi stack servers (web UI :8787, auth proxy :4103) in the Background tasks panel with stop control.", "view": false}

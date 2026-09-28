@@ -373,8 +373,9 @@ async function main() {
 
   The interface menu (TUI vs Web) remembers your last choice — press Enter to keep it.
 
-  Web stack default: visible window when launched from a console, detached when
-  launched by an extension/automation (no console to close).
+  Web stack default: a visible window you CLOSE to stop the stack (the servers
+  also show in the web UI's Background tasks panel); --headless runs detached
+  with no window.
 
   Sequence: gitnexus-sync -> start-pi-stack -> tunnel verify -> pi
   Workspace: ${PI_ROOT}
@@ -453,7 +454,7 @@ async function main() {
   if (stackOnly || piMode === 'web') {
     log(DARK_GRAY, stackMode === 'windowed'
       ? '  Web stack: visible window (close it to stop the stack)'
-      : '  Web stack: detached, no window (stop with scripts\\stop-pi-stack.ps1)');
+      : '  Web stack: detached, no window (stop from the Background tasks panel or scripts\\stop-pi-stack.ps1)');
     startPiStack({ windowed: stackMode === 'windowed' });
     await ensureTunnel(tunnelLog);
     verifyTunnel();
@@ -479,7 +480,7 @@ async function main() {
     if (stackMode === 'windowed') {
       log(DARK_GRAY, '  Stop it by CLOSING the Pi web UI window (Ctrl+C in it also works).');
     } else {
-      log(DARK_GRAY, '  Stop it: scripts\\stop-pi-stack.ps1   (or /pi-web-ui:quit in the web UI)');
+      log(DARK_GRAY, '  Stop it: Background tasks panel (stack root -> Stop) or scripts\\stop-pi-stack.ps1');
     }
     log(MAGENTA, '');
     process.exit(0);

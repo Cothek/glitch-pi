@@ -27,7 +27,7 @@ const POLL_MS = 15_000;
 const STYLE_ID = "nvidia-models-style";
 const MOUNT_LABEL = "nvidia-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.1.2";
+const PLUGIN_VERSION = "0.1.3";
 
 /** Per-container instance store. A module-level singleton was wrong: the host
  *  mounts the same module in more than one place (main view pane, Settings
@@ -354,6 +354,12 @@ function createInstance(container, ctx) {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = effectiveEnabled;
+    // autocomplete=off: browsers restore form-control state on reload and
+    // apply it AFTER this render, overriding the JS-set checked state without
+    // firing change. That decoupled the checkbox from the label/pill (the
+    // engine truth) and, with the signature key freezing rebuilds, the
+    // inconsistent row never healed.
+    checkbox.autocomplete = "off";
     checkbox.disabled = state.busy !== null;
     checkbox.setAttribute("aria-label", `Enable ${id}`);
     checkbox.addEventListener("change", () => {
@@ -483,6 +489,33 @@ function createInstance(container, ctx) {
     ]);
   }
 
+  /**
+   * Heal checkbox states to the expected engine/override truth without
+   * rebuilding any node. Runs in the render-skip path: the label and pills
+   * are already correct there (state unchanged since the last rebuild), so
+   * only the checkbox itself can have drifted (browser form restoration
+   * on reload, applied after the render without a change event).
+   */
+  function reconcileChecks() {
+    try {
+      const rows = list.querySelectorAll("[data-nv-id]");
+      for (const row of rows) {
+        const id = row.getAttribute("data-nv-id");
+        const model = state.payload && Array.isArray(state.payload.models)
+          ? state.payload.models.find((m) => m && m.id === id)
+          : null;
+        if (!model) continue;
+        const expected = state.modelEnabledOverride.has(id)
+          ? state.modelEnabledOverride.get(id)
+          : !!model.enabled;
+        const box = row.querySelector("input[type=checkbox]");
+        if (box && box.checked !== expected) box.checked = expected;
+      }
+    } catch {
+      /* best effort — the next full rebuild corrects anyway */
+    }
+  }
+
   function render() {
     if (state.destroyed) return;
     try {
@@ -495,6 +528,11 @@ function createInstance(container, ctx) {
 
       const key = renderKey();
       if (key === state.lastRenderKey) {
+        // Rebuild skipped (nothing changed in state), but the DOM may still
+        // have drifted: browser form restoration on reload sets checkbox
+        // state without firing change. Heal checkbox states in place —
+        // programmatic assignment fires no change and rebuilds no nodes.
+        reconcileChecks();
         renderDiag();
         return;
       }

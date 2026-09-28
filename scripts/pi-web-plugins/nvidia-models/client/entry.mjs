@@ -27,7 +27,7 @@ const POLL_MS = 15_000;
 const STYLE_ID = "nvidia-models-style";
 const MOUNT_LABEL = "nvidia-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.1.0";
+const PLUGIN_VERSION = "0.1.1";
 
 /** Per-container instance store. A module-level singleton was wrong: the host
  *  mounts the same module in more than one place (main view pane, Settings
@@ -84,6 +84,11 @@ const STYLE_CSS = `
 .nv-pill-off{color:var(--text-faint)}
 .nv-pill-r{color:var(--accent)}
 .nv-pill-v{color:var(--amber)}
+.nv-pill-pin{color:var(--amber)}
+.nv-pill-picker{color:var(--text-faint)}
+.nv-notice{border:1px solid var(--amber);background:var(--bg-elev);border-radius:8px;padding:8px 10px;font-size:11.5px;color:var(--text);display:flex;flex-direction:column;gap:4px}
+.nv-notice .nv-notice-title{font-weight:600;color:var(--amber)}
+.nv-notice .nv-notice-dismiss{align-self:flex-end;height:20px;padding:0 7px;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--bg-elev2);color:var(--text-dim);cursor:pointer}
 .nv-diag{border-top:1px solid var(--border-soft);padding-top:6px;color:var(--text-faint);font-family:var(--mono, monospace);font-size:10px;word-break:break-all}
 .nv-hint{font-size:11px;color:var(--text-faint);border:1px dashed var(--border);border-radius:7px;padding:6px 8px}
 .nv-error{border:1px solid var(--red);background:var(--red-soft, transparent);border-radius:8px;padding:10px;font-size:12px;color:var(--text)}
@@ -163,6 +168,8 @@ function createInstance(container, ctx) {
     busy: null, // "sync" | "bulk:recommended" | "bulk:all" | "bulk:none" | "restore"
     openTiers: new Set(),
     modelEnabledOverride: new Map(), // id -> boolean (optimistic, reconciled by /set response)
+    notice: null, // sticky action result notice; survives polls, cleared by the next successful action
+    noticeKind: "warn", // "warn" | "error"
     destroyed: false,
     generation: 0,
     timer: null,
@@ -258,12 +265,15 @@ function createInstance(container, ctx) {
     state.busy = null;
     if (!payload || payload.ok === false) {
       state.error = payload?.error ?? "unknown error";
+      state.notice = `Failed: ${state.error}. Nothing was written.`;
+      state.noticeKind = "error";
       state.diag.lastWrite = `${label} FAILED`;
       render();
       return;
     }
     // Refresh the status payload from the route after a mutation.
     state.diag.lastWrite = `${label} @ ${new Date().toLocaleTimeString()}`;
+    state.notice = null;
     if (Array.isArray(payload.models)) {
       state.payload = payload;
       state.error = null;
@@ -289,6 +299,8 @@ function createInstance(container, ctx) {
       if (prevOverride === undefined) state.modelEnabledOverride.delete(id);
       else state.modelEnabledOverride.set(id, prevOverride);
       state.error = payload?.error ?? "unknown error";
+      state.notice = `Could not ${next ? "enable" : "disable"} ${id}: ${state.error}. The checkbox was restored to the engine's current state.`;
+      state.noticeKind = "error";
       state.diag.lastWrite = `${id} FAILED`;
     } else {
       // Engine is source of truth: drop the override and refresh from the
@@ -298,6 +310,16 @@ function createInstance(container, ctx) {
         state.payload = payload;
       }
       state.error = null;
+      // A pin-guard refusal comes back ok:true with blocked[] naming this
+      // id. Keep it visible as a sticky notice (the payload's blocked box
+      // is wiped by the next poll) so the flip-back is explained, not silent.
+      const refused = (Array.isArray(payload.blocked) ? payload.blocked : []).find((b) => b && b.id === id);
+      if (refused) {
+        state.notice = `Refused for ${id}: ${refused.reason ?? "pin guard"}. The engine kept its current state.`;
+        state.noticeKind = "warn";
+      } else {
+        state.notice = null;
+      }
       state.diag.lastWrite = `${id} @ ${new Date().toLocaleTimeString()}`;
     }
     render();
@@ -336,9 +358,19 @@ function createInstance(container, ctx) {
     }
     row.appendChild(name);
 
-    // Pills (tier, reasoning, vision).
+    // Pills (tier, pin, picker, reasoning, vision).
     const pills = el("div", "nv-pills");
     pills.appendChild(el("span", `nv-pill nv-pill-${model.tier ?? "X"}`, model.tier ?? "?"));
+    if (model.pinned) {
+      const pin = el("span", "nv-pill nv-pill-pin", "PIN");
+      pin.title = "Pinned: the engine's pin guard refuses to disable this model";
+      pills.appendChild(pin);
+    }
+    if (model.in_store) {
+      const picker = el("span", "nv-pill nv-pill-picker", "PICKER");
+      picker.title = "pi lists built-in models in the picker even when disabled here; disable still removes it from models.json and the free pool";
+      pills.appendChild(picker);
+    }
     if (effectiveEnabled) pills.appendChild(el("span", "nv-pill nv-pill-on", "ON"));
     if (model.reasoning) pills.appendChild(el("span", "nv-pill nv-pill-r", "R"));
     if (model.vision === true || model.vision === "image") pills.appendChild(el("span", "nv-pill nv-pill-v", "V"));
@@ -372,6 +404,21 @@ function createInstance(container, ctx) {
       for (const m of models) rows.appendChild(rowNode(m));
       wrap.appendChild(rows);
     }
+    return wrap;
+  }
+
+  function noticeNode() {
+    const wrap = el("div", "nv-notice");
+    const title = el("div", "nv-notice-title", state.noticeKind === "error" ? "Action failed" : "Engine refused");
+    wrap.appendChild(title);
+    wrap.appendChild(el("div", undefined, state.notice));
+    const dismiss = el("button", "nv-notice-dismiss", "dismiss");
+    dismiss.type = "button";
+    dismiss.addEventListener("click", () => {
+      state.notice = null;
+      render();
+    });
+    wrap.appendChild(dismiss);
     return wrap;
   }
 
@@ -443,6 +490,7 @@ function createInstance(container, ctx) {
       sub.title = payload.engine_path ?? "";
 
       const blocked = Array.isArray(payload.blocked) ? payload.blocked : [];
+      if (state.notice) list.appendChild(noticeNode());
       if (blocked.length) list.appendChild(blockedNode(blocked));
 
       const models = Array.isArray(payload.models) ? payload.models : [];

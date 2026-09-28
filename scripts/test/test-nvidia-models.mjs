@@ -126,6 +126,22 @@ function runEngine(argsObj) {
   return spawnSync(process.execPath, cli, { encoding: 'utf8', timeout: CHILD_TIMEOUT_MS, windowsHide: true });
 }
 
+// Same shape as runEngine but WITHOUT --catalog and with a keys file that
+// does not exist: the state-first path must succeed with zero network and
+// zero key access, and the API fallback must fail deterministically offline.
+function runEngineOffline(argsObj) {
+  const cli = [ENGINE_FILE, argsObj.verb];
+  if (argsObj.ids) cli.push(argsObj.ids);
+  cli.push(
+    '--json',
+    '--models-file', argsObj.modelsFile,
+    '--state-file',  argsObj.stateFile,
+    '--keys-file',   argsObj.keysFile ?? join(argsObj.dir ?? '.', 'no-such-keys.json'),
+    '--backup-dir',  argsObj.backupDir
+  );
+  return spawnSync(process.execPath, cli, { encoding: 'utf8', timeout: CHILD_TIMEOUT_MS, windowsHide: true });
+}
+
 // ---------- Group 1: tier assignment and category classification ----------
 
 function groupTierAssignment() {
@@ -582,6 +598,60 @@ async function groupStateFileIsolation() {
   } finally { cleanup(fx.dir); }
 }
 
+// ---------- Group 12: state-first toggle is instant and offline ----------
+
+function groupStateFirstToggleOffline() {
+  const fx = makeFixtureDir();
+  try {
+    // Sync once (fixture catalog) so the state file holds classified rows.
+    const sync = runEngine({ verb: '--sync', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(sync.status, 0, 'sync should exit 0');
+
+    // 1. Disable a non-pinned state-known id with NO catalog and NO keys
+    //    file: the state-first path must succeed fully offline.
+    const dis = runEngineOffline({ verb: '--disable', ids: 'mistralai/mistral-large-2-instruct', dir: fx.dir, modelsFile: fx.modelsFile, stateFile: fx.stateFile, backupDir: fx.backupDir });
+    assert.strictEqual(dis.status, 0, `offline disable must exit 0, stderr=${dis.stderr}`);
+    const report = JSON.parse(dis.stdout);
+    assert.strictEqual(report.ok, true, `offline disable must report ok:true, error=${report.error}`);
+    assert.strictEqual(report.blocked.length, 0, 'non-pinned offline disable has empty blocked[]');
+    const after = JSON.parse(readFileSync(fx.modelsFile, 'utf8'));
+    assert.ok(!after.providers.nvidia.models.find((m) => m.id === 'mistralai/mistral-large-2-instruct'), 'offline disable removed the id from models.json');
+    const state = JSON.parse(readFileSync(fx.stateFile, 'utf8'));
+    const row = state.models.find((m) => m.id === 'mistralai/mistral-large-2-instruct');
+    assert.strictEqual(row.enabled, false, 'offline disable wrote enabled:false to the state');
+
+    // 2. Re-enable the same id offline: round trip works both directions.
+    const en = runEngineOffline({ verb: '--enable', ids: 'mistralai/mistral-large-2-instruct', dir: fx.dir, modelsFile: fx.modelsFile, stateFile: fx.stateFile, backupDir: fx.backupDir });
+    assert.strictEqual(en.status, 0, 'offline enable must exit 0');
+    const reportEn = JSON.parse(en.stdout);
+    assert.strictEqual(reportEn.ok, true, 'offline enable must report ok:true');
+    const afterEn = JSON.parse(readFileSync(fx.modelsFile, 'utf8'));
+    assert.ok(afterEn.providers.nvidia.models.find((m) => m.id === 'mistralai/mistral-large-2-instruct'), 'offline enable restored the id in models.json');
+
+    // 3. Pin guard still applies on the state-first path.
+    const pinDis = runEngineOffline({ verb: '--disable', ids: 'z-ai/glm-5.3', dir: fx.dir, modelsFile: fx.modelsFile, stateFile: fx.stateFile, backupDir: fx.backupDir });
+    const reportPin = JSON.parse(pinDis.stdout);
+    assert.ok((reportPin.blocked || []).some((b) => b.id === 'z-ai/glm-5.3'), 'offline pinned disable reports blocked[]');
+    const afterPin = JSON.parse(readFileSync(fx.modelsFile, 'utf8'));
+    assert.ok(afterPin.providers.nvidia.models.find((m) => m.id === 'z-ai/glm-5.3'), 'pinned id kept in models.json on the offline path');
+
+    // 4. An id the state has never seen falls back to the API path; with
+    //    no keys file that fails deterministically (no network in tests).
+    const unknown = runEngineOffline({ verb: '--disable', ids: 'somevendor/state-never-saw-me', dir: fx.dir, modelsFile: fx.modelsFile, stateFile: fx.stateFile, backupDir: fx.backupDir });
+    const reportUnknown = JSON.parse(unknown.stdout);
+    assert.strictEqual(reportUnknown.ok, false, 'unknown id without catalog falls back to the API path and fails offline');
+    assert.match(reportUnknown.error, /catalog fetch failed/, 'fallback error names the catalog fetch');
+
+    // 5. --status decorates rows with pin state (for the client PIN pill).
+    const st = runEngine({ verb: '--status', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    const statusReport = JSON.parse(st.stdout);
+    const pinnedRow = (statusReport.models || []).find((m) => m.id === 'z-ai/glm-5.3');
+    const plainRow = (statusReport.models || []).find((m) => m.id === 'mistralai/mistral-large-2-instruct');
+    assert.strictEqual(pinnedRow && pinnedRow.pinned, true, 'HARD_PINNED id is decorated pinned:true');
+    assert.strictEqual(plainRow && plainRow.pinned, false, 'non-pinned id is decorated pinned:false');
+  } finally { cleanup(fx.dir); }
+}
+
 // ---------- Run ----------
 
 const groups = [
@@ -595,7 +665,8 @@ const groups = [
   ['F4 status handles corrupt state',            groupStatusCorruptState],
   ['F3 apply force-keeps pinned ids',            groupApplyPinForceKeep],
   ['F5 restore overrides are safe',              groupRestoreOverridesAndSafety],
-  ['F6 state-file override isolates state',      groupStateFileIsolation]
+  ['F6 state-file override isolates state',      groupStateFileIsolation],
+  ['state-first offline toggle',                groupStateFirstToggleOffline]
 ];
 
 for (const [name, fn] of groups) {

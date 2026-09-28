@@ -1,7 +1,7 @@
 {
   "id": "nvidia-models",
   "name": "NVIDIA Models",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "List every NVIDIA free model, mark the relevant ones, and turn each on or off. Bulk-apply the recommended set, resync from the live catalog, or restore the previous models.json from backup. Every write goes through scripts/nvidia-models.mjs.",
   "apiVersion": 2,
   "permissions": ["ui", "http", "tools"],

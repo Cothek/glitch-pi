@@ -245,6 +245,26 @@ function releaseLock() {
   try { if (existsSync(LOCK_FILE)) unlinkSync(LOCK_FILE); } catch { /* best-effort */ }
 }
 
+// ---- Engine disable-state (user intent) ----
+// data/nvidia-models-state.json is the NVIDIA Models panel's source of
+// truth for "the user turned this model off". This sync re-adds every
+// curated live catalog id to models.json, so without this check it
+// silently re-enables models the user disabled (they reappear in the
+// picker, and the next engine verb re-marks them enabled in the state —
+// the checkbox rechecks itself). Fail-open: missing or corrupt state =
+// no exclusions (first-run behavior).
+const ENGINE_STATE_FILE = join(ROOT_DIR, 'data', 'nvidia-models-state.json');
+
+function disabledModelIds() {
+  try {
+    const raw = readJson(ENGINE_STATE_FILE);
+    const models = raw && Array.isArray(raw.models) ? raw.models : [];
+    return new Set(models.filter((m) => m && m.id && m.enabled === false).map((m) => m.id));
+  } catch {
+    return new Set();
+  }
+}
+
 // ---- Main ----
 async function main() {
   const args = process.argv.slice(2);
@@ -323,11 +343,16 @@ async function main() {
 
     // 6.5 Curated subset: modern families + all built-in ids (they render in
     //     the picker regardless, so keeping them keeps the count honest).
+    //     Ids the user disabled in the NVIDIA Models panel are excluded in
+    //     BOTH modes (curated and full): user intent beats the catalog.
+    const disabledIds = disabledModelIds();
     const curated = process.env.NVIDIA_CURATED !== '0';
     const builtinIds = new Set(Object.keys(catalog));
-    const visibleEntries = curated
-      ? liveEntries.filter((e) => builtinIds.has(e.id) || CURATED_KEEP_RE.test(e.id))
-      : liveEntries;
+    const visibleEntries = liveEntries.filter(
+      (e) =>
+        !disabledIds.has(e.id) &&
+        (curated ? builtinIds.has(e.id) || CURATED_KEEP_RE.test(e.id) : true)
+    );
 
     // 7. Merge into models.json, preserving other providers and user-added
     //    nvidia entries (ids this script has never synced = user-owned).
@@ -339,7 +364,7 @@ async function main() {
     const liveIdSet = new Set(chatIds);
 
     const keepUserEntries = (Array.isArray(prevNvidia.models) ? prevNvidia.models : []).filter(
-      (m) => m && m.id && !liveIdSet.has(m.id) && !syncedBefore.has(m.id)
+      (m) => m && m.id && !liveIdSet.has(m.id) && !syncedBefore.has(m.id) && !disabledIds.has(m.id)
     );
 
     const mergedModels = [...visibleEntries, ...keepUserEntries].sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -370,7 +395,7 @@ async function main() {
       baseUrl: NIM_BASE_URL,
     });
 
-    log(`NVIDIA: ${chatIds.length} live models (${newCount} new) - ${curated ? `${visibleEntries.length} curated` : 'full list'} written to models.json`, logOpts);
+    log(`NVIDIA: ${chatIds.length} live models (${newCount} new) - ${curated ? `${visibleEntries.length} curated` : 'full list'} written to models.json${disabledIds.size ? ` (${disabledIds.size} panel-disabled kept out)` : ''}`, logOpts);
   } finally {
     releaseLock();
   }

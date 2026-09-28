@@ -729,23 +729,43 @@ async function runEnableDisable(args) {
   const modelsStore = existsSync(args.storeFile) ? readJson(args.storeFile) : { nvidia: { models: [] } };
   const prevState = readStateOrEmpty(args.stateFile);
 
-  let catalog;
-  try {
-    catalog = await loadCatalog(args);
-  } catch (e) {
-    out.ok = false;
-    out.error = `catalog fetch failed: ${e.message}`;
-    return out;
-  }
-  const catalogIds = catalog.map((m) => m.id).filter(Boolean);
-  if (catalogIds.length === 0) {
-    out.ok = false;
-    out.error = 'catalog returned 0 models';
-    return out;
-  }
-
   const currentEnabled = liveEnabledSet(modelsJson);
-  const initialRows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, currentEnabled);
+  let initialRows;
+  // State-first fast path: a panel toggle only needs rows the engine has
+  // already classified and snapshotted. When the state file knows every
+  // requested id we skip the live NVIDIA API entirely, so toggles are
+  // instant and keep working during API outages (the old path died here:
+  // ok:false, no write, and the UI silently flipped the checkbox back).
+  // `--catalog` (test/diagnostic fixture) forces the catalog path, and an
+  // id the state has never seen falls back to the live API as before.
+  const stateKnowsAllIds =
+    !args.catalog &&
+    Array.isArray(prevState.models) &&
+    prevState.models.length > 0 &&
+    args.ids.every((id) => prevState.models.some((m) => m && m.id === id));
+  if (stateKnowsAllIds) {
+    initialRows = prevState.models.map((r) => ({
+      ...r,
+      enabled: currentEnabled.has(r.id),
+      in_models_json: currentEnabled.has(r.id)
+    }));
+  } else {
+    let catalog;
+    try {
+      catalog = await loadCatalog(args);
+    } catch (e) {
+      out.ok = false;
+      out.error = `catalog fetch failed: ${e.message}`;
+      return out;
+    }
+    const catalogIds = catalog.map((m) => m.id).filter(Boolean);
+    if (catalogIds.length === 0) {
+      out.ok = false;
+      out.error = 'catalog returned 0 models';
+      return out;
+    }
+    initialRows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, currentEnabled);
+  }
   const pins = discoverPins(REPO_ROOT);
   const blocked = findPinConflicts(initialRows, verb, args.ids, pins);
 
@@ -802,7 +822,15 @@ async function runStatus(args) {
   const rows = prevState.models;
   out.synced_at = prevState.synced_at || '';
   Object.assign(out, buildBaseReport(rows, prevState));
-  out.models = rows;
+  // Decorate pin state at read time so HARD_PINNED_IDS or agent-profile
+  // changes reflect immediately without a resync. Shallow copies: the
+  // diff in buildBaseReport above must keep comparing the raw state rows.
+  try {
+    const pins = discoverPins(REPO_ROOT);
+    out.models = rows.map((r) => ({ ...r, pinned: pins.has(r.id) }));
+  } catch {
+    out.models = rows;
+  }
   out.counts = prevState.counts || summarize(rows);
   return out;
 }

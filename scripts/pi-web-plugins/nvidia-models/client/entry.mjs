@@ -27,7 +27,7 @@ const POLL_MS = 15_000;
 const STYLE_ID = "nvidia-models-style";
 const MOUNT_LABEL = "nvidia-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.1.1";
+const PLUGIN_VERSION = "0.1.2";
 
 /** Per-container instance store. A module-level singleton was wrong: the host
  *  mounts the same module in more than one place (main view pane, Settings
@@ -86,6 +86,7 @@ const STYLE_CSS = `
 .nv-pill-v{color:var(--amber)}
 .nv-pill-pin{color:var(--amber)}
 .nv-pill-picker{color:var(--text-faint)}
+.nv-pill-fail{color:var(--red)}
 .nv-notice{border:1px solid var(--amber);background:var(--bg-elev);border-radius:8px;padding:8px 10px;font-size:11.5px;color:var(--text);display:flex;flex-direction:column;gap:4px}
 .nv-notice .nv-notice-title{font-weight:600;color:var(--amber)}
 .nv-notice .nv-notice-dismiss{align-self:flex-end;height:20px;padding:0 7px;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--bg-elev2);color:var(--text-dim);cursor:pointer}
@@ -170,6 +171,8 @@ function createInstance(container, ctx) {
     modelEnabledOverride: new Map(), // id -> boolean (optimistic, reconciled by /set response)
     notice: null, // sticky action result notice; survives polls, cleared by the next successful action
     noticeKind: "warn", // "warn" | "error"
+    rowMarks: new Map(), // id -> reason; per-row failure marker pill, cleared on that row's next success
+    lastRenderKey: "", // signature of the last full DOM rebuild; identical payloads skip rebuilding
     destroyed: false,
     generation: 0,
     timer: null,
@@ -227,8 +230,16 @@ function createInstance(container, ctx) {
   }
 
   const list = el("div", "nv-list");
+  // Fixed notice slot ABOVE the scrollable list. v0.1.1 rendered notices
+  // inside .nv-list at its top — a user scrolled down to the rows never saw
+  // the failure box, so a failed toggle looked like an unexplained revert.
+  const noticeSlot = el("div");
+  noticeSlot.style.display = "flex";
+  noticeSlot.style.flexDirection = "column";
+  noticeSlot.style.gap = "8px";
+  noticeSlot.style.flex = "none";
   const diagLine = el("div", "nv-diag");
-  root.append(head, bulkRow, list, diagLine);
+  root.append(head, bulkRow, noticeSlot, list, diagLine);
 
   function renderDiag() {
     const d = state.diag;
@@ -274,6 +285,7 @@ function createInstance(container, ctx) {
     // Refresh the status payload from the route after a mutation.
     state.diag.lastWrite = `${label} @ ${new Date().toLocaleTimeString()}`;
     state.notice = null;
+    state.rowMarks.clear();
     if (Array.isArray(payload.models)) {
       state.payload = payload;
       state.error = null;
@@ -301,6 +313,7 @@ function createInstance(container, ctx) {
       state.error = payload?.error ?? "unknown error";
       state.notice = `Could not ${next ? "enable" : "disable"} ${id}: ${state.error}. The checkbox was restored to the engine's current state.`;
       state.noticeKind = "error";
+      state.rowMarks.set(id, state.error);
       state.diag.lastWrite = `${id} FAILED`;
     } else {
       // Engine is source of truth: drop the override and refresh from the
@@ -317,8 +330,10 @@ function createInstance(container, ctx) {
       if (refused) {
         state.notice = `Refused for ${id}: ${refused.reason ?? "pin guard"}. The engine kept its current state.`;
         state.noticeKind = "warn";
+        state.rowMarks.set(id, refused.reason ?? "pin guard refusal");
       } else {
         state.notice = null;
+        state.rowMarks.delete(id);
       }
       state.diag.lastWrite = `${id} @ ${new Date().toLocaleTimeString()}`;
     }
@@ -365,6 +380,11 @@ function createInstance(container, ctx) {
       const pin = el("span", "nv-pill nv-pill-pin", "PIN");
       pin.title = "Pinned: the engine's pin guard refuses to disable this model";
       pills.appendChild(pin);
+    }
+    if (state.rowMarks.has(id)) {
+      const fail = el("span", "nv-pill nv-pill-fail", "!");
+      fail.title = `Last toggle failed: ${state.rowMarks.get(id)}`;
+      pills.appendChild(fail);
     }
     if (model.in_store) {
       const picker = el("span", "nv-pill nv-pill-picker", "PICKER");
@@ -421,7 +441,6 @@ function createInstance(container, ctx) {
     wrap.appendChild(dismiss);
     return wrap;
   }
-
   function blockedNode(blocked) {
     const wrap = el("div", "nv-blocked");
     wrap.appendChild(el("div", "nv-blocked-title", `Pin guard refused ${blocked.length} change${blocked.length === 1 ? "" : "s"}`));
@@ -435,9 +454,51 @@ function createInstance(container, ctx) {
     return wrap;
   }
 
+  /**
+   * Signature of everything the full DOM rebuild depends on. Identical
+   * signatures mean the rebuild would paint the exact same tree, so the
+   * poll path skips it entirely. v0.1.1 wiped and rebuilt list on every
+   * 15s poll; a rebuild landing between mousedown and change destroyed
+   * the checkbox mid-click, the change event never fired, no POST was
+   * sent, and the next render painted the engine state again — a silent
+   * revert with no server-side trace anywhere. With the key, unchanged
+   * payloads cause zero DOM churn and clicks always land.
+   */
+  function renderKey() {
+    const p = state.payload;
+    const models = p && Array.isArray(p.models) ? p.models : [];
+    return JSON.stringify([
+      state.loading && !p ? 1 : 0,
+      state.busy,
+      state.error || "",
+      state.notice || "",
+      [...state.openTiers].sort(),
+      p ? String(p.synced_at || "") : "no-payload",
+      (p && Array.isArray(p.blocked) ? p.blocked : []).map((b) => `${b?.id}:${b?.reason ?? ""}`).join("|"),
+      models
+        .map((m) => `${m.id}|${m.tier ?? ""}|${m.enabled ? 1 : 0}|${m.pinned ? 1 : 0}|${state.modelEnabledOverride.has(m.id) ? (state.modelEnabledOverride.get(m.id) ? 1 : 2) : 0}`)
+        .join(";"),
+      models.length,
+      [...state.rowMarks.entries()].map(([k, v]) => `${k}:${v}`).join("|"),
+    ]);
+  }
+
   function render() {
     if (state.destroyed) return;
     try {
+      // Fixed notice area first: always rendered fresh (cheap), always in view.
+      noticeSlot.textContent = "";
+      if (state.notice) noticeSlot.appendChild(noticeNode());
+      const payloadForBlocked = state.payload;
+      const blockedNow = payloadForBlocked && Array.isArray(payloadForBlocked.blocked) ? payloadForBlocked.blocked : [];
+      if (blockedNow.length) noticeSlot.appendChild(blockedNode(blockedNow));
+
+      const key = renderKey();
+      if (key === state.lastRenderKey) {
+        renderDiag();
+        return;
+      }
+      state.lastRenderKey = key;
       for (const { btn, action } of bulkButtons) {
         btn.disabled = state.busy !== null;
         if (state.busy === action) btn.setAttribute("aria-pressed", "true");
@@ -488,10 +549,6 @@ function createInstance(container, ctx) {
       const cli_note = cli_present ? "" : " (engine missing on disk)";
       sub.textContent = `${counts.chat ?? "?"} chat | ${counts.enabled ?? "?"} enabled | ${counts.recommended ?? "?"} recommended | ${synced}${cli_note}`;
       sub.title = payload.engine_path ?? "";
-
-      const blocked = Array.isArray(payload.blocked) ? payload.blocked : [];
-      if (state.notice) list.appendChild(noticeNode());
-      if (blocked.length) list.appendChild(blockedNode(blocked));
 
       const models = Array.isArray(payload.models) ? payload.models : [];
       const groups = { A: [], B: [], C: [], X: [] };

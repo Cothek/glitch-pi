@@ -22,12 +22,24 @@
  * SYNC: re-reads user/agent-mode.json on conversation change (switches made
  * via /agent, the TUI shortcut, or another conversation reflect in the select)
  * and re-discovers profiles on workspace/cwd change.
+ *
+ * GLOBAL FALLBACK: modes also come from ~/.pi/agent-profiles/*.md (env
+ * AGENT_SWITCHER_GLOBAL_DIR overrides, for tests), so the chip appears in
+ * every project folder even without a local .pi/agent-profiles. A same-id
+ * workspace profile overrides the global entry.
  */
 
 import { definePlugin } from "./sdk/index.mjs";
+// Raw node:fs for the global fallback: host.fs is workspace-anchored by
+// design, and sibling plugins (nvidia-models) already read config this way.
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const PROFILES_DIR = ".pi/agent-profiles";
 const MODE_FILE = "user/agent-mode.json";
+/** Global profiles dir — the fallback that makes modes folder-independent. */
+const globalDir = () => process.env.AGENT_SWITCHER_GLOBAL_DIR || join(homedir(), ".pi", "agent-profiles");
 const ITEM_ID = "agent-mode";
 /** Composer button action — the client opens a dd-menu clone styled like the thinking chip. */
 const ACTION_MENU = "agent-switcher:menu";
@@ -52,14 +64,49 @@ function stripBom(text) {
 	return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
 }
 
-async function readModes(host) {
+/** Global profiles (~/.pi/agent-profiles by default). [] if the dir is absent. */
+function readGlobalModes() {
+	const dir = globalDir();
+	if (!existsSync(dir)) return [];
 	let entries = [];
 	try {
-		entries = await host.fs.list(PROFILES_DIR);
+		entries = readdirSync(dir, { withFileTypes: true });
 	} catch {
 		return [];
 	}
 	const modes = [];
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+		const id = entry.name.replace(/\.md$/, "");
+		// Full read: the body is needed to stage .pi/SYSTEM.md on a switch.
+		let description;
+		let body;
+		try {
+			const parsed = parseProfile(readFileSync(join(dir, entry.name), "utf8"));
+			description = parsed.description;
+			body = parsed.body;
+		} catch {
+			/* unreadable profile — id-only label */
+		}
+		modes.push({ id, description, body });
+	}
+	return modes;
+}
+
+/**
+ * Discover modes: global fallback first, then the workspace's own
+ * .pi/agent-profiles (a same-id workspace profile overrides the global one).
+ * The chip stays hidden only when BOTH sources are empty.
+ */
+async function readModes(host) {
+	const merged = new Map();
+	for (const m of readGlobalModes()) merged.set(m.id, m);
+	let entries = [];
+	try {
+		entries = await host.fs.list(PROFILES_DIR);
+	} catch {
+		if (!merged.size) return [];
+	}
 	for (const entry of entries) {
 		if (entry.type !== "file" || !entry.name.endsWith(".md")) continue;
 		// Full read: the body is needed to stage .pi/SYSTEM.md on a switch.
@@ -72,10 +119,9 @@ async function readModes(host) {
 		} catch {
 			/* unreadable profile — id-only label */
 		}
-		modes.push({ id: entry.name.replace(/\.md$/, ""), description, body });
+		merged.set(entry.name.replace(/\.md$/, ""), { id: entry.name.replace(/\.md$/, ""), description, body });
 	}
-	modes.sort((a, b) => a.id.localeCompare(b.id));
-	return modes;
+	return [...merged.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 async function readCurrent(host) {
@@ -134,7 +180,7 @@ export default definePlugin({
 				unregisterUi = null;
 			}
 			if (!modes.length) {
-				host.log("no .pi/agent-profiles/*.md in this workspace — select hidden");
+				host.log(`no agent profiles in this workspace or ${globalDir()} — select hidden`);
 				return;
 			}
 			// kind "action": a composer button. The client bundle restyles it like the

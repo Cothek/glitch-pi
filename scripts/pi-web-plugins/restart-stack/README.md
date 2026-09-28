@@ -109,16 +109,35 @@ which gates every non-`/__auth/` path. The new route inherits the login
 gate for free; no extra wiring is needed. With `PI_WEB_TOKEN` unset, that
 gate is open, which is why this README's Exposure section exists.
 
+## Watchdog
+
+Every restart now also launches `scripts/restart-watchdog.mjs` detached. It
+survives the kill (same breakaway mechanism as the engine), waits for both
+ports to go down (the restart signature), then verifies they come back:
+
+- `success` / `recovered` / `failed` / `no-restart-signal` outcomes
+- writes `data/monitor/restart-report-<ts>.json` + `data/monitor/restart-status.json`
+- on failure: exactly one recovery relaunch (`restart-pi-stack.ps1 -SkipUpdates`)
+- `--no-watchdog` on `restart-request.mjs` opts out; `watchdogSpawned` in the
+  `--json` output reports what happened
+
+The resume note also carries a hint telling the resumed session to read
+`data/monitor/restart-status.json`.
+
 ## Test commands
 
 ```
 node --check scripts/restart-request.mjs
+node --check scripts/restart-watchdog.mjs
 node --check scripts/pi-web-plugins/restart-stack/index.mjs
 node --check scripts/pi-web-plugins/restart-stack/client/entry.mjs
 
 node scripts/pi-web-plugins/restart-stack/index.test.mjs
 node scripts/test/test-restart-request.mjs
+node scripts/test/test-restart-watchdog.mjs
+node scripts/test/test-restart-watchdog-e2e.mjs
 
 node scripts/restart-request.mjs --dry-run --json
 env -u PI_SESSION_FILE node scripts/restart-request.mjs --dry-run --resume
+env -u PI_SESSION_FILE node scripts/restart-request.mjs --dry-run --no-watchdog
 ```

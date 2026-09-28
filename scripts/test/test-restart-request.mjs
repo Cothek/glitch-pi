@@ -14,6 +14,7 @@ import {
   parseArgs,
   resolveResumeNote,
   isSafeSessionValue,
+  buildWatchdogCommand,
 } from "../restart-request.mjs";
 
 test("sanitizeNote: strips shell metacharacters and collapses whitespace", () => {
@@ -146,12 +147,47 @@ test("parseArgs: accepts --session-id on its own", () => {
 
 test("resolveResumeNote: empty-after-sanitize falls back to DEFAULT_NOTE (B3)", () => {
   const DEFAULT_NOTE = "Server restarted on request. Continue where you left off.";
-  assert.equal(resolveResumeNote({ resume: true, note: "" }), DEFAULT_NOTE);
-  assert.equal(resolveResumeNote({ resume: true, note: null }), DEFAULT_NOTE);
-  assert.equal(resolveResumeNote({ resume: true, note: undefined }), DEFAULT_NOTE);
-  assert.equal(resolveResumeNote({ resume: true, note: '  "  ' }), DEFAULT_NOTE);
-  assert.equal(resolveResumeNote({ resume: true, note: "hello" }), "hello");
+  const HEALTH_HINT =
+    " After the stack is back, read data/monitor/restart-status.json to confirm restart health.";
+  assert.equal(resolveResumeNote({ resume: true, note: "" }), DEFAULT_NOTE + HEALTH_HINT);
+  assert.equal(resolveResumeNote({ resume: true, note: null }), DEFAULT_NOTE + HEALTH_HINT);
+  assert.equal(resolveResumeNote({ resume: true, note: undefined }), DEFAULT_NOTE + HEALTH_HINT);
+  assert.equal(resolveResumeNote({ resume: true, note: '  "  ' }), DEFAULT_NOTE + HEALTH_HINT);
+  assert.equal(resolveResumeNote({ resume: true, note: "hello" }), "hello" + HEALTH_HINT);
   assert.equal(resolveResumeNote({ resume: false, note: "ignored" }), "");
+});
+
+test("resolveResumeNote: hint is metacharacter-free (safe for the .cmd file)", () => {
+  const note = resolveResumeNote({ resume: true, note: "x" });
+  assert.ok(!/["%^&|<>\r\n]/.test(note), "hint must survive cmd.exe embedding");
+});
+
+test("buildWatchdogCommand: shape, delay mirror, defaults", () => {
+  const cmd = buildWatchdogCommand({
+    root: "E:\\Glitch AI\\glitch-pi",
+    nodeExe: "E:\\Glitch AI\\glitch-pi\\data\\node\\node.exe",
+    delaySec: 15,
+  });
+  assert.match(cmd, /^"E:\\Glitch AI\\glitch-pi\\data\\node\\node\.exe" "E:\\Glitch AI\\glitch-pi\\scripts\\restart-watchdog\.mjs"/);
+  assert.match(cmd, /--delay 15 --timeout 180 --web-port 8787 --auth-port 4103$/);
+});
+
+test("buildWatchdogCommand: clamps timeout into 30..600 and note only when non-empty", () => {
+  const noNote = buildWatchdogCommand({ root: "r", nodeExe: "n", delaySec: 0, timeoutSec: 5 });
+  assert.match(noNote, /--timeout 30/);
+  assert.doesNotMatch(noNote, /--note/);
+  const hi = buildWatchdogCommand({ root: "r", nodeExe: "n", delaySec: 0, timeoutSec: 9999 });
+  assert.match(hi, /--timeout 600/);
+  const withNote = buildWatchdogCommand({ root: "r", nodeExe: "n", delaySec: 0, note: 'fix "me" & go' });
+  assert.match(withNote, /--note "fix me go"/);
+});
+
+test("parseArgs: --no-watchdog flag", () => {
+  const out = parseArgs(["--no-watchdog"]);
+  assert.equal(out.noWatchdog, true);
+  assert.equal(out.error, null);
+  const off = parseArgs([]);
+  assert.equal(off.noWatchdog, false);
 });
 
 test("isSafeSessionValue: accepts a normal Windows jsonl path with backslashes", () => {

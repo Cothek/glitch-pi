@@ -8,6 +8,14 @@
  * the child it starts is going to kill the process tree it was called from
  * (pi-web-ui, which hosts the agent session).
  *
+ * Also launches scripts/restart-watchdog.mjs detached, AFTER the engine spawn
+ * succeeded: a detached watchdog that survives the kill, verifies the stack
+ * came back, writes data/monitor/restart-report-<ts>.json + restart-status.json,
+ * and attempts exactly one recovery relaunch on failure. The watchdog launch is
+ * additive: if it fails, the restart request still succeeds (a warning goes to
+ * stderr and the JSON output carries watchdogSpawned: false). Opt out with
+ * --no-watchdog.
+ *
  * Two call sites:
  *   - pi-web-ui plugin (POST /restart): plain restart, no resume. The plugin
  *     already knows the session file if needed, but the UI never passes one.
@@ -33,8 +41,16 @@ const RESTART = join(ROOT, "scripts", "restart-pi-stack.ps1");
 const DETACH = join(ROOT, "scripts", "start-detached.ps1");
 const LOGS = join(ROOT, "data", "logs");
 const NAME = "restart-stack";
+const WATCHDOG = join(ROOT, "scripts", "restart-watchdog.mjs");
+const WATCHDOG_NAME = "restart-watchdog";
+const WATCHDOG_TIMEOUT_SEC = 180;
 
 const DEFAULT_NOTE = "Server restarted on request. Continue where you left off.";
+// Appended to every resume note so the post-restart session reads the
+// watchdog's status marker instead of assuming the restart worked.
+// Metacharacter-free on purpose: the note lands inside double quotes in a
+// generated .cmd file parsed by cmd.exe (see sanitizeNote).
+const HEALTH_HINT = " After the stack is back, read data/monitor/restart-status.json to confirm restart health.";
 const DEFAULT_DELAY = 15;
 const MAX_DELAY = 120;
 const MAX_NOTE = 300;
@@ -120,15 +136,37 @@ export function buildInnerCommand({ root, delaySec, continuePath, continueId, co
 }
 
 /**
+ * Build the command line that runs the post-restart watchdog. Mirrors the
+ * engine's -DelaySec so the watchdog's phase-1 deadline (delay + down-wait)
+ * lines up with the engine's kill window. Timeout clamped to 30..600, ports
+ * clamped to 1..65535, note re-sanitized (idempotent) and only emitted when
+ * non-empty. Pure: no FS, no env, no spawning.
+ */
+export function buildWatchdogCommand({ root, nodeExe, delaySec, webPort, authPort, timeoutSec, note }) {
+  const r = String(root ?? "");
+  const node = String(nodeExe ?? "");
+  const d = Math.max(0, Math.floor(Number(delaySec) || 0));
+  const w = Math.max(1, Math.floor(Number(webPort) || 8787));
+  const a = Math.max(1, Math.floor(Number(authPort) || 4103));
+  const t = Math.min(600, Math.max(30, Math.floor(Number(timeoutSec) || WATCHDOG_TIMEOUT_SEC)));
+  let cmd = `"${node}" "${join(r, "scripts", "restart-watchdog.mjs")}" --delay ${d} --timeout ${t} --web-port ${w} --auth-port ${a}`;
+  const n = sanitizeNote(note ?? "");
+  if (n) cmd += ` --note "${n}"`;
+  return cmd;
+}
+
+/**
  * Resolve the continuation note that will be passed to the restart engine.
  *
  * Pure: no FS, no env, no spawning. Pulled out of main() so the B3 fallback
  * rule (empty-after-sanitize -> DEFAULT_NOTE) is testable without spawning.
+ * The resolved note always carries the health hint that tells the resumed
+ * session to read the watchdog's status marker.
  */
 export function resolveResumeNote(parsed) {
   if (!parsed?.resume) return "";
-  const raw = parsed.note ?? "";
-  return sanitizeNote(raw) || DEFAULT_NOTE;
+  const base = sanitizeNote(parsed.note ?? "") || DEFAULT_NOTE;
+  return base + HEALTH_HINT;
 }
 
 /**
@@ -145,6 +183,7 @@ export function parseArgs(argv) {
     session: null,
     sessionId: null,
     applyUpdates: false,
+    noWatchdog: false,
     json: false,
     dryRun: false,
     help: false,
@@ -186,6 +225,8 @@ export function parseArgs(argv) {
       out.sessionId = v;
     } else if (a === "--apply-updates") {
       out.applyUpdates = true;
+    } else if (a === "--no-watchdog") {
+      out.noWatchdog = true;
     } else if (a === "--json") {
       out.json = true;
     } else if (a === "--dry-run") {
@@ -211,6 +252,7 @@ function printHelp() {
     "  --session <path>    session jsonl path (overrides PI_SESSION_FILE)",
     "  --session-id <id>   live conversation id (rarely stable)",
     "  --apply-updates     run scripts/check-updates.mjs --apply --yes before the kill",
+    "  --no-watchdog       skip the post-restart health watchdog",
     "  --json              print one JSON object instead of a short line",
     "  --dry-run           print the inner command, do not spawn",
     "  --help, -h          show this help",
@@ -296,6 +338,18 @@ function main() {
     applyUpdates: parsed.applyUpdates,
   });
 
+  // Post-restart watchdog command (shown in --dry-run; spawned below).
+  // Mirrors the engine delay so the watchdog's phase-1 deadline lines up with
+  // the engine's kill window.
+  const watchdogCommand = parsed.noWatchdog
+    ? null
+    : buildWatchdogCommand({
+        root: ROOT,
+        nodeExe: process.execPath,
+        delaySec: delay,
+        note: parsed.note,
+      });
+
   const pidFile = join(LOGS, `${NAME}.pid`);
   const outLog = join(LOGS, `${NAME}.out.log`);
   const errLog = join(LOGS, `${NAME}.err.log`);
@@ -314,11 +368,14 @@ function main() {
         outLog,
         errLog,
         pidFile,
+        watchdogSpawned: null,
+        watchdogCommand,
       };
       process.stdout.write(JSON.stringify(payload) + "\n");
     } else {
       process.stdout.write(
-        `dry-run: would spawn detached "${inner}" (logs: ${outLog})\n`,
+        `dry-run: would spawn detached "${inner}" (logs: ${outLog})\n` +
+          `watchdog: ${watchdogCommand ?? "disabled (--no-watchdog)"}\n`,
       );
     }
     process.exit(0);
@@ -359,6 +416,43 @@ function main() {
     process.exit(1);
   }
 
+  // ---- Post-restart watchdog (additive: never blocks or fails the request) ----
+  // Launched AFTER the engine spawn succeeded: the engine is already queued,
+  // so a watchdog failure is a warning, not a failed restart request. The
+  // watchdog runs detached via the same start-detached.ps1 mechanism as the
+  // engine, so it survives the kill of this process tree.
+  let watchdogSpawned = false;
+  let watchdogError = null;
+  if (watchdogCommand) {
+    if (!isSafeSessionValue(process.execPath) || !isSafeSessionValue(WATCHDOG)) {
+      watchdogError = "watchdog path contains a shell metacharacter; skipped";
+    } else {
+      try {
+        execFileSync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            DETACH,
+            "-Command",
+            watchdogCommand,
+            "-Name",
+            WATCHDOG_NAME,
+          ],
+          { timeout: 20_000, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+        );
+        watchdogSpawned = true;
+      } catch (err) {
+        watchdogError = err?.message ?? String(err);
+      }
+    }
+  }
+  if (watchdogError) {
+    process.stderr.write(`restart-request: watchdog not launched: ${watchdogError}\n`);
+  }
+
   const pid = readPidFile();
   if (parsed.json) {
     process.stdout.write(
@@ -374,11 +468,13 @@ function main() {
         outLog,
         errLog,
         pidFile,
+        watchdogSpawned,
+        watchdogCommand,
       }) + "\n",
     );
   } else {
     process.stdout.write(
-      `restart queued${parsed.resume ? " (resume)" : ""}${parsed.applyUpdates ? " (+updates)" : ""} delay=${delay}s pid=${pid ?? "?"} log=${outLog}\n`,
+      `restart queued${parsed.resume ? " (resume)" : ""}${parsed.applyUpdates ? " (+updates)" : ""} delay=${delay}s pid=${pid ?? "?"} log=${outLog}${watchdogSpawned ? " +watchdog" : ""}\n`,
     );
   }
   process.exit(0);

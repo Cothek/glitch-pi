@@ -9,15 +9,17 @@
  * Does NOT replace default summarization — returns undefined so Pi's
  * default compaction runs (same fallback pattern as custom-compaction.ts).
  *
- * Paths: Glitch memory root is the glitch-ai checkout (canonical), same
- * convention as memory-tools.ts recall DB.
+ * Paths: Glitch memory root is the glitch-pi checkout (unified 2026-09-29:
+ * glitch-pi/user is the live memory repo, also junction-aliased at
+ * ~/.pi/agent/user). Same convention as memory-tools.ts recall DB.
+ * glitch-ai/user is the frozen legacy backup (pre-pi era) — do not write there.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const GLITCH_ROOT = "E:/Glitch AI/glitch-ai";
+const GLITCH_ROOT = "E:/Glitch AI/glitch-pi";
 const USER_DIR = path.join(GLITCH_ROOT, "user");
 const CURRENT_SESSION = path.join(USER_DIR, "current-session.md");
 const DIARY_DIR = path.join(USER_DIR, "daily-diary", "current");

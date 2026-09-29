@@ -358,25 +358,11 @@ export default function (pi: ExtensionAPI) {
       "default";
     currentSessionID = String(sid);
 
-    // Tell the model which plan file it owns so it never has to guess (and
-    // never touches another session's). Best-effort: if this fails silently,
-    // the gate's block reasons carry the same information.
-    try {
-      pi.sendMessage(
-        {
-          customType: "plan-session-info",
-          content:
-            `Plan-First: this session's plan file is ${sessionPlanPath(currentSessionID)}. ` +
-            `Write complex-task plans there BEFORE editing code files (plan-first skill). ` +
-            `When the task is done, archive ONLY this file to data/plans/archive/<YYYY-MM-DD>-<short-task-name>.md. ` +
-            `Other sessions' plan files (data/plans/sessions/<other-id>/...) are read-only to you — the gate blocks cross-session plan writes, moves, and deletes.`,
-          display: true,
-        },
-        { deliverAs: "nextTurn" },
-      );
-    } catch {
-      // announce is best-effort; the block reasons repeat the paths anyway
-    }
+    // R17: Auto-Rename Conversations
+    // Emit rename marker based on first user message title.
+    // The title will be generated when the first message is processed.
+    // Store a flag to track this is a new session.
+    sessionRenamed = false;
   });
 
   // --- Pre-tool gates: plan-first + dispatch-first + review gate ---

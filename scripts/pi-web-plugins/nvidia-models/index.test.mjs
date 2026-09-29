@@ -13,7 +13,9 @@
  *   - contain no absolute path (no `E:\...`, no `/...`, no backslash roots)
  *   - round-trip through `/\s+/` exactly to the intended argv (no quoting
  *     happens in host.bash; one space inside a token would split it)
- *   - use cwd "." so the host's workspace-resolve always passes
+ *   - use opts.cwd = the absolute repo root (GLITCH_PI_ROOT in tests) — the
+ *     host resolves cwd with path.resolve() and never tokenizes it, so the
+ *     embedded space is safe; the command itself stays absolute-free
  *   - have `--json` as its last token
  *
  * The dedicated group "every route produces a whitespace-free, absoluteless
@@ -105,6 +107,12 @@ function createMockHost({ bashStub } = {}) {
 function writeStateFixture(root, ids) {
   const dir = join(root, "data");
   mkdirSync(dir, { recursive: true });
+  // pickNodeToken() checks <root>/data/node/node.exe — stub it so the
+  // runtime command uses the bundled-node token, matching buildEngineArgv's
+  // canonical shape. The stub is never executed; the mock bash ignores it.
+  const nodeDir = join(root, "data", "node");
+  mkdirSync(nodeDir, { recursive: true });
+  writeFileSync(join(nodeDir, "node.exe"), "stub", "utf-8");
   const file = join(dir, "nvidia-models-state.json");
   writeFileSync(
     file,
@@ -245,8 +253,9 @@ await group("/status: argv is whitespace-free, contains no absolute path, --json
     assert.equal(out.status, 200);
     // The /status call's argv must match the canonical shape from buildEngineArgv.
     const argv = assertCommandShape(lastBash(host).cmd, buildEngineArgv("--status"), { label: "GET /status" });
-    // cwd is "." so the host's workspace-resolve always passes.
-    assert.equal(lastBash(host).opts.cwd, ".", "GET /status: opts.cwd must be \".\"");
+    // cwd is the absolute repo root (the fixture in tests) — resolves the
+    // engine regardless of the server's or session's cwd.
+    assert.equal(lastBash(host).opts.cwd, fixtureRoot, "GET /status: opts.cwd must be the repo root");
     assert.equal(lastBash(host).opts.timeoutMs, 60_000, "GET /status: timeoutMs must be 60s");
     // Print the exact token list inline so the operator can eyeball it.
     console.log(`  GET /status argv: ${JSON.stringify(argv)}`);
@@ -279,11 +288,10 @@ await group("/status returns parsed engine JSON plus healthy and cli_present fla
     assert.equal(out.status, 200);
     assert.equal(out.body.ok, true);
     assert.equal(out.body.healthy, true);
-    // cli_present reflects whether scripts/nvidia-models.mjs exists on disk
-    // relative to the host's cwd (the repo root in production). The test's
-    // cwd is the repo root, so the plugin's existsSync call checks the real
-    // engine file, not the fixture one. Both are valid mirrors of disk state.
-    const expectedCliPresent = existsSync("scripts/nvidia-models.mjs");
+    // cli_present mirrors whether scripts/nvidia-models.mjs exists under the
+    // repo root (GLITCH_PI_ROOT = fixtureRoot here, so the fixture's disk
+    // state — engine absent — is the expected mirror).
+    const expectedCliPresent = existsSync(join(fixtureRoot, "scripts/nvidia-models.mjs"));
     assert.equal(out.body.cli_present, expectedCliPresent, "cli_present must mirror on-disk engine presence");
     assert.equal(out.body.catalog_total, 82);
     assert.equal(out.body.chat_total, 56);
@@ -307,8 +315,9 @@ await group("/status when the engine is missing: cli_present false, no throw, HT
     assert.equal(out.status, 503);
     assert.equal(out.body.ok, false);
     assert.equal(out.body.healthy, false);
-    // cli_present reflects disk state; the bash failure drives the 503.
-    const expectedCliPresent = existsSync("scripts/nvidia-models.mjs");
+    // cli_present mirrors the fixture's disk state (engine absent there) —
+    // resolved against the repo root, not the test's process cwd.
+    const expectedCliPresent = existsSync(join(fixtureRoot, "scripts/nvidia-models.mjs"));
     assert.equal(out.body.cli_present, expectedCliPresent, "cli_present must mirror disk state, independent of bash");
     assert.match(out.body.error ?? "", /command not found|engine exited|unavailable/);
   } finally {
@@ -329,7 +338,7 @@ await group("POST /sync: argv is whitespace-free, contains no absolute path, --j
     const out = await callRoute(host.routes, "POST", "/sync", undefined);
     assert.equal(out.status, 200);
     const argv = assertCommandShape(lastBash(host).cmd, buildEngineArgv("--sync"), { label: "POST /sync" });
-    assert.equal(lastBash(host).opts.cwd, ".", "POST /sync: opts.cwd must be \".\"");
+    assert.equal(lastBash(host).opts.cwd, fixtureRoot, "POST /sync: opts.cwd must be the repo root");
     assert.equal(lastBash(host).opts.timeoutMs, 180_000, "POST /sync: timeoutMs must be 180s");
     console.log(`  POST /sync argv: ${JSON.stringify(argv)}`);
   } finally {
@@ -355,7 +364,7 @@ await group("POST /set with a valid id: argv is --enable <id> --json, no whitesp
     assert.equal(out.status, 200);
     assert.equal(out.body.ok, true);
     const argv = assertCommandShape(lastBash(host).cmd, buildEngineArgv("--enable", "z-ai/glm-5.3"), { label: "POST /set" });
-    assert.equal(lastBash(host).opts.cwd, ".", "POST /set: opts.cwd must be \".\"");
+    assert.equal(lastBash(host).opts.cwd, fixtureRoot, "POST /set: opts.cwd must be the repo root");
     assert.equal(lastBash(host).opts.timeoutMs, 180_000, "POST /set: timeoutMs must be 180s");
     assert.ok(!lastBash(host).cmd.includes(";"), "id is one argv token, not a shell fragment");
     console.log(`  POST /set (enable) argv: ${JSON.stringify(argv)}`);
@@ -421,7 +430,7 @@ await group("POST /bulk action=recommended: argv is --apply-recommended --json",
     const out = await callRoute(host.routes, "POST", "/bulk", { action: "recommended" });
     assert.equal(out.status, 200);
     const argv = assertCommandShape(lastBash(host).cmd, buildEngineArgv("--apply-recommended"), { label: "POST /bulk recommended" });
-    assert.equal(lastBash(host).opts.cwd, ".", "POST /bulk: opts.cwd must be \".\"");
+    assert.equal(lastBash(host).opts.cwd, fixtureRoot, "POST /bulk: opts.cwd must be the repo root");
     assert.equal(lastBash(host).opts.timeoutMs, 180_000, "POST /bulk: timeoutMs must be 180s");
     console.log(`  POST /bulk (recommended) argv: ${JSON.stringify(argv)}`);
   } finally {
@@ -480,7 +489,7 @@ await group("POST /restore: argv is --restore-backup --json", async () => {
     const out = await callRoute(host.routes, "POST", "/restore", undefined);
     assert.equal(out.status, 200);
     const argv = assertCommandShape(lastBash(host).cmd, buildEngineArgv("--restore-backup"), { label: "POST /restore" });
-    assert.equal(lastBash(host).opts.cwd, ".", "POST /restore: opts.cwd must be \".\"");
+    assert.equal(lastBash(host).opts.cwd, fixtureRoot, "POST /restore: opts.cwd must be the repo root");
     assert.equal(lastBash(host).opts.timeoutMs, 180_000, "POST /restore: timeoutMs must be 180s");
     console.log(`  POST /restore argv: ${JSON.stringify(argv)}`);
   } finally {
@@ -527,12 +536,12 @@ await group("every route produces a whitespace-free, absoluteless argv", async (
       // Round-trip: joining the tokens back with a single space must equal the command.
       assert.equal(argv.join(" "), cmd, `command is not a clean token-join: ${cmd}`);
     }
-    // All commands used cwd ".".
+    // All commands used the absolute repo-root cwd (the fixture).
     for (const { opts } of captured) {
-      assert.equal(opts.cwd, ".", `bash call did not use cwd=".": ${JSON.stringify(opts)}`);
+      assert.equal(opts.cwd, fixtureRoot, `bash call did not use the repo root as cwd: ${JSON.stringify(opts)}`);
     }
     // Print the captured argv lists, one per line, so the operator can eyeball them.
-    console.log(`  ${captured.length} bash calls captured; all use cwd="." and end with --json:`);
+    console.log(`  ${captured.length} bash calls captured; all use the repo-root cwd and end with --json:`);
     for (const { cmd } of captured) {
       const argv = cmd.trim().split(/\s+/).filter(Boolean);
       console.log(`    ${JSON.stringify(argv)}`);

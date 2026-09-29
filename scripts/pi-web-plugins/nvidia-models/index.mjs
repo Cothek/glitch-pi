@@ -50,11 +50,19 @@ import { join } from "node:path";
  * be whitespace-free, and the absolute repo path "E:\Glitch AI\glitch-pi"
  * would split into 3 tokens and silently break every route.
  *
- * Solution: build the command only from space-free relative tokens:
+ * Solution: keep the COMMAND absolute-free (space-free relative tokens):
  *   <node> scripts/nvidia-models.mjs <verb> [id...] --json
- * where <node> is `data/node/node.exe` (relative, no whitespace). The host
- * resolves opts.cwd against the workspace; setting cwd to "." (the
- * workspace root, which IS the repo root here) keeps every path relative.
+ * where <node> is `data/node/node.exe` (relative to the repo root, no
+ * whitespace). opts.cwd, however, is an OPTION — the host resolves it with
+ * path.resolve() and never tokenizes it — so we pass the ABSOLUTE repo
+ * root (its embedded space is safe there). host.bash used to get cwd "."
+ * (= the host's workspace root), which silently resolved the engine as
+ * E:\Glitch AI\scripts\nvidia-models.mjs the moment sessions ran with
+ * cwd E:\Glitch AI instead of glitch-pi — every route broke with
+ * "Cannot find module". The absolute cwd pins engine resolution to the
+ * repo regardless of the server's or session's cwd. Caveat: the host's
+ * workspace gate (isInsideWorkspace) must contain the repo root — true
+ * for every E:\Glitch AI / glitch-pi session.
  *
  * ROOT is resolved lazily on every call so the plugin honors a
  * GLITCH_PI_ROOT change made by tests (or by a launcher script) without
@@ -113,7 +121,11 @@ export function buildEngineArgv(verb, ids) {
  */
 function pickNodeToken() {
   try {
-    if (existsSync(nodeRelativePath())) return nodeRelativePath();
+    // Absolute existence check against the repo root (the server process
+    // cwd is NOT the repo root when sessions run from a parent directory),
+    // but the returned TOKEN stays relative — execFile resolves it against
+    // the cwd option (repoRoot()), keeping the command string space-free.
+    if (existsSync(join(repoRoot(), nodeRelativePath()))) return nodeRelativePath();
   } catch {
     /* fall through */
   }
@@ -240,19 +252,20 @@ export function createPlugin() {
    * so the command must be built from space-free tokens. The argv layout is
    *   [node, "scripts/nvidia-models.mjs", ...verbTokens, ...ids, "--json"]
    * with `--json` always last. The bundled node tries first; on ENOENT or a
-   * sandbox error we fall back to a bare `node` once. cwd is "." (workspace
-   * root), which is the only path that resolves inside the workspace.
+   * sandbox error we fall back to a bare `node` once. cwd is the ABSOLUTE
+   * repo root (repoRoot()) — an option, not a token, so its space is safe —
+   * pinning engine resolution to the repo regardless of session cwd.
    */
   async function runEngine(verbTokens, ids, timeoutMs, hostRef) {
     const idsArr = Array.isArray(ids) ? ids : ids ? [ids] : [];
     const baseArgv = [pickNodeToken(), engineRelativePath(), ...verbTokens, ...idsArr, "--json"];
     let cmd = baseArgv.join(" ");
-    let res = await hostRef.bash(cmd, { cwd: ".", timeoutMs });
+    let res = await hostRef.bash(cmd, { cwd: repoRoot(), timeoutMs });
     if (!res?.ok && /ENOENT|no such file|not found|sandbox/i.test(res?.error ?? "")) {
       // Bundled runtime hidden: try the PATH fallback once.
       const fallbackArgv = [nodeFallback(), engineRelativePath(), ...verbTokens, ...idsArr, "--json"];
       cmd = fallbackArgv.join(" ");
-      res = await hostRef.bash(cmd, { cwd: ".", timeoutMs });
+      res = await hostRef.bash(cmd, { cwd: repoRoot(), timeoutMs });
     }
     if (!res || !res.ok) {
       return {
@@ -324,7 +337,7 @@ export function createPlugin() {
           return localStatusCache.value;
         }
         const result = await runEngine(["--status"], [], STATUS_TIMEOUT_MS, host);
-        const cli_present = existsSync(engineRelativePath());
+        const cli_present = existsSync(join(repoRoot(), engineRelativePath()));
         const healthy = result.ok === true;
         const payload = {
           ok: healthy,

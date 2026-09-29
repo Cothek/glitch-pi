@@ -26,9 +26,10 @@
             "additionalProperties": {
               "type": "object",
               "properties": {
-                "url": { "type": "string" },
-                "archive": { "type": "string", "description": "Archive type hint for extractor (zip, targz, or empty for raw binaries)." },
-                "extract": { "type": "array", "items": { "type": "string" } }
+                "url": { "type": "string", "description": "Download URL. Supports ${version} (cleaned semver), ${tag} (raw release tag) and ${arch} (x64|arm64) templates resolved at apply time." },
+                "archive": { "type": "string", "description": "Archive type for the extractor: zip, msi, or empty for raw binaries." },
+                "extract": { "type": "array", "items": { "type": "string" }, "description": "File(s) to locate inside the extracted payload." },
+                "replaceDir": { "type": "string", "description": "For zip payloads: repo-relative directory the extracted root replaces wholesale (e.g. data/node). Implies a directory swap with rollback." }
               },
               "additionalProperties": true
             }
@@ -45,6 +46,15 @@
           "latestUrl": {
             "type": "string",
             "description": "Optional URL that resolves to the latest release. For github releases/latest URLs, the subsystem follows the redirect and parses the tag."
+          },
+          "versionStrategy": {
+            "type": "string",
+            "enum": ["probe", "filedate"],
+            "description": "How the installed state is judged: probe (default) runs the binary's --version; filedate compares the binary's mtime with the release published date (for binaries with no version flag, e.g. Handy)."
+          },
+          "restoreNpmGlobals": {
+            "type": "boolean",
+            "description": "For replaceDir payloads that wipe data/node (the npm global prefix): snapshot every npm tool's installed version before the swap and reinstall them after."
           }
         }
       }

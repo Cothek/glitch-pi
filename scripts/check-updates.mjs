@@ -16,7 +16,8 @@ import {
   copyFileSync,
   createWriteStream,
   readdirSync,
-  renameSync
+  renameSync,
+  utimesSync
 } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
@@ -345,6 +346,130 @@ function followGithubLatest(url) {
   });
 }
 
+// ── Node.js latest version via nodejs.org/dist/index.json ──────────────────
+
+export async function fetchNodejsLatest() {
+  return new Promise((resolve) => {
+    const url = 'https://nodejs.org/dist/index.json';
+    const transport = httpsRequest;
+    const req = transport(url, { method: 'GET', timeout: HTTP_TIMEOUT_MS }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const releases = JSON.parse(data);
+          // Find the latest LTS release
+          const latestLTS = releases.find((r) => r.lts !== false && r.version);
+          if (latestLTS) {
+            resolve({ tag: latestLTS.version, cleaned: latestLTS.version.replace(/^v/i, '') });
+          } else {
+            // Fallback to latest release
+            const latest = releases.find((r) => r.version);
+            if (latest) {
+              resolve({ tag: latest.version, cleaned: latest.version.replace(/^v/i, '') });
+            } else {
+              resolve(null);
+            }
+          }
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+// ── Latest-release metadata + shared update decision ───────────────────────
+
+// The releases/latest redirect yields only the tag. Filedate tools
+// (Handy: no --version flag) also need the release PUBLISHED date, so they
+// take the API path instead. User-Agent is mandatory (GitHub 403s without it).
+function apiUrlFor(latestUrl) {
+  try {
+    const parsed = new URL(latestUrl);
+    const m = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/releases\/latest$/i);
+    if (!m) return null;
+    return `https://api.github.com/repos/${m[1]}/${m[2]}/releases/latest`;
+  } catch { return null; }
+}
+
+function fetchGithubReleaseMeta(latestUrl) {
+  const apiUrl = apiUrlFor(latestUrl);
+  if (!apiUrl) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const req = httpsRequest(apiUrl, {
+      method: 'GET',
+      timeout: HTTP_TIMEOUT_MS,
+      headers: { 'User-Agent': 'glitch-pi-update-check', 'Accept': 'application/vnd.github+json' }
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed && parsed.tag_name) {
+            resolve({ tag: parsed.tag_name, cleaned: parsed.tag_name.replace(/^v/i, ''), publishedAt: parsed.published_at || null });
+          } else {
+            resolve(null);
+          }
+        } catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+// One dispatcher for "what is the latest" per binary tool: nodejs.org JSON,
+// GitHub API (filedate tools need publishedAt), GitHub redirect otherwise.
+function fetchLatestForTool(tool) {
+  if (!tool.latestUrl) return Promise.resolve(null);
+  if (/^https?:\/\/nodejs\.org\//i.test(tool.latestUrl)) return fetchNodejsLatest();
+  if (tool.versionStrategy === 'filedate') return fetchGithubReleaseMeta(tool.latestUrl);
+  return followGithubLatest(tool.latestUrl);
+}
+
+// Single source of truth for "does this binary tool need an update" - used
+// by the status check, the interactive prompt, and the apply path so the
+// three can never disagree.
+//   probe tools (cloudflared, node):     compare probed versions
+//   filedate tools (Handy):              compare binary mtime with the
+//                                         release published date (no --version flag exists)
+//   missing binary:                      install (the manifest declares the
+//                                         tool belongs on this machine)
+export async function binaryUpdateNeeded(tool, cwd) {
+  const meta = await fetchLatestForTool(tool);
+  if (!meta) return { error: `latest lookup failed for ${tool.latestUrl}` };
+  const binPath = join(cwd, tool.binary);
+  if (tool.versionStrategy === 'filedate') {
+    if (!existsSync(binPath)) {
+      return { needed: true, current: 'not installed', latest: meta.cleaned, tag: meta.tag };
+    }
+    let mtime = null;
+    try { mtime = statSync(binPath).mtime; } catch {}
+    if (!mtime) return { needed: true, current: 'unknown (file date)', latest: meta.cleaned, tag: meta.tag };
+    const published = meta.publishedAt ? new Date(meta.publishedAt) : null;
+    const needed = published ? mtime.getTime() < published.getTime() : false;
+    return {
+      needed,
+      current: `${mtime.toISOString().slice(0, 10)} (file date)`,
+      latest: meta.cleaned,
+      tag: meta.tag
+    };
+  }
+  const current = await readBinaryInstalledVersion(cwd, tool.binary);
+  return {
+    needed: !current || isHigher(meta.cleaned, current),
+    current: current || 'not installed',
+    latest: meta.cleaned,
+    tag: meta.tag
+  };
+}
+
 // ── Backup + rollback for npm install ───────────────────────────────────────
 
 function backupRoot(cwd) {
@@ -591,31 +716,181 @@ function downloadToTemp(url, depth = 0) {
   });
 }
 
-async function applyBinaryUpdate(tool, latestVersion, cwd) {
+// ── Archive + tree helpers (zip via Expand-Archive, msi via msiexec /a) ─────
+
+function extractZip(zipPath, destDir) {
+  if (process.platform === 'win32') {
+    const ps = `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`;
+    return runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { timeout: 300_000, windowsHide: true });
+  }
+  return runProcess('unzip', ['-o', zipPath, '-d', destDir], { timeout: 300_000 });
+}
+
+// /a = administrative install: extracts the MSI payload WITHOUT installing
+// anything; /qn keeps it silent. Windows-only by definition.
+function extractMsi(msiPath, destDir) {
+  if (process.platform !== 'win32') {
+    return Promise.resolve({ success: false, status: -1, stderr: 'msi archives are Windows-only' });
+  }
+  return runProcess('msiexec.exe', ['/a', msiPath, '/qn', `TARGETDIR=${destDir}`], { timeout: 300_000, windowsHide: true });
+}
+
+function findFileInTree(root, wanted) {
+  const target = String(wanted || '').toLowerCase();
+  if (!target) return null;
+  const walk = (dir) => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const found = walk(full);
+        if (found) return found;
+      } else if (entry.name.toLowerCase() === target) {
+        return full;
+      }
+    }
+    return null;
+  };
+  return walk(root);
+}
+
+function copyDirContents(src, dest) {
+  mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src)) {
+    copyRecursiveSync(join(src, entry), join(dest, entry));
+  }
+}
+
+// Carry files the new payload lacks but the previous install had (MSI
+// extraction can drop merge-module payloads like the VC++ runtime).
+function mergeMissingFiles(fromDir, intoDir) {
+  let merged = 0;
+  const walk = (src, dest) => {
+    let entries;
+    try { entries = readdirSync(src, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const srcPath = join(src, entry.name);
+      const destPath = join(dest, entry.name);
+      if (entry.isDirectory()) {
+        mkdirSync(destPath, { recursive: true });
+        walk(srcPath, destPath);
+      } else if (!existsSync(destPath)) {
+        try { copyFileSync(srcPath, destPath); merged++; } catch {}
+      }
+    }
+  };
+  walk(fromDir, intoDir);
+  return merged;
+}
+
+// Stop ONLY the process whose executable path matches - never kill by name
+// alone (R22: a name match can hit unrelated processes).
+function stopProcessByExePath(exePath) {
+  if (process.platform !== 'win32') return Promise.resolve(false);
+  const ps = `$ErrorActionPreference='SilentlyContinue'; $p = Get-Process | Where-Object { $_.Path -eq '${exePath.replace(/'/g, "''")}' }; if ($p) { $p | Stop-Process -Force; 'stopped' } else { 'none' }`;
+  return runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { timeout: 30_000, windowsHide: true })
+    .then((res) => (res.stdout || '').includes('stopped'));
+}
+
+// rename can fail transiently while a just-killed process drains its
+// handles; retry instead of failing the whole update.
+async function renameWithRetry(from, to, tries = 10, delayMs = 500) {
+  for (let i = 0; i < tries; i++) {
+    try { renameSync(from, to); return true; } catch {}
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return false;
+}
+
+function sameVersion(a, b) {
+  const norm = (v) => String(v || '').trim().replace(/^v/i, '');
+  return norm(a) === norm(b);
+}
+
+// data/node IS the npm global prefix, so replacing the Node tree wipes every
+// installed global (pi, pi-web-ui, gitnexus). Capture the exact installed
+// versions first and reinstall those after the swap - the user's chosen
+// versions win; @latest only when the pre-swap version is unknown.
+const RESTORE_TIMEOUT_MS = 600_000;
+
+async function snapshotNpmGlobals(cwd) {
+  const { manifest } = readManifest(cwd);
+  const snap = [];
+  if (!manifest) return snap;
+  for (const t of manifest.tools || []) {
+    if (t.type !== 'npm' || t.updateType === 'none') continue;
+    snap.push({ name: t.name, package: t.package, version: await readNpmInstalledVersion(cwd, t.package) });
+  }
+  return snap;
+}
+
+async function restoreNpmGlobals(cwd, snap) {
+  const failed = [];
+  for (const entry of snap) {
+    const spec = entry.version ? `${entry.package}@${entry.version}` : `${entry.package}@latest`;
+    const [npmCmd, npmArgv] = bundledNpmInvocation(cwd);
+    const res = await runProcess(npmCmd, [...npmArgv, 'i', '-g', spec], { timeout: RESTORE_TIMEOUT_MS, env: buildNpmEnv(cwd) });
+    if (!res.success) { failed.push(entry.name); continue; }
+    if (!(await readNpmInstalledVersion(cwd, entry.package))) failed.push(entry.name);
+  }
+  return { failed };
+}
+
+// ── Binary apply: dispatcher + per-shape handlers ───────────────────────────
+
+// URL templates, resolved at apply time from the LATEST probe so a
+// versioned asset URL never goes stale:
+//   ${version} = cleaned semver (asset names, e.g. Handy_0.9.7_x64_en-US.msi)
+//   ${tag}     = raw release tag (dist paths, e.g. nodejs.org/dist/v24.21.0/)
+//   ${arch}    = x64 | arm64
+export async function applyBinaryUpdate(tool, latestVersion, cwd, latestTag = null) {
   const platform = tool.platforms?.[process.platform];
   if (!platform || !platform.url) return { ok: false, error: 'no platform config' };
+  const tag = latestTag != null ? String(latestTag) : `v${latestVersion}`;
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  const url = String(platform.url)
+    .replace(/\$\{version\}/g, String(latestVersion))
+    .replace(/\$\{tag\}/g, tag)
+    .replace(/\$\{arch\}/g, arch);
   const target = join(cwd, tool.binary);
-  const dlRes = await downloadToTemp(platform.url);
-  if (!dlRes.ok) return { ok: false, error: dlRes.error };
-
-  // Probe the freshly downloaded file before touching the live target.
-  const probe = await probeBinary(dlRes.path);
-  if (!probe.success) {
+  const dlRes = await downloadToTemp(url);
+  try {
+    if (!dlRes.ok) return { ok: false, error: `download failed: ${dlRes.error}` };
+    if (platform.archive === 'msi') return await applyMsiArchiveUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
+    if (platform.archive === 'zip') return await applyZipArchiveUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
+    return await applyDirectBinaryUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
+  } finally {
     try { rmSync(dlRes.path, { force: true }); } catch {}
+  }
+}
+
+// Plain binary download (e.g. cloudflared). Windows locks a running exe
+// against overwrite, so the live file is renamed aside first - renaming a
+// running executable's directory entry works even while it executes.
+async function applyDirectBinaryUpdate(tool, dlPath, target, cwd, latestVersion, platform) {
+  // The download temp file can lack the target's extension (redirect URLs
+  // and name sanitizing); Windows needs .exe to execute it for the probe.
+  let probePath = dlPath;
+  if (process.platform === 'win32' && /\.(exe|bat|cmd)$/i.test(target) && !/\.(exe|bat|cmd)$/i.test(dlPath)) {
+    const ext = (target.match(/(\.[a-z]+)$/i) || [])[1] || '.exe';
+    const withExt = dlPath + ext;
+    try { rmSync(withExt, { force: true }); } catch {}
+    renameSync(dlPath, withExt);
+    probePath = withExt;
+  }
+
+  const probe = await probeBinary(probePath);
+  if (!probe.success) {
+    try { rmSync(probePath, { force: true }); } catch {}
     return { ok: false, error: 'downloaded binary failed version probe' };
   }
 
-  // Snapshot the live binary, if there is one AND we know its version, so
-  // a successful replace remains roll-backable. The probe-based version
-  // lookup is the same the pre-flight uses; if it fails we have no name
-  // for the backup, so skip the snapshot rather than write a misnamed
-  // entry. Backup failures must never leave the live target missing, so a
-  // backup that fails only reports the error and the live target stays.
+  // Snapshot the live binary (when its version is known) so the replace
+  // stays roll-backable. A failed backup must never touch the live target.
   if (existsSync(target)) {
     let currentVersion = null;
-    try {
-      currentVersion = await readBinaryInstalledVersion(cwd, target);
-    } catch {}
+    try { currentVersion = await readBinaryInstalledVersion(cwd, target); } catch {}
     if (currentVersion) {
       const backupPath = join(binaryBackupRoot(cwd), `${flattenPackageName(tool.binary)}@${currentVersion}`);
       try {
@@ -623,7 +898,6 @@ async function applyBinaryUpdate(tool, latestVersion, cwd) {
         rmSync(backupPath, { recursive: true, force: true });
         copyFileSync(target, backupPath);
       } catch (err) {
-        try { rmSync(dlRes.path, { force: true }); } catch {}
         return { ok: false, error: `backup of current binary failed: ${err.message}; live target at ${target} left untouched` };
       }
     }
@@ -631,20 +905,144 @@ async function applyBinaryUpdate(tool, latestVersion, cwd) {
 
   mkdirSync(dirname(target), { recursive: true });
   const staging = `${target}.new`;
+  const oldTarget = `${target}.old`;
   try {
-    // Stage the new binary beside the live target, then rename over it.
-    // rename is atomic on the same volume, so the live file is never half
-    // written. If rename fails, the live target is unchanged and the
-    // .new file is removed.
-    copyFileSync(dlRes.path, staging);
+    copyFileSync(probePath, staging);
+    if (existsSync(target)) {
+      try { rmSync(oldTarget, { force: true }); } catch {}
+      renameSync(target, oldTarget);
+    }
     renameSync(staging, target);
-    try { rmSync(dlRes.path, { force: true }); } catch {}
+    // Old binary may still be held by a running process; cleaned later.
+    try { rmSync(oldTarget, { force: true }); } catch {}
     await pruneBinaryBackups(cwd, tool.binary);
     return { ok: true };
   } catch (err) {
+    if (existsSync(oldTarget) && !existsSync(target)) {
+      try { renameSync(oldTarget, target); } catch {}
+    }
     try { rmSync(staging, { force: true }); } catch {}
-    try { rmSync(dlRes.path, { force: true }); } catch {}
     return { ok: false, error: `target locked: ${target}: ${err.message}` };
+  } finally {
+    try { if (probePath !== dlPath) rmSync(probePath, { force: true }); } catch {}
+  }
+}
+
+// Zip archives. With replaceDir set (the bundled Node tree) the whole
+// directory is swapped: rename the live tree aside, copy the fresh one in,
+// restore the npm globals the swap wiped, roll everything back on failure.
+async function applyZipArchiveUpdate(tool, dlPath, target, cwd, latestVersion, platform) {
+  const extractDir = join(tmpdir(), `glitch-zip-${Date.now()}`);
+  mkdirSync(extractDir, { recursive: true });
+  try {
+    const ex = await extractZip(dlPath, extractDir);
+    if (!ex.success) {
+      return { ok: false, error: `zip extract failed: ${ex.stderr || ex.error || `status ${ex.status}`}` };
+    }
+    const wanted = (platform.extract || [])[0];
+    const found = findFileInTree(extractDir, wanted);
+    if (!found) {
+      return { ok: false, error: `extracted archive does not contain ${wanted || '(no extract list)'}` };
+    }
+    const rootDir = dirname(found);
+    // Verify the payload actually reports the expected version before it
+    // goes anywhere near the live tree.
+    const probe = await probeBinary(found);
+    if (!probe.success) return { ok: false, error: `extracted ${wanted} failed version probe` };
+    const m = probe.output.match(/v?(\d+\.\d+(?:\.\d+)?)/);
+    if (!m || !sameVersion(m[1], latestVersion)) {
+      return { ok: false, error: `extracted version ${m ? m[1] : 'unknown'} does not match expected ${latestVersion}` };
+    }
+
+    if (platform.replaceDir) {
+      const dest = join(cwd, platform.replaceDir);
+      const oldDir = `${dest}.old`;
+      let snap = [];
+      if (tool.restoreNpmGlobals) snap = await snapshotNpmGlobals(cwd);
+      try { rmSync(oldDir, { recursive: true, force: true }); } catch {}
+      let renamed = false;
+      if (existsSync(dest)) {
+        renamed = await renameWithRetry(dest, oldDir);
+        if (!renamed) return { ok: false, error: `could not move ${dest} aside (${oldDir} locked?) - nothing changed` };
+      }
+      try {
+        mkdirSync(dest, { recursive: true });
+        copyDirContents(rootDir, dest);
+      } catch (err) {
+        // The live tree must never be left partial: undo the swap.
+        try { rmSync(dest, { recursive: true, force: true }); } catch {}
+        if (renamed) { try { renameSync(oldDir, dest); } catch {} }
+        return { ok: false, error: `copying extracted tree failed: ${err.message}; rolled back` };
+      }
+      if (tool.restoreNpmGlobals) {
+        const rr = await restoreNpmGlobals(cwd, snap);
+        if (rr.failed.length > 0) {
+          // A stack that cannot start is worse than a skipped update.
+          try { rmSync(dest, { recursive: true, force: true }); } catch {}
+          if (renamed) { try { renameSync(oldDir, dest); } catch {} }
+          return { ok: false, error: `npm global restore failed (${rr.failed.join(', ')}) - node tree rolled back` };
+        }
+      }
+      // The old tree may still be held by running processes (node.exe locks
+      // its own dir until exit); the next update with the stack down cleans it.
+      try { rmSync(oldDir, { recursive: true, force: true }); } catch {}
+      await pruneBinaryBackups(cwd, tool.binary);
+      return { ok: true };
+    }
+
+    // Plain single-file zip payload: reuse the direct replace logic.
+    return await applyDirectBinaryUpdate(tool, found, target, cwd, latestVersion, platform);
+  } finally {
+    try { rmSync(extractDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// MSI archives (Handy voice). msiexec /a extracts the payload; the app dir
+// is swapped whole, with the previous install's extra files merged in.
+async function applyMsiArchiveUpdate(tool, dlPath, target, cwd, latestVersion, platform) {
+  if (process.platform !== 'win32') return { ok: false, error: 'msi archives are Windows-only' };
+  const extractDir = join(tmpdir(), `glitch-msi-${Date.now()}`);
+  mkdirSync(extractDir, { recursive: true });
+  try {
+    const ex = await extractMsi(dlPath, extractDir);
+    if (!ex.success) {
+      return { ok: false, error: `msi extract failed: ${ex.stderr || ex.error || `status ${ex.status}`}` };
+    }
+    const wanted = (platform.extract || [])[0];
+    const found = findFileInTree(extractDir, wanted);
+    if (!found) {
+      return { ok: false, error: `msi payload does not contain ${wanted || '(no extract list)'}` };
+    }
+    const srcDir = dirname(found);
+    const targetDir = dirname(target);
+    await stopProcessByExePath(target); // path-scoped; no-op when not running
+    const oldDir = `${targetDir}.old`;
+    try { rmSync(oldDir, { recursive: true, force: true }); } catch {}
+    let renamed = false;
+    if (existsSync(targetDir)) {
+      renamed = await renameWithRetry(targetDir, oldDir);
+      if (!renamed) return { ok: false, error: `could not move ${targetDir} aside - is ${wanted} running?` };
+    }
+    try {
+      copyDirContents(srcDir, targetDir);
+      if (renamed) {
+        const merged = mergeMissingFiles(oldDir, targetDir);
+        if (merged > 0) console.log(dim(`  (merged ${merged} file(s) from previous install)`));
+      }
+      // Stamp mtime: extraction preserves the payload's build date, which
+      // can predate the release and would re-flag the update forever
+      // (filedate tools compare mtime with the release date).
+      try { utimesSync(target, new Date(), new Date()); } catch {}
+    } catch (err) {
+      try { rmSync(targetDir, { recursive: true, force: true }); } catch {}
+      if (renamed && existsSync(oldDir)) { try { renameSync(oldDir, targetDir); } catch {} }
+      return { ok: false, error: `replace failed: ${err.message}` };
+    }
+    if (renamed) { try { rmSync(oldDir, { recursive: true, force: true }); } catch {} }
+    await pruneBinaryBackups(cwd, tool.binary);
+    return { ok: true };
+  } finally {
+    try { rmSync(extractDir, { recursive: true, force: true }); } catch {}
   }
 }
 
@@ -698,27 +1096,25 @@ async function checkSingle(tool, cwd) {
         return item;
       }
     } else if (tool.type === 'binary') {
-      item.current = (await readBinaryInstalledVersion(cwd, tool.binary)) || '';
-      if (!tool.latestUrl) {
-        item.error_message = 'binary entry missing latestUrl';
+      const decision = await binaryUpdateNeeded(tool, cwd);
+      if (decision.error) {
         item.status = 'error';
+        item.error_message = decision.error;
         return item;
       }
-      const gh = await followGithubLatest(tool.latestUrl);
-      item.latest = gh ? gh.cleaned : '';
-      // Same honesty rule for the GitHub latest probe: a null result is a
-      // failed lookup, not a confirmation that the binary is current.
-      if (!gh) {
-        item.status = 'error';
-        item.error_message = `github latest lookup failed for ${tool.latestUrl}`;
-        return item;
-      }
+      item.current = decision.current;
+      item.latest = decision.latest;
+      item.update_available = !!decision.needed;
+      return item;
     } else {
       item.error_message = `unknown tool type: ${tool.type}`;
       item.status = 'error';
       return item;
     }
-    item.update_available = !!item.current && !!item.latest && isHigher(item.latest, item.current);
+    // A missing current version means "install": the manifest declares the
+    // tool belongs on this machine, so its absence is an actionable gap,
+    // not "up to date".
+    item.update_available = !!item.latest && (!item.current || isHigher(item.latest, item.current));
   } catch (err) {
     item.status = 'error';
     item.error_message = err.message || String(err);
@@ -798,12 +1194,12 @@ export async function checkUpdatesOnly({ cwd = DEFAULT_CWD } = {}) {
   }
 }
 
-function askYN(prompt) {
+function askLine(prompt) {
   return new Promise((resolve) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     rl.question(prompt, (ans) => {
       rl.close();
-      resolve(/^y(es)?$/i.test(ans.trim()));
+      resolve(ans ?? '');
     });
   });
 }
@@ -842,19 +1238,58 @@ export async function checkAndPromptUpdates({
     };
   }
 
-  // Interactive: prompt per entry.
-  let appliedCount = 0;
-  for (const item of pending) {
-    const choice = await askYN(`Apply update ${item.name} ${item.current} -> ${item.latest}? [y/N] `);
-    if (!choice) continue;
-    const res = await applyAllUpdates({ cwd, filter: [item.name] });
-    appliedCount += res.applied.length;
+  // Interactive: numbered-list selection, matching the glitch-ai launcher UX
+  // (pick by numbers, Enter = apply all, 's' = skip all).
+  console.log('');
+  console.log(yellow('  ===== Updates Available ====='));
+  pending.forEach((item, i) => {
+    console.log(cyan(`  [${i + 1}] ${item.name}`));
+    console.log(`      ${item.current || '(not installed)'} -> ${item.latest}`);
+  });
+  console.log('');
+  console.log("  Enter numbers to select (e.g. '1,3'),");
+  console.log("  press Enter to apply all, or type 's' to skip:");
+  const selection = await askLine('  > ');
+  const trimmed = selection.trim().toLowerCase();
+  if (trimmed === 's') {
+    console.log(yellow('  Skipping updates.'));
+    return { checked: true, updatesAvailable: updates.length, updatesApplied: 0, skipped: pending.length, items };
   }
+  let selectedNames = [];
+  if (trimmed === '') {
+    selectedNames = pending.map((i) => i.name);
+  } else {
+    const indices = selection.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
+    for (const idx of indices) {
+      const num = idx - 1;
+      if (num >= 0 && num < pending.length) selectedNames.push(pending[num].name);
+    }
+  }
+  if (selectedNames.length === 0) {
+    console.log(yellow('  No valid selection - skipping updates.'));
+    return { checked: true, updatesAvailable: updates.length, updatesApplied: 0, skipped: pending.length, items };
+  }
+  console.log(cyan(`  Applying ${selectedNames.length} update(s)...`));
+  const applied = await applyAllUpdates({ cwd, filter: selectedNames });
+  for (const name of applied.applied) console.log(green(`  ${name}: updated`));
+  for (const name of applied.failed) console.log(red(`  ${name}: FAILED`));
+  console.log(green('  Updates complete.'));
+  const restartNames = pending
+    .filter((i) => i.restart_required && applied.applied.includes(i.name))
+    .map((i) => i.name);
+  if (restartNames.length > 0) {
+    console.log(yellow(`  Restart required to use: ${restartNames.join(', ')}`));
+  }
+  // Refresh the status file so UI surfaces reflect the applied state.
+  try {
+    const { manifest: m } = readManifest(cwd);
+    if (m) writeStatusFile(cwd, await collectStatuses(m, cwd));
+  } catch {}
   return {
     checked: true,
     updatesAvailable: updates.length,
-    updatesApplied: appliedCount,
-    skipped,
+    updatesApplied: applied.applied.length,
+    skipped: pending.length - selectedNames.length,
     items
   };
 }
@@ -885,23 +1320,23 @@ export async function applyAllUpdates({
           ? cachedLatest
           : await readNpmLatestVersion(cwd, tool.package);
         if (!latestVersion) { result.failed.push(tool.name); continue; }
-        if (!currentVersion || !isHigher(latestVersion, currentVersion)) continue;
+        // A missing current version is an install (the manifest says this
+        // tool belongs on this machine), not a skip.
+        if (currentVersion && !isHigher(latestVersion, currentVersion)) continue;
         const res = await applyNpmUpdate(tool, currentVersion, latestVersion, cwd);
         if (res.ok) result.applied.push(tool.name);
         else result.failed.push(tool.name);
       } else if (tool.type === 'binary') {
-        if (!tool.latestUrl) continue;
-        const cachedCurrent = currentByName && currentByName.get(tool.name);
-        const currentVersion = cachedCurrent != null
-          ? cachedCurrent
-          : await readBinaryInstalledVersion(cwd, tool.binary);
-        const cachedLatest = latestByName && latestByName.get(tool.name);
-        const latestVersion = cachedLatest != null
-          ? cachedLatest
-          : ((gh = await followGithubLatest(tool.latestUrl)), gh ? gh.cleaned : null);
-        if (!latestVersion) { result.failed.push(tool.name); continue; }
-        if (!currentVersion || !isHigher(latestVersion, currentVersion)) continue;
-        const res = await applyBinaryUpdate(tool, latestVersion, cwd);
+        const platform = tool.platforms?.[process.platform];
+        if (!tool.latestUrl || !platform || !platform.url) continue;
+        // Single source of truth for the update decision (probe / filedate /
+        // install-when-missing). The old inline version also had a
+        // strict-mode bug: an undeclared `gh` global threw on the uncached
+        // path and the catch block silently turned it into a FAILED entry.
+        const decision = await binaryUpdateNeeded(tool, cwd);
+        if (decision.error) { result.failed.push(tool.name); continue; }
+        if (!decision.needed) continue;
+        const res = await applyBinaryUpdate(tool, decision.latest, cwd, decision.tag);
         if (res.ok) result.applied.push(tool.name);
         else result.failed.push(tool.name);
       }
@@ -948,22 +1383,19 @@ async function main() {
         if (!matches(tool.name)) continue;
         if (tool.updateType !== 'sync') continue;
         try {
-          let current = '';
-          let latest = '';
           if (tool.type === 'npm') {
-            current = (await readNpmInstalledVersion(cwd, tool.package)) || '';
-            latest  = (await readNpmLatestVersion(cwd, tool.package)) || '';
+            const current = (await readNpmInstalledVersion(cwd, tool.package)) || '';
+            const latest  = (await readNpmLatestVersion(cwd, tool.package)) || '';
+            if (!latest) continue;
+            if (current && !isHigher(latest, current)) continue;
+            pending.push({ name: tool.name, current: current || 'not installed', latest });
           } else if (tool.type === 'binary') {
-            if (!tool.latestUrl) continue;
-            current = (await readBinaryInstalledVersion(cwd, tool.binary)) || '';
-            const gh = await followGithubLatest(tool.latestUrl);
-            latest = gh ? gh.cleaned : '';
-          } else {
-            continue;
+            const platform = tool.platforms?.[process.platform];
+            if (!tool.latestUrl || !platform || !platform.url) continue;
+            const decision = await binaryUpdateNeeded(tool, cwd);
+            if (decision.error || !decision.needed) continue;
+            pending.push({ name: tool.name, current: decision.current, latest: decision.latest });
           }
-          if (!current || !latest) continue;
-          if (!isHigher(latest, current)) continue;
-          pending.push({ name: tool.name, current, latest });
         } catch {
           // Pre-flight is best-effort; applyAllUpdates below is authoritative.
         }

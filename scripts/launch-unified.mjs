@@ -473,8 +473,12 @@ async function main() {
           log(DARK_GRAY, '  (updates: applying all without prompt)');
           await checker.checkAndPromptUpdates({ cwd: ROOT_DIR, interactive: false, autoApplyAll: true });
         } else {
-          // Interactive TTY: prompt the user.
-          await checker.checkAndPromptUpdates({ cwd: ROOT_DIR, interactive: true, autoApplyAll: false });
+          // Interactive TTY: numbered-list prompt (pick numbers, Enter = all, s = skip).
+          log(CYAN, '  Checking dependency updates...');
+          const upd = await checker.checkAndPromptUpdates({ cwd: ROOT_DIR, interactive: true, autoApplyAll: false });
+          if (upd && upd.checked && upd.updatesAvailable === 0) {
+            log(DARK_GREEN, '  All dependencies up-to-date');
+          }
         }
       } catch (e) {
         log(DARK_YELLOW, `  (dependency-update check failed: ${e && e.message ? e.message : 'unknown error'} - continuing)`);

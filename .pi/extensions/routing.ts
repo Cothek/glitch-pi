@@ -362,6 +362,16 @@ function stripRenameMarkers(content: any): any {
   return content;
 }
 
+function hasTextContent(content: any): boolean {
+  if (typeof content === "string") return content.trim().length > 0;
+  if (Array.isArray(content)) {
+    return content.some(
+      (p: any) => p?.type === "text" && typeof p.text === "string" && p.text.trim().length > 0,
+    );
+  }
+  return false;
+}
+
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
@@ -373,8 +383,6 @@ export default function (pi: ExtensionAPI) {
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
   let currentSessionID: string | null = null;
-  // Per-session rename tracking: sessionID -> boolean (has been renamed)
-  const sessionRenamed = new Map<string, boolean>();
 
   pi.on("session_start", async (_event, ctx) => {
     const sid =
@@ -384,30 +392,57 @@ export default function (pi: ExtensionAPI) {
       (ctx.sessionManager as any)?.id ||
       "default";
     currentSessionID = String(sid);
-    // Initialize rename tracking for this session (default: false)
-    sessionRenamed.set(currentSessionID, false);
   });
 
+  // R17: rename-once guard v3 (conversation-scoped). Two producers caused the
+  // "renames on every entry" bug: (1) the old before_agent_start emission
+  // (removed) rendered a PLUGIN conv:rename card on every user entry; (2) the
+  // built-in marker service renames on ANY assistant text containing
+  // [[conv:rename:<title>]] — including replies that merely QUOTE the syntax
+  // (this repo's own conversation got renamed to "<title>", "...", and
+  // "<composed title>"). Session-keyed state cannot fix either: forks and
+  // retries mint new session ids and extension state can reset per turn. So the
+  // guard derives from the conversation itself:
+  //   turn_start -> arm a one-shot capture for this turn.
+  //   context    -> at the turn's FIRST provider request, record whether the
+  //                 LLM-request history holds any assistant message with text
+  //                 content (thinking/toolCall-only bubbles don't count, so a
+  //                 multi-bubble first reply still works). Mid-turn refires do
+  //                 not re-capture.
+  //   message_end-> if the finalized assistant message carries rename markers
+  //                 AND prior assistant text exists, strip them via
+  //                 MessageEndEventResult replacement (pi applies it before
+  //                 the message reaches pi-web-ui's marker scan — verified in
+  //                 the SDK runner's emitMessageEnd). Net effect: only the
+  //                 conversation's FIRST assistant text reply can rename; every
+  //                 later marker — real or quoted — is inert.
+  let hasPriorAssistantText = false;
+  let renameCapturePending = true;
 
-  // R17: rename-once guard. The built-in marker service
-  // (pi-web-ui dist/server/markers/builtins/rename.js) renames the chat when
-  // an ASSISTANT reply carries [[conv:rename:<title>]]. Prose-only rules
-  // failed here: the model re-emitted the marker every turn using the raw user
-  // message as the title. This makes "first reply only" mechanical: the first
-  // marker per session passes through untouched; later markers are stripped
-  // from the finalized assistant message so the built-in service cannot rename
-  // again. session_start resets the map, so a forked/retried conversation earns
-  // its own first rename.
+  pi.on("turn_start", () => {
+    renameCapturePending = true;
+  });
+
+  pi.on("context", (event) => {
+    try {
+      if (!renameCapturePending) return;
+      renameCapturePending = false;
+      const msgs = (event as any).messages;
+      if (!Array.isArray(msgs)) return;
+      hasPriorAssistantText = msgs.some(
+        (m: any) => m?.role === "assistant" && hasTextContent(m.content),
+      );
+    } catch {
+      /* never block context assembly on the guard */
+    }
+  });
+
   pi.on("message_end", async (event) => {
     try {
       const mm = (event as any).message;
       if (mm?.role !== "assistant") return undefined;
       if (!hasRenameMarker(mm.content)) return undefined;
-      const sid = currentSessionID || "default";
-      if (!sessionRenamed.get(sid)) {
-        sessionRenamed.set(sid, true);
-        return undefined;
-      }
+      if (!hasPriorAssistantText) return undefined; // first reply of the conversation - allow the rename
       const content = stripRenameMarkers(mm.content);
       if (content === mm.content) return undefined;
       return { message: { ...mm, content } } as any;

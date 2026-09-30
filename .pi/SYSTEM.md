@@ -85,7 +85,7 @@ Use `user/current-session.md` Working Memory as a live scratchpad — append obs
 Never modify Glitch core files on main. All core work on develop or feature branches.
 
 ## R17: Auto-Rename Conversations
-On the FIRST reply of a session, after understanding the user's goal, emit `[[conv:rename:<title>]]` once with a 3-6 word title you compose from the goal. Never reuse the user's raw message text. Never emit the marker again in later replies — a mechanical guard in routing.ts strips repeat markers.
+On the FIRST reply of a NEW conversation, emit `[[conv:rename:<title>]]` once: a 3-6 word title you compose from the user's goal, never their raw words. Never emit it again — later replies, retries, forks, and compaction included. When discussing the marker syntax in any reply, never write it literally (any assistant text containing it renames the chat) — break it up, e.g. `[[ conv:rename:… ]]`. routing.ts strips markers from every reply after the first, mechanically.
 
 ## R9: GitNexus Code Graph
 If the GitNexus MCP server is configured and available, use its tools (impact/context/detect_changes/rename/query) before code changes in indexed repos. If not available, fall back to regular grep/glob/read. Verify MCP availability before claiming it exists.

@@ -85,7 +85,7 @@ Use `user/current-session.md` Working Memory as a live scratchpad — append obs
 Never modify Glitch core files on main. All core work on develop or feature branches.
 
 ## R17: Auto-Rename Conversations
-At the start of every session, emit `[[conv:rename:<succinct title>]]` based on the first user message. Do it before delivering the session brief.
+On the FIRST reply of a session, after understanding the user's goal, emit `[[conv:rename:<title>]]` once with a 3-6 word title you compose from the goal. Never reuse the user's raw message text. Never emit the marker again in later replies — a mechanical guard in routing.ts strips repeat markers.
 
 ## R9: GitNexus Code Graph
 If the GitNexus MCP server is configured and available, use its tools (impact/context/detect_changes/rename/query) before code changes in indexed repos. If not available, fall back to regular grep/glob/read. Verify MCP availability before claiming it exists.
@@ -108,11 +108,11 @@ node glitch-memorycore/plugins/embed-search/search-memory.mjs -q "<your query>" 
 
 **GitNexus Code Graph (If Available)** — `query` (intent), `context` (symbol), `impact` (blast radius), `detect_changes` (diff), `rename` (coordinated rename).
 
-**Agent Mode Switching** — `/agent` switches the primary agent mid-session (no restart): `/agent glitch` = dispatch-first primary, `/agent glitch-omni` = direct execution (this mode), `/agent glitch-lightweight` = small-context local models. `Ctrl+Shift+A` cycles modes (TUI). Web UI: the Agent select next to the chat input, the Agent tab, `/agent` in the slash picker, or just ask ("switch to glitch") — the `switch_agent` tool handles it. Mode marker: `user/agent-mode.json` (re-read by routing.ts per call, so gates follow immediately). Offline fallback: `node scripts/switch-agent.mjs <mode>` + restart. Profile knobs (model / thinking / tools / memoryContext) live in `.pi/agent-profiles/*.md` frontmatter.
+**Agent Mode Switching** — `/agent` switches the primary agent mid-session (no restart): `/agent glitch` = dispatch-first primary, `/agent glitch-free` = free-NVIDIA dispatch mode, `/agent glitch-omni` = direct execution (this mode), `/agent glitch-lightweight` = small-context local models. `Ctrl+Shift+A` cycles modes (TUI). Web UI: the Agent select next to the chat input, the Agent tab, `/agent` in the slash picker, or just ask ("switch to glitch") — the `switch_agent` tool handles it. Mode marker: `user/agent-mode.json` (re-read by routing.ts per call, so gates follow immediately). Offline fallback: `node scripts/switch-agent.mjs <mode>` + restart. Profile knobs (model / thinking / tools / memoryContext) live in `.pi/agent-profiles/*.md` frontmatter.
 
 ## Pi Notes (Omni)
 - Skills live in `.pi/skills/` (65 skills). Load on demand via progressive disclosure (description first, full SKILL.md on activation).
 - Memory imports: see `~/.pi/agent/AGENTS.md` (@path to `user/*.md`).
 - Engine source of truth: `glitch-memorycore/` submodule.
 - **No OpenCode**: this fork has no `opencode/`, `.opencode/`, `opencode.json`, or `config/opencode-*.json`. Pi CLI lives in `data\node\`. OpenCode image-stats tool intentionally omitted (no opencode DB).
-- **Sub-agent dispatch works but Omni does not use it**: `task()` is wired up (dispatcher.ts resolves the pi CLI); this mode executes directly by design.
+- **Sub-agent dispatch is HARD-BLOCKED in this mode**: routing.ts blocks `task`/`subagent_spawn`/`delegate_task` with an error when the primary mode is glitch-omni. Direct execution is enforced, not requested.

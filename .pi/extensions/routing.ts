@@ -337,6 +337,31 @@ function writeReviewPassMarker(agentName: string): void {
   }
 }
 
+const RENAME_MARKER_RE = /\[\[\s*conv\s*:\s*rename\s*:/;
+const RENAME_TOKEN_RE = /\[\[\s*conv\s*:\s*rename\s*:(.*?)\s*\]\]/g;
+
+function hasRenameMarker(content: any): boolean {
+  if (typeof content === "string") return RENAME_MARKER_RE.test(content);
+  if (Array.isArray(content)) {
+    return content.some(
+      (p: any) => p?.type === "text" && typeof p.text === "string" && RENAME_MARKER_RE.test(p.text),
+    );
+  }
+  return false;
+}
+
+function stripRenameMarkers(content: any): any {
+  if (typeof content === "string") return content.replace(RENAME_TOKEN_RE, "").trim();
+  if (Array.isArray(content)) {
+    return content.map((p: any) =>
+      p?.type === "text" && typeof p.text === "string"
+        ? { ...p, text: p.text.replace(RENAME_TOKEN_RE, "").trim() }
+        : p,
+    );
+  }
+  return content;
+}
+
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
@@ -348,6 +373,8 @@ export default function (pi: ExtensionAPI) {
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
   let currentSessionID: string | null = null;
+  // Per-session rename tracking: sessionID -> boolean (has been renamed)
+  const sessionRenamed = new Map<string, boolean>();
 
   pi.on("session_start", async (_event, ctx) => {
     const sid =
@@ -357,14 +384,38 @@ export default function (pi: ExtensionAPI) {
       (ctx.sessionManager as any)?.id ||
       "default";
     currentSessionID = String(sid);
-
-    // R17: Auto-Rename Conversations
-    // Emit rename marker based on first user message title.
-    // The title will be generated when the first message is processed.
-    // Store a flag to track this is a new session.
-    sessionRenamed = false;
+    // Initialize rename tracking for this session (default: false)
+    sessionRenamed.set(currentSessionID, false);
   });
 
+
+  // R17: rename-once guard. The built-in marker service
+  // (pi-web-ui dist/server/markers/builtins/rename.js) renames the chat when
+  // an ASSISTANT reply carries [[conv:rename:<title>]]. Prose-only rules
+  // failed here: the model re-emitted the marker every turn using the raw user
+  // message as the title. This makes "first reply only" mechanical: the first
+  // marker per session passes through untouched; later markers are stripped
+  // from the finalized assistant message so the built-in service cannot rename
+  // again. session_start resets the map, so a forked/retried conversation earns
+  // its own first rename.
+  pi.on("message_end", async (event) => {
+    try {
+      const mm = (event as any).message;
+      if (mm?.role !== "assistant") return undefined;
+      if (!hasRenameMarker(mm.content)) return undefined;
+      const sid = currentSessionID || "default";
+      if (!sessionRenamed.get(sid)) {
+        sessionRenamed.set(sid, true);
+        return undefined;
+      }
+      const content = stripRenameMarkers(mm.content);
+      if (content === mm.content) return undefined;
+      return { message: { ...mm, content } } as any;
+    } catch (e: any) {
+      console.error(`[routing] rename-once guard failed: ${e?.message || e}`);
+      return undefined;
+    }
+  });
   // --- Pre-tool gates: plan-first + dispatch-first + review gate ---
   pi.on(
     "tool_call",

@@ -85,7 +85,7 @@ Use YOUR session scratchpad `user/sessions/<sessionID>/current-session.md` as th
 Never modify Glitch core files on main. All core work on develop or feature branches.
 
 ## R17: Auto-Rename Conversations
-At the start of every session, emit `[[conv:rename:<succinct title>]]` based on the first user message. Do it before delivering the session brief.
+On the FIRST reply of a session, after understanding the user's goal, emit `[[conv:rename:<title>]]` once with a 3-6 word title you compose from the goal. Never reuse the user's raw message text. Never emit the marker again in later replies — a mechanical guard in routing.ts strips repeat markers.
 
 ## R9: GitNexus Code Graph
 If the GitNexus MCP server is configured and available, use its tools (impact/context/detect_changes/rename/query) before code changes in indexed repos. If not available, fall back to regular grep/glob/read. Verify MCP availability before claiming it exists.

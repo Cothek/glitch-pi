@@ -5,6 +5,7 @@ import { existsSync } from "fs";
 import { readFile, writeFile, readdir, stat, rename, mkdir } from "fs/promises";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
+import { archiveStaleSessionDirs } from "../.pi/lib/memory-paths.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CWD = path.resolve(__dirname, "..");
@@ -860,7 +861,28 @@ async function trimCurrentSession() {
       return `⚠️ Session RAM: ${originalCount} lines — trim produced no reduction, review manually`;
     }
 
+    // Clobber guard (2026-09-30, plan 01a0e0c4): the shared scratchpad is now
+    // also written by the guarded compaction merge (compaction-diary.ts). Re-read
+    // before the trim write; a rival's change aborts this trim (marker left
+    // behind; the next compaction retries). Content-based: same-content
+    // rewrites are benign, mtime is twitchy on Windows.
+    const recheckContent = await readFile(fp, "utf-8");
+    if (recheckContent !== content) {
+      await mkdir(path.join(CWD, "data"), { recursive: true });
+      await writeFile(
+        path.join(CWD, "data", "compaction-trim-requeued.txt"),
+        `trim skipped: shared scratchpad changed mid-trim at ${new Date().toISOString()}\n`,
+        "utf-8"
+      );
+      return `⚠️ Session RAM: trim requeued — shared file changed mid-trim (marker written)`;
+    }
+
     await writeFile(fp, result.content.replace(/\n+$/, "") + "\n", "utf-8");
+    try {
+      await rename(path.join(CWD, "data", "compaction-trim-requeued.txt"), path.join(CWD, "data", "compaction-trim-requeued.done.txt"));
+    } catch {
+      // marker absent on the happy path — nothing to clear
+    }
 
     if (result.archived.length > 0) {
       await mkdir(archiveDir, { recursive: true });
@@ -885,6 +907,18 @@ async function trimCurrentSession() {
   } catch (e) {
     warn(`Session RAM trim failed: ${e.message}`);
     return `✗ Session RAM: FAILED (${e.message})`;
+  }
+}
+
+// Stale session-scratchpad dirs (>7d no write) move to user/sessions/archive.
+async function archiveStaleScratchpads() {
+  try {
+    const moved = await archiveStaleSessionDirs(path.join(CWD, "user"));
+    return moved.length
+      ? `✓ Scratchpads: archived ${moved.length} stale session dir(s): ${moved.slice(0, 3).join(", ")}${moved.length > 3 ? ", …" : ""}`
+      : `✓ Scratchpads: no stale session dirs`;
+  } catch (e) {
+    return `✗ Scratchpads: archive failed (${e.message})`;
   }
 }
 
@@ -914,6 +948,7 @@ async function main() {
   const results = {
     timestamp: await updateTimestamp(),
     ram: await trimCurrentSession(),
+    scratchpads: await archiveStaleScratchpads(),
     diary: await checkDiaryStaleness(),
     curriculum: await checkCurriculum(),
     gc: await checkImageGC(heavyDue, lastHeavyRun),
@@ -940,6 +975,7 @@ async function main() {
     "=== Auto-Completed ===",
     results.timestamp,
     results.ram,
+    results.scratchpads,
     ...results.touches,
     results.diary,
     results.curriculum,

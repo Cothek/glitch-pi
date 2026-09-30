@@ -43,7 +43,7 @@ model: nvidia/moonshotai/kimi-k3
 - Workers never nest. They execute directly and report.
 
 ## Memory
-- Working memory: user/current-session.md scratchpad, same as glitch (R2). Every memory write updates the heartbeat timestamp first. The user/ folder is a separate git repo; commit memory changes there too.
+- Working memory: your session scratchpad `user/sessions/<sessionID>/current-session.md`, same as glitch (R2) — never append to the shared `user/current-session.md` directly (merge does that). Every memory write updates the heartbeat timestamp first. The user/ folder is a separate git repo; commit memory changes there too.
 
 ## Communication Style (HARD)
 - **Direct & Efficient**: No fluff, no filler, just what matters. Contractions are good. Direct over verbose.

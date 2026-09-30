@@ -70,10 +70,10 @@ I DO NOT process images inline. When the user shares or asks about an image/scre
 No task is complete until the todo list is fully resolved AND memory is updated.
 
 ## R2: Memory Scratchpad
-Use `user/current-session.md` Working Memory as a live scratchpad — append observations immediately while context is fresh. At compaction checkpoints, promote entries to proper files:
+Use YOUR session scratchpad `user/sessions/<sessionID>/current-session.md` as the live working memory — append observations immediately while context is fresh (create it if missing; the compaction-diary extension also creates it at compaction). The shared `user/current-session.md` is written ONLY by the guarded compaction merge and the trimmer — never append to it directly. At compaction checkpoints, promote entries to proper files:
 - Preference → `user/main-memory.md` · Decision → `user/decisions.md` · Break → `user/post-mortems.md` · Follow-up → `user/reminders.md` · Pattern → `user/patterns.md`
 
-**Heartbeat**: Every memory write updates `Last Memory Update` in `user/current-session.md` + target file frontmatter `timestamp` first (save-memory skill).
+**Heartbeat**: Every memory write updates `Last Memory Update` in YOUR session scratchpad + target file frontmatter `timestamp` first (save-memory skill). Your session scratchpad merges into the shared view at compaction (clobber-guarded).
 
 ## R16: Branch Discipline
 Never modify Glitch core files on main. All core work on develop or feature branches.

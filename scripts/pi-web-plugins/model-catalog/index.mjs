@@ -1,8 +1,8 @@
 /**
- * nvidia-models — pi-web-ui plugin (server entry).
+ * model-catalog — pi-web-ui plugin (server entry).
  *
- * Source of truth lives HERE (repo: scripts/pi-web-plugins/nvidia-models/).
- * The live location (~/.pi-web/plugins/nvidia-models) is a junction to this
+ * Source of truth lives HERE (repo: scripts/pi-web-plugins/model-catalog/).
+ * The live location (~/.pi-web/plugins/model-catalog) is a junction to this
  * folder, created by scripts/install-pi-web-plugins.mjs — edit here only.
  *
  * WHAT IT DOES: lists every NVIDIA free model, marks the relevant ones
@@ -18,12 +18,12 @@
  * SURFACES
  *   1. right-panel "NVIDIA Models" tab (manifest "view": true)
  *   2. composer button (host.ui.register, kind "view") opens the page
- *   3. GET  /plugins-api/nvidia-models/status     -> parsed engine JSON + healthy/cli_present flags
- *   4. POST /plugins-api/nvidia-models/sync       -> resync from the live catalog
- *   5. POST /plugins-api/nvidia-models/set        -> toggle one model on/off
- *   6. POST /plugins-api/nvidia-models/bulk       -> apply recommended / enable all / disable all
- *   7. POST /plugins-api/nvidia-models/restore    -> restore the last backup
- *   8. /nvidia-models slash command               -> same data as text in chat
+ *   3. GET  /plugins-api/model-catalog/status     -> parsed engine JSON + healthy/cli_present flags
+ *   4. POST /plugins-api/model-catalog/sync       -> resync from the live catalog
+ *   5. POST /plugins-api/model-catalog/set        -> toggle one model on/off
+ *   6. POST /plugins-api/model-catalog/bulk       -> apply recommended / enable all / disable all
+ *   7. POST /plugins-api/model-catalog/restore    -> restore the last backup
+ *   8. /model-catalog slash command               -> same data as text in chat
  *
  * WRITE PATH SAFETY (POST /set and POST /bulk): the id (or ids) in the body
  * is validated against the cached state ids BEFORE it reaches a command
@@ -162,11 +162,11 @@ function parseEngineJson(text) {
 /**
  * Format the status object as plain text for the slash command. The
  * server entry is the single source of truth for labels so the CLI
- * (/nvidia-models) and the web tab cannot drift.
+ * (/model-catalog) and the web tab cannot drift.
  */
 function formatStatusText(payload) {
   if (!payload || !payload.ok) {
-    return `nvidia-models: ${payload?.error ?? "engine status unavailable"}`;
+    return `model-catalog: ${payload?.error ?? "engine status unavailable"}`;
   }
   const counts = payload.counts ?? {};
   const models = Array.isArray(payload.models) ? payload.models : [];
@@ -485,7 +485,7 @@ export function createPlugin() {
        */
       cleanup.push(
         host.registerCommand({
-          name: "nvidia-models",
+          name: "model-catalog",
           description: "Show NVIDIA free model tier list and current enable state",
           descriptionEn: "Show NVIDIA free model tier list and current enable state",
           async run() {
@@ -493,7 +493,7 @@ export function createPlugin() {
               const payload = await status(true);
               return formatStatusText(payload);
             } catch (err) {
-              return `nvidia-models failed: ${err?.message ?? err}`;
+              return `model-catalog failed: ${err?.message ?? err}`;
             }
           },
         }),
@@ -510,7 +510,7 @@ export function createPlugin() {
           label: "NVIDIA Models",
           hint: "Open the NVIDIA Models page",
           kind: "view",
-          view: "plugin:nvidia-models",
+          view: "plugin:model-catalog",
           order: 136,
           align: "start",
         }),
@@ -519,7 +519,7 @@ export function createPlugin() {
       // Kick the cache so the first /status call is warm. A failing engine
       // must not block activation, so we swallow the rejection.
       status(true).catch((err) => {
-        host.log?.("warn", `nvidia-models initial status failed: ${err?.message ?? err}`);
+        host.log?.("warn", `model-catalog initial status failed: ${err?.message ?? err}`);
       });
 
       // ---- Scheduled catalog sync (daily) ----
@@ -528,11 +528,27 @@ export function createPlugin() {
       // The sync verb NEVER writes models.json; it only refreshes the state
       // file. Only when genuinely new CHAT models appear does a notification
       // go out, so embedding/guard/translation noise stays silent forever.
+      // AFTER the sync, costs.json (agent-models pricing table) is regenerated
+      // so the picker on the model agent page always reflects the latest prices.
       cleanup.push(
         host.schedule(SYNC_INTERVAL_MS, async () => {
           try {
             const result = await runEngine(["--sync"], [], APPLY_TIMEOUT_MS, host);
             localStatusCache.value = null;
+
+            // Regenerate the agent-models cost table (scripts/agent-model-costs.mjs)
+            // after the NVIDIA catalog sync, so the pricing picker on the model
+            // agent page picks up any new or re-priced models. The engine reads
+            // models.json + models-store.json (which --sync refreshes) and writes
+            // .pi/agent-models/costs.json inside the workspace.
+            const costsCmd = [pickNodeToken(), "scripts/agent-model-costs.mjs", "--json"].join(" ");
+            const costsResult = await host.bash(costsCmd, { cwd: repoRoot(), timeoutMs: APPLY_TIMEOUT_MS });
+            if (costsResult?.ok) {
+              host.log?.("info", "model-catalog: costs.json regenerated successfully");
+            } else {
+              host.log?.("warn", `model-catalog: costs.json regeneration failed: ${costsResult?.error ?? costsResult?.exitCode ?? "unknown"}`);
+            }
+
             if (!result.ok || !result.added_since_last_sync?.length) return;
 
             // Read the freshly-synced state file to find out which added ids
@@ -564,11 +580,11 @@ export function createPlugin() {
           } catch (err) {
             host.log?.(
               "warn",
-              `nvidia-models scheduled sync failed: ${err?.message ?? err}`);
+              `model-catalog scheduled sync failed: ${err?.message ?? err}`);
           }
         }, {
-          id: "nvidia-models-daily-sync",
-          label: "NVIDIA free-model catalog sync",
+          id: "model-catalog-daily-sync",
+          label: "Model catalog sync + pricing table regeneration",
           persistent: true,
           catchUp: "once",
         }),
@@ -579,7 +595,7 @@ export function createPlugin() {
 
       host.log?.(
         "info",
-        "activated - engine at " + engineRelativePath() + ", state file " + (existsSync(stateFile()) ? "present" : "missing (run /sync after engine lands)"),
+        "activated - engine at " + engineRelativePath() + ", state file " + (existsSync(stateFile()) ? "present" : "missing (run /sync after engine lands)") + ", costs.json " + (existsSync(repoRoot() + "/.pi/agent-models/costs.json") ? "present" : "missing (run scripts/agent-model-costs.mjs)"),
       );
 
       return () => {

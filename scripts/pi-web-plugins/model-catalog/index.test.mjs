@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * nvidia-models plugin — unit tests (no framework, no new deps).
+ * model-catalog plugin — unit tests (no framework, no new deps).
  *
- * Run: node scripts/pi-web-plugins/nvidia-models/index.test.mjs
+ * Run: node scripts/pi-web-plugins/model-catalog/index.test.mjs
  *
  * Covers each route against a mock host with a stubbed bash, plus the
  * two failure paths the panel must survive:
@@ -228,10 +228,10 @@ await group("plugin registers all five routes plus the slash command and UI", as
       const found = host.routes.find((r) => r.path === path);
       assert.ok(found, `route ${path} should be registered`);
     }
-    const cmd = host.commands.find((c) => c.name === "nvidia-models");
-    assert.ok(cmd, "/nvidia-models slash command should be registered");
-    const ui = host.uiItems.find((u) => u.view === "plugin:nvidia-models");
-    assert.ok(ui, "UI entry with view plugin:nvidia-models should be registered");
+    const cmd = host.commands.find((c) => c.name === "model-catalog");
+    assert.ok(cmd, "/model-catalog slash command should be registered");
+    const ui = host.uiItems.find((u) => u.view === "plugin:model-catalog");
+    assert.ok(ui, "UI entry with view plugin:model-catalog should be registered");
     assert.equal(ui.kind, "view");
     assert.equal(ui.order, 136);
   } finally {
@@ -240,7 +240,7 @@ await group("plugin registers all five routes plus the slash command and UI", as
 });
 
 await group("/status: argv is whitespace-free, contains no absolute path, --json last", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-status-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-status-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -265,7 +265,7 @@ await group("/status: argv is whitespace-free, contains no absolute path, --json
 });
 
 await group("/status returns parsed engine JSON plus healthy and cli_present flags", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-test-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-test-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -302,7 +302,7 @@ await group("/status returns parsed engine JSON plus healthy and cli_present fla
 });
 
 await group("/status when the engine is missing: cli_present false, no throw, HTTP 503", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-missing-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-missing-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -326,7 +326,7 @@ await group("/status when the engine is missing: cli_present false, no throw, HT
 });
 
 await group("POST /sync: argv is whitespace-free, contains no absolute path, --json last", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-sync-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-sync-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -347,7 +347,7 @@ await group("POST /sync: argv is whitespace-free, contains no absolute path, --j
 });
 
 await group("POST /set with a valid id: argv is --enable <id> --json, no whitespace inside any token", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-set-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-set-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -374,7 +374,7 @@ await group("POST /set with a valid id: argv is --enable <id> --json, no whitesp
 });
 
 await group("POST /set with enabled=false: argv is --disable <id> --json", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-set-disable-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-set-disable-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -397,7 +397,7 @@ await group("POST /set with enabled=false: argv is --disable <id> --json", async
 });
 
 await group("POST /set with an id not in the cached state is rejected (no shell call)", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-set-bad-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-set-bad-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -418,7 +418,7 @@ await group("POST /set with an id not in the cached state is rejected (no shell 
 });
 
 await group("POST /bulk action=recommended: argv is --apply-recommended --json", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-bulk-rec-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-bulk-rec-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -439,7 +439,7 @@ await group("POST /bulk action=recommended: argv is --apply-recommended --json",
 });
 
 await group("POST /bulk action=all: argv is --enable <id1> <id2> <id3> --json, each id one token", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-bulk-all-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-bulk-all-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -458,7 +458,7 @@ await group("POST /bulk action=all: argv is --enable <id1> <id2> <id3> --json, e
 });
 
 await group("POST /bulk action=none: argv is --disable <id1> <id2> <id3> --json", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-bulk-none-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-bulk-none-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -477,7 +477,7 @@ await group("POST /bulk action=none: argv is --disable <id1> <id2> <id3> --json"
 });
 
 await group("POST /restore: argv is --restore-backup --json", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-restore-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-restore-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -498,7 +498,7 @@ await group("POST /restore: argv is --restore-backup --json", async () => {
 });
 
 await group("every route produces a whitespace-free, absoluteless argv", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-all-argv-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-all-argv-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -552,7 +552,7 @@ await group("every route produces a whitespace-free, absoluteless argv", async (
 });
 
 await group("pin-guard blocked path: engine blocked[] passes through to the client verbatim", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-blocked-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-blocked-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -578,8 +578,8 @@ await group("pin-guard blocked path: engine blocked[] passes through to the clie
   }
 });
 
-await group("slash command /nvidia-models returns the same data as plain text", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-slash-"));
+await group("slash command /model-catalog returns the same data as plain text", async () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-slash-"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -602,7 +602,7 @@ await group("slash command /nvidia-models returns the same data as plain text", 
       bashStub: () => ({ ok: true, output: JSON.stringify(enginePayload), exitCode: 0 }),
     });
     await p.activate(host);
-    const cmd = host.commands.find((c) => c.name === "nvidia-models");
+    const cmd = host.commands.find((c) => c.name === "model-catalog");
     assert.ok(cmd, "slash command registered");
     const text = await cmd.run("");
     assert.match(text, /NVIDIA models: 82 total/);
@@ -623,8 +623,8 @@ await group("schedule registers a persistent task with the right id and options"
   });
   await p.activate(host);
   try {
-    const entry = host.scheduledTasks.find((t) => t.opts?.id === "nvidia-models-daily-sync");
-    assert.ok(entry, "schedule should exist with id nvidia-models-daily-sync");
+    const entry = host.scheduledTasks.find((t) => t.opts?.id === "model-catalog-daily-sync");
+    assert.ok(entry, "schedule should exist with id model-catalog-daily-sync");
     assert.equal(entry.opts.persistent, true);
     assert.equal(entry.opts.catchUp, "once");
     assert.equal(entry.spec, 24 * 60 * 60 * 1000);
@@ -655,7 +655,7 @@ await group("schedule cancel function removes the task", async () => {
 });
 
 await group("schedule handler runs --sync and catches failure silently", async () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "nvidia-models-sched"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "model-catalog-sched"));
   writeStateFixture(fixtureRoot, KNOWN_IDS);
   process.env.GLITCH_PI_ROOT = fixtureRoot;
   try {
@@ -666,7 +666,7 @@ await group("schedule handler runs --sync and catches failure silently", async (
     await p.activate(host);
     try {
       // The schedule handler should exist and be callable.
-      const entry = host.scheduledTasks.find((t) => t.opts?.id === "nvidia-models-daily-sync");
+      const entry = host.scheduledTasks.find((t) => t.opts?.id === "model-catalog-daily-sync");
       assert.ok(entry, "schedule entry found");
       assert.ok(typeof entry.fn === "function", "schedule handler is a function");
       // Manually fire it; it should succeed even with an engine failure.

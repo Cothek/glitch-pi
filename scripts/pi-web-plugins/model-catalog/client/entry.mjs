@@ -1,10 +1,10 @@
 /**
- * nvidia-models — pi-web-ui plugin (client entry) — SELF-CONTAINED, ZERO IMPORTS
+ * model-catalog — pi-web-ui plugin (client entry) — SELF-CONTAINED, ZERO IMPORTS
  *
  * WHY ZERO IMPORTS: the host serves plugin files only from /plugins/<id>/client/*,
  * so a relative import (./sdk/*, ../index.mjs) would land on the SPA fallback
  * and kill the whole module. All data arrives as JSON from
- * /plugins-api/nvidia-models/{status,sync,set,bulk,restore}.
+ * /plugins-api/model-catalog/{status,sync,set,bulk,restore}.
  *
  * WHY THE DEFENSIVE SHAPE (learned from the agent-models reference): if mount()
  * throws the host replaces the pane with a bare fallback and the user sees a
@@ -22,12 +22,12 @@
  * --bg-elev2, --mono, --accent, --green, --red, --red-soft, --amber).
  */
 
-const API_BASE = "/plugins-api/nvidia-models";
+const API_BASE = "/plugins-api/model-catalog";
 const POLL_MS = 15_000;
-const STYLE_ID = "nvidia-models-style";
-const MOUNT_LABEL = "nvidia-models";
+const STYLE_ID = "model-catalog-style";
+const MOUNT_LABEL = "model-catalog";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.1.3";
+const PLUGIN_VERSION = "0.2.0";
 
 /** Per-container instance store. A module-level singleton was wrong: the host
  *  mounts the same module in more than one place (main view pane, Settings
@@ -102,10 +102,10 @@ const STYLE_CSS = `
    13px font -> text box 15px, total 25px with the 1px borders).
    Glyph from the host icon set: a list, since this panel is a list. Masked
    SVG so theme + hover accent carry through. */
-.inputbox .btn.composer-plugin-action[aria-label="NVIDIA Models"]{width:25px;min-width:25px;height:25px;box-sizing:border-box;flex:none;justify-content:center;align-items:center;gap:0;padding:0;border:1px solid var(--border);border-radius:8px;background:var(--chip-bg,var(--bg-elev2));color:var(--text);font-size:0;line-height:1;white-space:nowrap;user-select:none;-webkit-user-select:none}
-.inputbox .btn.composer-plugin-action[aria-label="NVIDIA Models"]::before{content:"";display:block;width:15px;height:15px;flex:none;background-color:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='7' height='7'/%3E%3Crect x='14' y='3' width='7' height='7'/%3E%3Crect x='3' y='14' width='7' height='7'/%3E%3Crect x='14' y='14' width='7' height='7'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='7' height='7'/%3E%3Crect x='14' y='3' width='7' height='7'/%3E%3Crect x='3' y='14' width='7' height='7'/%3E%3Crect x='14' y='14' width='7' height='7'/%3E%3C/svg%3E") center/contain no-repeat}
-.inputbox .btn.composer-plugin-action[aria-label="NVIDIA Models"]:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
-@media (max-width:560px){.inputbox .btn.composer-plugin-action[aria-label="NVIDIA Models"]{width:30px;min-width:30px;height:30px}.inputbox .btn.composer-plugin-action[aria-label="NVIDIA Models"]::before{width:16px;height:16px}}
+.inputbox .btn.composer-plugin-action[aria-label="Model Catalog"]{width:25px;min-width:25px;height:25px;box-sizing:border-box;flex:none;justify-content:center;align-items:center;gap:0;padding:0;border:1px solid var(--border);border-radius:8px;background:var(--chip-bg,var(--bg-elev2));color:var(--text);font-size:0;line-height:1;white-space:nowrap;user-select:none;-webkit-user-select:none}
+.inputbox .btn.composer-plugin-action[aria-label="Model Catalog"]::before{content:"";display:block;width:15px;height:15px;flex:none;background-color:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='7' height='7'/%3E%3Crect x='14' y='3' width='7' height='7'/%3E%3Crect x='3' y='14' width='7' height='7'/%3E%3Crect x='14' y='14' width='7' height='7'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='7' height='7'/%3E%3Crect x='14' y='3' width='7' height='7'/%3E%3Crect x='3' y='14' width='7' height='7'/%3E%3Crect x='14' y='14' width='7' height='7'/%3E%3C/svg%3E") center/contain no-repeat}
+.inputbox .btn.composer-plugin-action[aria-label="Model Catalog"]:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+@media (max-width:560px){.inputbox .btn.composer-plugin-action[aria-label="Model Catalog"]{width:30px;min-width:30px;height:30px}.inputbox .btn.composer-plugin-action[aria-label="Model Catalog"]::before{width:16px;height:16px}}
 `;
 
 function injectStyles() {
@@ -194,7 +194,7 @@ function createInstance(container, ctx) {
   container.appendChild(root);
 
   const head = el("div", "nv-head");
-  const title = el("div", "nv-title", "NVIDIA models");
+  const title = el("div", "nv-title", "Model catalog");
   const sub = el("div", "nv-sub");
   const refresh = el("button", "nv-btn", "Resync");
   refresh.type = "button";
@@ -709,7 +709,7 @@ export default {
       instancesByContainer.set(container, instance);
     } catch (err) {
       try {
-        const box = el("div", "nv-error", `nvidia-models failed to mount: ${errorText(err)}`);
+        const box = el("div", "nv-error", `model-catalog failed to mount: ${errorText(err)}`);
         container.appendChild(box);
       } catch {
         /* nothing left to do */

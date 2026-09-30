@@ -1,11 +1,11 @@
-# nvidia-models (pi-web-ui plugin)
+# model-catalog (pi-web-ui plugin)
 
 List every NVIDIA free model, mark the relevant ones, and turn each on or
 off from the web UI. Bulk-apply the recommended set, resync from the live
 catalog, or restore the previous models.json from backup.
 
 The plugin is a thin view over a frozen engine CLI
-(`scripts/nvidia-models.mjs`, owned by another coder). Every write goes
+(`scripts/model-catalog.mjs`, owned by another coder). Every write goes
 through that engine — the plugin never reads or writes
 `~/.pi/agent/models.json` itself. The engine owns the pin guard,
 atomic-write, read-back verification, and the model-count check.
@@ -15,24 +15,24 @@ atomic-write, read-back verification, and the model-count check.
 1. **Right-panel "NVIDIA Models" tab** — opens via the composer button.
 2. **Composer button** (slot `composer.actions`, order 136: after model
    chip 120, agent-models 135). Registered as `kind: "view"`, so the stock
-   client navigates to `view: "plugin:nvidia-models"` on click — no custom
+   client navigates to `view: "plugin:model-catalog"` on click — no custom
    client code on the click path. Restyled to the native chip look (25x25
    desktop and narrow, matching the native composer dropdowns) by the
    client entry so it sits next to the
    model-selector and `agent-models` chips.
-3. **`/nvidia-models`** in the chat box (server-side slash command, no
+3. **`/model-catalog`** in the chat box (server-side slash command, no
    browser needed).
-4. **`GET  /plugins-api/nvidia-models/status`** — JSON report.
-5. **`POST /plugins-api/nvidia-models/sync`** — resync from the live catalog.
-6. **`POST /plugins-api/nvidia-models/set`** — toggle one model on/off.
-7. **`POST /plugins-api/nvidia-models/bulk`** — recommended / enable all / disable all.
-8. **`POST /plugins-api/nvidia-models/restore`** — restore the last backup.
+4. **`GET  /plugins-api/model-catalog/status`** — JSON report.
+5. **`POST /plugins-api/model-catalog/sync`** — resync from the live catalog.
+6. **`POST /plugins-api/model-catalog/set`** — toggle one model on/off.
+7. **`POST /plugins-api/model-catalog/bulk`** — recommended / enable all / disable all.
+8. **`POST /plugins-api/model-catalog/restore`** — restore the last backup.
 
 ## Routes
 
-All routes shell out to `scripts/nvidia-models.mjs` via `host.bash` with
+All routes shell out to `scripts/model-catalog.mjs` via `host.bash` with
 explicit argv tokens (never interpolated from request text). The cached
-id whitelist in `data/nvidia-models-state.json` (refreshed after every
+id whitelist in `data/model-catalog-state.json` (refreshed after every
 engine call) is the only place the engine binary can take ids from; the
 HTTP body cannot inject new ids.
 
@@ -50,7 +50,7 @@ so a refused change explains itself.
 
 Status responses carry two extra fields on top of the engine payload:
 `healthy` (boolean, true when the engine returned `ok: true`) and
-`cli_present` (boolean, true when `scripts/nvidia-models.mjs` exists on
+`cli_present` (boolean, true when `scripts/model-catalog.mjs` exists on
 disk). When `cli_present` is false the panel renders an in-pane
 diagnostic explaining that the engine is missing — the panel never
 shows a blank box.
@@ -74,7 +74,7 @@ Followed exactly from the agent-models reference. Two key facts:
    - Generation counter on async work so a stale response never paints
      into a destroyed or replaced instance.
    - Always-visible diagnostic line at the bottom of the pane:
-     `nvidia-models v0.1.0 | mounts N | visible|hidden|detached | last <action> @ <time> | fetch ok/fail | write <agent> @ <time> | models N`.
+     `model-catalog v0.2.0 | mounts N | visible|hidden|detached | last <action> @ <time> | fetch ok/fail | write <agent> @ <time> | models N`.
      The visibility field is deliberate: a panel can be mounted,
      connected and fetching while sitting in a hidden pane.
    - Stylesheet compared by **content** before reassigning, never by
@@ -87,13 +87,13 @@ Followed exactly from the agent-models reference. Two key facts:
 ## Engine dependency
 
 This plugin does NOT work without the engine. While the engine
-(`scripts/nvidia-models.mjs`) is still landing:
+(`scripts/model-catalog.mjs`) is still landing:
 
 - `cli_present: false` in `/status` responses.
 - Every `/set` and `/bulk` call rejects with HTTP 502
   (`engine exited with code 1`) because the bash invocation fails.
 - The client renders an in-pane hint: "Engine not installed at
-  scripts/nvidia-models.mjs. Install it then click Resync."
+  scripts/model-catalog.mjs. Install it then click Resync."
 
 When the engine is in place:
 
@@ -111,15 +111,15 @@ are used by the host; write flags go through `/set`, `/bulk`, and
 
 ## Install / update
 
-Source lives in the repo at `scripts/pi-web-plugins/nvidia-models/`.
+Source lives in the repo at `scripts/pi-web-plugins/model-catalog/`.
 Install or update with one command:
 
 ```bash
 node scripts/install-pi-web-plugins.mjs
 ```
 
-That creates a junction `~/.pi-web/plugins/nvidia-models ->
-scripts/pi-web-plugins/nvidia-models` (Windows junction, no admin
+That creates a junction `~/.pi-web/plugins/model-catalog ->
+scripts/pi-web-plugins/model-catalog` (Windows junction, no admin
 required). The install script is idempotent: an existing correct
 junction is left alone; a stray real directory in the live location is
 adopted into the repo copy (first-one-wins per file), then replaced with
@@ -135,10 +135,10 @@ restarting it would kill a running turn.
 After install:
 
 ```bash
-node scripts/nvidia-models.mjs --sync --json
+node scripts/model-catalog.mjs --sync --json
 ```
 
-Run once to populate `data/nvidia-models-state.json` with the live
+Run once to populate `data/model-catalog-state.json` with the live
 NVIDIA catalog so the panel has something to show.
 
 ## Tier judgement
@@ -179,9 +179,9 @@ The plugin just renders whatever tier the engine assigns.
 ## Tests
 
 ```bash
-node --check scripts/pi-web-plugins/nvidia-models/index.mjs
-node --check scripts/pi-web-plugins/nvidia-models/client/entry.mjs
-node scripts/pi-web-plugins/nvidia-models/index.test.mjs
+node --check scripts/pi-web-plugins/model-catalog/index.mjs
+node --check scripts/pi-web-plugins/model-catalog/client/entry.mjs
+node scripts/pi-web-plugins/model-catalog/index.test.mjs
 ```
 
 The server-side test (`index.test.mjs`) covers each route against a mock

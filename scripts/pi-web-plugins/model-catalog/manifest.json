@@ -1,0 +1,14 @@
+{
+  "id": "model-catalog",
+  "name": "Model Catalog",
+  "version": "0.2.0",
+  "description": "List every NVIDIA free model, mark the relevant ones, and turn each on or off. Bulk-apply the recommended set, resync from the live catalog, or restore the previous models.json from backup. The daily sync also regenerates the agent-models pricing table (costs.json) so the picker stays in sync with the latest NVIDIA catalog. Every model write goes through scripts/nvidia-models.mjs.",
+  "apiVersion": 2,
+  "permissions": [
+    "ui",
+    "http",
+    "tools"
+  ],
+  "view": "plugin:model-catalog",
+  "preload": true
+}

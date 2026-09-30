@@ -31,7 +31,7 @@
 
 import { definePlugin } from "./sdk/index.mjs";
 // Raw node:fs for the global fallback: host.fs is workspace-anchored by
-// design, and sibling plugins (nvidia-models) already read config this way.
+// design, and sibling plugins (model-catalog) already read config this way.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";

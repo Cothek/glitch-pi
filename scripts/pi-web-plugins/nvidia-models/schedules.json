@@ -1,1 +1,0 @@
-{"v":1,"schedules":{"nvidia-models-daily-sync":{"spec":"86400000","catchUp":"once","label":"NVIDIA free-model catalog sync","createdAt":1790469557896}}}

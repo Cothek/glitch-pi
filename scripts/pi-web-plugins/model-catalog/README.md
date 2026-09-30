@@ -5,7 +5,7 @@ off from the web UI. Bulk-apply the recommended set, resync from the live
 catalog, or restore the previous models.json from backup.
 
 The plugin is a thin view over a frozen engine CLI
-(`scripts/model-catalog.mjs`, owned by another coder). Every write goes
+(`scripts/nvidia-models.mjs`, owned by another coder). Every write goes
 through that engine — the plugin never reads or writes
 `~/.pi/agent/models.json` itself. The engine owns the pin guard,
 atomic-write, read-back verification, and the model-count check.
@@ -30,9 +30,9 @@ atomic-write, read-back verification, and the model-count check.
 
 ## Routes
 
-All routes shell out to `scripts/model-catalog.mjs` via `host.bash` with
+All routes shell out to `scripts/nvidia-models.mjs` via `host.bash` with
 explicit argv tokens (never interpolated from request text). The cached
-id whitelist in `data/model-catalog-state.json` (refreshed after every
+id whitelist in `data/nvidia-models-state.json` (refreshed after every
 engine call) is the only place the engine binary can take ids from; the
 HTTP body cannot inject new ids.
 
@@ -50,7 +50,7 @@ so a refused change explains itself.
 
 Status responses carry two extra fields on top of the engine payload:
 `healthy` (boolean, true when the engine returned `ok: true`) and
-`cli_present` (boolean, true when `scripts/model-catalog.mjs` exists on
+`cli_present` (boolean, true when `scripts/nvidia-models.mjs` exists on
 disk). When `cli_present` is false the panel renders an in-pane
 diagnostic explaining that the engine is missing — the panel never
 shows a blank box.
@@ -74,7 +74,7 @@ Followed exactly from the agent-models reference. Two key facts:
    - Generation counter on async work so a stale response never paints
      into a destroyed or replaced instance.
    - Always-visible diagnostic line at the bottom of the pane:
-     `model-catalog v0.2.0 | mounts N | visible|hidden|detached | last <action> @ <time> | fetch ok/fail | write <agent> @ <time> | models N`.
+     `nvidia-models v0.2.0 | mounts N | visible|hidden|detached | last <action> @ <time> | fetch ok/fail | write <agent> @ <time> | models N`.
      The visibility field is deliberate: a panel can be mounted,
      connected and fetching while sitting in a hidden pane.
    - Stylesheet compared by **content** before reassigning, never by
@@ -87,13 +87,13 @@ Followed exactly from the agent-models reference. Two key facts:
 ## Engine dependency
 
 This plugin does NOT work without the engine. While the engine
-(`scripts/model-catalog.mjs`) is still landing:
+(`scripts/nvidia-models.mjs`) is still landing:
 
 - `cli_present: false` in `/status` responses.
 - Every `/set` and `/bulk` call rejects with HTTP 502
   (`engine exited with code 1`) because the bash invocation fails.
 - The client renders an in-pane hint: "Engine not installed at
-  scripts/model-catalog.mjs. Install it then click Resync."
+  scripts/nvidia-models.mjs. Install it then click Resync."
 
 When the engine is in place:
 
@@ -135,10 +135,10 @@ restarting it would kill a running turn.
 After install:
 
 ```bash
-node scripts/model-catalog.mjs --sync --json
+node scripts/nvidia-models.mjs --sync --json
 ```
 
-Run once to populate `data/model-catalog-state.json` with the live
+Run once to populate `data/nvidia-models-state.json` with the live
 NVIDIA catalog so the panel has something to show.
 
 ## Tier judgement

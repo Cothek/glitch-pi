@@ -13,10 +13,15 @@
  *      IFF >= 1 tool call happened since the last write (idle sessions never
  *      fire). Quiet sessions: trailing fire at the mark, then silence until
  *      new activity. Matches the unit-tested helper model (test-mulahazah.mjs).
- *   2. TOKEN BURST (1M new tokens): SKIPPED in this port — OpenCode SQLite session
- *      table not available under Pi. Feasible now: pi exposes ctx.getContextUsage()
- *      (live context tokens) + MessageEndEvent (per-turn usage). Not wired yet.
- *   3. TRIGGER PHRASES: immediate fire on tool-arg scan (5-min cooldown).
+ *   2. TOKEN BURST (1M new tokens): WIRED Pi-native 2026-09-30 — accumulates
+ *      input+output+reasoning from each assistant turn's usage on message_end
+ *      (cacheRead/cacheWrite excluded: re-reads are not new information; mirrors
+ *      the OpenCode in+out+reasoning delta). Threshold 1M, MULAHAZAH_BURST_TOKENS
+ *      env override for tests. Fires with the shared cooldown gate.
+ *   3. TRIGGER PHRASES: immediate fire on tool-arg scan (5-min cooldown). Fixed
+ *      2026-09-30: Pi emits args only on tool_execution_start, so they are captured
+ *      into a pendingArgs map keyed by toolCallId and joined at end (stuck-detector
+ *      v2 pattern). Reading event.args on end always saw undefined (never fired).
  *   4. SESSION-END CAPTURE: session_shutdown fires once IFF unrecorded work
  *      exists (moved off the recurring timer, 2026-09-30).
  *   5. 24h stale reset + startup orphan-flag sweep + 24h flag TTL sweep.
@@ -41,6 +46,7 @@
 import { promises as fs, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, AgentMessage, TextContent } from "@earendil-works/pi-coding-agent";
+import { burstThresholdFromEnv, computeTurnTokens, formatTokenCount, shouldFireBurst } from "../lib/mulahazah-burst.mjs";
 
 // --- Constants (mirrors scripts/lib/mulahazah-helpers.mjs) ---
 const HEARTBEAT_INTERVAL_MS = 45 * 60 * 1000; // 45 min (was 15 min, Troy 2026-08-19; raised 2026-09-30, over-firing fix)
@@ -48,6 +54,8 @@ const TIMER_CHECK_MS = 60 * 1000;              // 60s tick
 const COOLDOWN_MS = 5 * 60 * 1000;             // phrase-trigger cooldown
 const STALE_RESET_MS = 24 * 60 * 60 * 1000;    // 24h stale reset
 const FLAG_TTL_MS = 24 * 60 * 60 * 1000;       // flag TTL sweep
+const BURST_THRESHOLD_TOKENS = burstThresholdFromEnv(process.env); // 1M default; MULAHAZAH_BURST_TOKENS override (tests)
+const MAX_PENDING_ARGS = 200;                   // phrase-scan join buffer (stuck-detector v2 shape)
 const OBSERVATIONS_MAX_BYTES = 5 * 1024 * 1024;
 const OBSERVATIONS_MAX_LINES = 1000;
 
@@ -72,6 +80,7 @@ interface SessionEntry {
   toolCounts: Record<string, number>;
   agent: string | null;
   isDispatcher: boolean;
+  tokensSinceWrite: number; // burst arm: input+output+reasoning since last memory write
 }
 
 function createSessionEntry(now = Date.now()): SessionEntry {
@@ -81,6 +90,7 @@ function createSessionEntry(now = Date.now()): SessionEntry {
     lastActivityTime: now,
     toolCallCount: 0,
     toolCounts: {},
+    tokensSinceWrite: 0,
     agent: null,
     isDispatcher: true, // Pi primary sessions are flag-capable (see header)
   };
@@ -109,6 +119,8 @@ export default function (pi: ExtensionAPI) {
   let observationsFile = join(mulahazahDir, "observations.jsonl");
 
   const sessionStates = new Map<string, SessionEntry>();
+  // Phrase-scan join buffer: tool_execution_start carries args, end does not.
+  const pendingArgs = new Map<string, unknown>();
   let currentSessionID: string | null = null;
 
   function triggerFlagPath(sessionID: string) {
@@ -191,6 +203,14 @@ export default function (pi: ExtensionAPI) {
     ].join("\n");
   }
 
+  function buildBurstSummary(sessionState: SessionEntry): string {
+    return [
+      `Mulahazah token burst: ${formatTokenCount(sessionState.tokensSinceWrite)} new tokens (input+output+reasoning, cache excluded) since the last memory write — threshold ${formatTokenCount(BURST_THRESHOLD_TOKENS)}.`,
+      `Tool calls since last write: ${sessionState.toolCallCount}. Tool breakdown: ${formatToolCounts(sessionState.toolCounts)}`,
+      `Trigger @memory to record session observations (or self-fulfill per your mode).`,
+    ].join("\n");
+  }
+
   function isCooldownElapsed(sessionState: SessionEntry): boolean {
     if (sessionState.lastTriggerTime === null) return true;
     return Date.now() - sessionState.lastTriggerTime >= COOLDOWN_MS;
@@ -226,6 +246,7 @@ export default function (pi: ExtensionAPI) {
       ss.lastTriggerTime = Date.now();
       ss.toolCallCount = 0;
       ss.toolCounts = {};
+      ss.tokensSinceWrite = 0;
 
       const flagPath = triggerFlagPath(sessionID);
       await fs.writeFile(flagPath, summary + "\n", "utf8");
@@ -322,15 +343,18 @@ export default function (pi: ExtensionAPI) {
         const now = Date.now();
         for (const [sid, rawEntry] of Object.entries(parsed as Record<string, SessionEntry>)) {
           const e = rawEntry;
+          e.tokensSinceWrite = Number(e.tokensSinceWrite) || 0; // backfill pre-burst state files
           if (e.lastTriggerTime !== null && now - e.lastTriggerTime > STALE_RESET_MS) {
             e.toolCallCount = 0;
             e.toolCounts = {};
+            e.tokensSinceWrite = 0;
           }
           if (now - e.sessionStartTime > STALE_RESET_MS) {
             e.toolCallCount = 0;
             e.toolCounts = {};
             e.sessionStartTime = now;
             e.lastTriggerTime = null;
+            e.tokensSinceWrite = 0;
           }
           e.isDispatcher = true; // force flag-capable on load (Pi primary)
           sessionStates.set(sid, e);
@@ -394,6 +418,15 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  pi.on("tool_execution_start", async (event: any) => {
+    if (!event?.toolCallId) return;
+    if (pendingArgs.size >= MAX_PENDING_ARGS) {
+      const firstKey = pendingArgs.keys().next().value;
+      if (firstKey !== undefined) pendingArgs.delete(firstKey);
+    }
+    pendingArgs.set(String(event.toolCallId), event.args);
+  });
+
   pi.on("tool_execution_end", async (event) => {
     const sessionID = currentSessionID || "default";
     const tool = event.toolName || "unknown";
@@ -414,8 +447,13 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Phrase scan on tool args (matches OpenCode tool.execute.after scan)
-    const phrase = detectTriggerPhrase(event.args ?? (event as any).input);
+    // Phrase scan on tool args (matches OpenCode tool.execute.after scan).
+    // Pi emits args ONLY on tool_execution_start — join via the pendingArgs map
+    // keyed by toolCallId (stuck-detector v2 pattern; the end event's args are
+    // always undefined, which silently disabled this arm until 2026-09-30).
+    const startArgs = pendingArgs.get(String((event as any).toolCallId));
+    pendingArgs.delete(String((event as any).toolCallId));
+    const phrase = detectTriggerPhrase(startArgs ?? (event as any).args);
     if (phrase) {
       if (process.env.MULAHAZAH_DEBUG) {
         console.log(`[mulahazah] trigger phrase detected: "${phrase}" in session ${sessionID}`);
@@ -425,6 +463,29 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (ss.toolCallCount % 10 === 0) {
+      await saveState();
+    }
+  });
+
+  // Token burst: accumulate new tokens per assistant turn (message_end), fire
+  // when the since-last-write total crosses the threshold. cacheRead/cacheWrite
+  // excluded by design (see .pi/lib/mulahazah-burst.mjs). Persisted every turn
+  // (small atomic JSON write) so a crash never loses the accumulated total.
+  pi.on("message_end", async (event: any) => {
+    const msg = event?.message;
+    if (!msg || msg.role !== "assistant") return;
+    const sid = currentSessionID || "default";
+    const ss = getSessionState(sid);
+    const turnTokens = computeTurnTokens(msg.usage);
+    if (turnTokens <= 0) return;
+    ss.tokensSinceWrite += turnTokens;
+    ss.lastActivityTime = Date.now();
+    if (process.env.MULAHAZAH_DEBUG) {
+      console.log(`[mulahazah] session ${sid} +${turnTokens} tokens this turn; ${ss.tokensSinceWrite} since last write (threshold ${BURST_THRESHOLD_TOKENS})`);
+    }
+    if (shouldFireBurst(ss.tokensSinceWrite, BURST_THRESHOLD_TOKENS, isCooldownElapsed(ss))) {
+      await fireTrigger(sid, buildBurstSummary(ss));
+    } else {
       await saveState();
     }
   });

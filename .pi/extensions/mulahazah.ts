@@ -7,13 +7,19 @@
  *   data/mulahazah/state.json             — per-session map keyed by sessionID
  *   data/mulahazah/observations.jsonl     — append-only tool-call log
  *
- * Trigger model (same as OpenCode plugin, Troy 2026-08-19):
- *   1. HEARTBEAT (15 min): background timer every 60s; fires once 15 min after
- *      last write IF activity (or always at quiet-session mark — session-end capture).
+ * Trigger model (OpenCode plugin, Troy 2026-08-19; idle gate restored 2026-09-30
+ * after the Pi port dropped it and idle sessions fired for 24h straight):
+ *   1. HEARTBEAT (45 min): background timer every 60s; fires once per interval
+ *      IFF >= 1 tool call happened since the last write (idle sessions never
+ *      fire). Quiet sessions: trailing fire at the mark, then silence until
+ *      new activity. Matches the unit-tested helper model (test-mulahazah.mjs).
  *   2. TOKEN BURST (1M new tokens): SKIPPED in this port — OpenCode SQLite session
- *      table not available under Pi. Revisit when Pi exposes token totals per session.
+ *      table not available under Pi. Feasible now: pi exposes ctx.getContextUsage()
+ *      (live context tokens) + MessageEndEvent (per-turn usage). Not wired yet.
  *   3. TRIGGER PHRASES: immediate fire on tool-arg scan (5-min cooldown).
- *   4. 24h stale reset + startup orphan-flag sweep + 24h flag TTL sweep.
+ *   4. SESSION-END CAPTURE: session_shutdown fires once IFF unrecorded work
+ *      exists (moved off the recurring timer, 2026-09-30).
+ *   5. 24h stale reset + startup orphan-flag sweep + 24h flag TTL sweep.
  *
  * Consumption: OpenCode used experimental.chat.messages.transform to inject into
  * last message.parts. Pi equivalent: `context` event (mutates messages before LLM).
@@ -37,7 +43,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, AgentMessage, TextContent } from "@earendil-works/pi-coding-agent";
 
 // --- Constants (mirrors scripts/lib/mulahazah-helpers.mjs) ---
-const HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000; // 15 min (Troy 2026-08-19)
+const HEARTBEAT_INTERVAL_MS = 45 * 60 * 1000; // 45 min (was 15 min, Troy 2026-08-19; raised 2026-09-30, over-firing fix)
 const TIMER_CHECK_MS = 60 * 1000;              // 60s tick
 const COOLDOWN_MS = 5 * 60 * 1000;             // phrase-trigger cooldown
 const STALE_RESET_MS = 24 * 60 * 60 * 1000;    // 24h stale reset
@@ -266,22 +272,21 @@ export default function (pi: ExtensionAPI) {
     let dirty = false;
     for (const [sid, ss] of sessionStates) {
       if (!ss) continue;
-      const lastActivity = ss.lastTriggerTime ?? ss.sessionStartTime;
-      if (now - lastActivity > STALE_RESET_MS) continue;
+      const lastWrite = ss.lastTriggerTime ?? ss.sessionStartTime;
+      if (now - lastWrite > STALE_RESET_MS) continue;
 
-      // Heartbeat: fire if HEARTBEAT_INTERVAL_MS elapsed since last write.
-      // Quiet sessions get their session-end capture here too (always fires at mark).
-      if (ss.lastTriggerTime !== null && now - lastActivity >= HEARTBEAT_INTERVAL_MS) {
-        if (isCooldownElapsed(ss)) {
-          await fireTrigger(sid, buildTriggerSummary(ss, "heartbeat"));
-          dirty = true;
-        }
-      } else if (ss.lastTriggerTime === null && now - ss.sessionStartTime >= HEARTBEAT_INTERVAL_MS) {
-        // First write never happened; session-end capture at 15 min mark.
-        if (isCooldownElapsed(ss)) {
-          await fireTrigger(sid, buildTriggerSummary(ss, "session-end heartbeat"));
-          dirty = true;
-        }
+      // Over-firing fix (2026-09-30): never fire without unrecorded work. The
+      // old code anchored on lastTriggerTime with NO activity gate, so idle
+      // sessions fired a flag every 15 min for 24h (state.json showed zero-
+      // tool-call sessions accumulating triggers; 10+ orphan flags on disk).
+      if (ss.toolCallCount === 0) continue;
+
+      // Heartbeat: fire once per interval IFF tool calls happened since the
+      // last write — the unit-tested helper model. A quiet session fires its
+      // trailing write at the mark, then stops until new activity arrives.
+      if (now - lastWrite >= HEARTBEAT_INTERVAL_MS) {
+        await fireTrigger(sid, buildTriggerSummary(ss, "heartbeat"));
+        dirty = true;
       }
     }
     if (dirty) await saveState();
@@ -475,6 +480,16 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    // Session-end capture (moved here 2026-09-30 from the recurring timer):
+    // fire ONCE at shutdown IFF unrecorded work exists. The event payload is
+    // {reason, targetSessionFile} — no session id — so use the tracked
+    // currentSessionID. A resumed session consumes the flag via the context
+    // hook; abandoned flags age out via the 24h TTL sweep.
+    const sid = currentSessionID || "default";
+    const ss = sessionStates.get(sid);
+    if (ss && ss.toolCallCount > 0) {
+      await fireTrigger(sid, buildTriggerSummary(ss, "session-end capture"));
+    }
     await saveState();
     const t = (globalThis as any)[HEARTBEAT_TIMER_KEY];
     if (t) {

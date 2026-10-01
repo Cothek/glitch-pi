@@ -180,6 +180,22 @@ if (-not $up) {
 }
 Stamp "pi-web-ui healthy on :$WebPort"
 
+# ---- 3.5. Re-apply the local rename-push patch (best-effort, idempotent) ----
+# pi-web-ui upgrades replace dist/server/*.js and wipe our local change that
+# makes conversation rename titles re-push to all client tabs (upstream never
+# calls onRunningChanged in renameConversation). The patch script skips itself
+# if already applied and is safe to run on every restart. Runs before
+# continuation injection so the resumed agent sees fresh titles.
+$renamePatch = Join-Path $RootDir "scripts\patch-pi-web-ui-rename-push.mjs"
+if (Test-Path $renamePatch) {
+    try {
+        & $NodeExe $renamePatch
+        if ($LASTEXITCODE -eq 0) { Stamp "pi-web-ui rename-push patch applied" } else { Stamp "WARN: rename-push patch exited $LASTEXITCODE (non-blocking)" }
+    } catch { Stamp "WARN: rename-push patch failed (non-blocking): $_" }
+} else {
+    Stamp "WARN: rename-push patch script missing - skipping"
+}
+
 # ---- 4. Continuation injection (optional) ------------------------------------
 if ($ContinueId -or $ContinuePath) {
     $resumeArgs = @((Join-Path $RootDir "scripts\resume-session.mjs"))

@@ -671,6 +671,24 @@ async function main() {
   // launch — this file used to spawn a second, duplicate sync before every
   // launch-pi run).
 
+  // ---- Desktop control plugin (cua-driver daemon) ------------------------
+  // Starts the desktop-eyes/hands daemon on every launch AND every stack
+  // restart (restart-pi-stack.ps1 re-enters here via --reuse-saved). The
+  // daemon is spawned detached+unref'd so it outlives the launcher. Toggle:
+  // node scripts/desktop-control.mjs on|off  (flag: data/config/desktop-control.json).
+  // Non-fatal by design: desktop control must never block startup.
+  try {
+    const dc = await import('./desktop-control.mjs');
+    const r = await dc.ensure();
+    if (r && r.ok && !r.already) {
+      log(DARK_GREEN, `  Desktop control: daemon started (pid ${r.pid})`);
+    } else if (r && r.skipped === 'disabled') {
+      log(DARK_GRAY, '  Desktop control: disabled (node scripts/desktop-control.mjs on to enable)');
+    }
+  } catch (e) {
+    log(DARK_YELLOW, `  (desktop control start failed: ${e && e.message ? e.message : 'unknown'} - continuing)`);
+  }
+
   const result = runScript(config.script, config.args);
   if (!result.success) {
     process.exit(result.error?.status || 1);

@@ -147,3 +147,6 @@ CLAUDE.md
 .pi/plugin-tool-state.json
 scripts/pi-web-plugins/*/.pi-approved  
 # pi-web-ui plugin permission marker (host-created, machine-local)
+
+# page-picker browser extension (downloaded by the installer from pi-web-ui releases, machine-local)
+/browser-extension/

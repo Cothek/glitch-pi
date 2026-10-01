@@ -50,3 +50,17 @@ This project is indexed by GitNexus as **glitch-pi**.
 - **Analyze policy is pinned** to `GITNEXUS_LBUG_EXTENSION_INSTALL=never` (user env var) so runs are offline, deterministic and cannot create FTS indexes.
 - **A failed analyze self-heals.** It sets `incrementalInProgress`; the next run detects that and forces a full rebuild (~20s) that restores a known-good index. Just re-run it.
 - **`CLAUDE.md` is deleted and gitignored.** Analyze regenerates it for Claude Code, which this repo does not use; it may reappear on disk after a changed-index run. Expected, not a regression.
+
+## Repo purpose & file hygiene (three-repo system)
+
+This project is one of three repos with a single, distinct purpose each. A file that does not fit its repo's purpose is a dead-file candidate by definition.
+
+| Repo | Path | Purpose | Never contains |
+| --- | --- | --- | --- |
+| **glitch (main)** | `glitch-pi/` | Engine + agent config: code, scripts, routing, root AGENTS.md | User memory, logs, temp artifacts, screenshots |
+| **user** | `glitch-pi/user/` (own git repo, symlinked to `%USERPROFILE%/.pi/agent/user`) | Memory files only: main-memory, decisions, patterns, reminders, post-mortems, diaries, session state | Engine code, binaries, caches |
+| **memory core** | `glitch-pi/glitch-memorycore/` (submodule) | Search + skills + plugin engine, source of truth for `.pi/skills/` | User data, runtime state |
+
+**File-category rule (prevention)**: every new file gets one category at creation time: `engine` (committed, curated), `user-memory` (committed to user repo), `scratch` (`data/scratch/`, disposable), `log` (`data/logs/`, disposable). Scratch and log paths are purged by policy (see `scripts/janitor.mjs`); nothing ambiguous may accumulate there.
+
+**Hygiene tooling**: `node scripts/repo-hygiene.mjs` runs a report-only audit across all three repos (untracked files, stale tracked files, backup/temp litter, memory frontmatter staleness, orphaned skills). It never deletes; Troy confirms, janitor or a human deletes. The `observation` skill runs it during Survey/Audit tiers.

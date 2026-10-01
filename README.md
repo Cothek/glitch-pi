@@ -154,6 +154,21 @@ Either mode polls the ports until they really bind, so a slow `pi-web-ui` boot i
 
 The password lives in `.server-password` (repo root, gitignored). It is printed to the console only - never written to `data/logs/`.
 
+## Browser Extension (Page Picker)
+
+The installer downloads the official pi-web-ui [page-picker](https://github.com/xing-shuyin/pi-web-ui/tree/main/plugins/page-picker) extension (third-party, Chrome/Edge) into `browser-extension/page-picker/` in the install folder. It is machine-local and gitignored.
+
+Load it once after install:
+
+1. Open `chrome://extensions` (`edge://extensions` on Edge)
+2. Enable **Developer mode**
+3. Click **Load unpacked** and select `browser-extension/page-picker`
+4. Open the extension's options and set the pi-web-ui address: `http://localhost:8787` (click "Authorize this address" first for remote or LAN addresses)
+
+Then press `Alt+Shift+P` (or the toolbar icon) on any page, hover to highlight, click to pick, and "Add to chat" to drop the element context into the composer.
+
+Manual download if the installer step failed: [page-picker-extension.zip](https://github.com/xing-shuyin/pi-web-ui/releases/latest/download/page-picker-extension.zip), unzip to `browser-extension/page-picker/`.
+
 ## Repository Structure
 
 ```

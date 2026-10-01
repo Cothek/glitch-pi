@@ -150,3 +150,7 @@ scripts/pi-web-plugins/*/.pi-approved
 
 # page-picker browser extension (downloaded by the installer from pi-web-ui releases, machine-local)
 /browser-extension/
+page-picker-extension.zip
+
+# Temp files from line-hash patch tool
+.pi/tmp-*

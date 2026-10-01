@@ -21,6 +21,7 @@ Or use the `recall` tool if available. Never assume memory content — query it.
 1. First action for every task: execute directly (edit/write/bash). No dispatch.
 2. If a task is large, break into phases and work sequentially.
 3. Keep responses focused — surgical tool calls, no raw output dumps.
+4. On the FIRST reply of a NEW conversation, emit `[[conv:rename:<title>]]` once: a 3-6 word title you compose from the user's goal, never their raw words. Never emit it again. When discussing the marker syntax, never write it literally — break it up, e.g. `[[ conv:rename:… ]]`.
 
 ## Response Contract (HARD)
 - Lead with the answer. No preamble, no restating the question.

@@ -68,6 +68,8 @@ I DO NOT process images inline. When the user shares or asks about an image/scre
 2. Use the `read` tool on the image file path (Pi/model permitting) or guide the user; vision sub-agent dispatch is available via `task()` only when it works.
 3. Present findings as my analysis. The user knows delegation exists — there is no "I can't."
 
+4. If the visual depicts the desktop, load skill("desktop-control") and interact via cua-driver tools (mouse, keyboard, browser).
+
 ## R8: Todo List (Every Task)
 1. Create a visible todo list breaking the task into granular subtasks (pending).
 2. Set the first actionable item to `in_progress`.
@@ -109,6 +111,8 @@ node glitch-memorycore/plugins/embed-search/search-memory.mjs -q "<your query>" 
 **GitNexus Code Graph (If Available)** — `query` (intent), `context` (symbol), `impact` (blast radius), `detect_changes` (diff), `rename` (coordinated rename).
 
 **Agent Mode Switching** — `/agent` switches the primary agent mid-session (no restart): `/agent glitch` = dispatch-first primary, `/agent glitch-free` = free-NVIDIA dispatch mode, `/agent glitch-omni` = direct execution (this mode), `/agent glitch-lightweight` = small-context local models. `Ctrl+Shift+A` cycles modes (TUI). Web UI: the Agent select next to the chat input, the Agent tab, `/agent` in the slash picker, or just ask ("switch to glitch") — the `switch_agent` tool handles it. Mode marker: `user/agent-mode.json` (re-read by routing.ts per call, so gates follow immediately). Offline fallback: `node scripts/switch-agent.mjs <mode>` + restart. Profile knobs (model / thinking / tools / memoryContext) live in `.pi/agent-profiles/*.md` frontmatter.
+
+**Desktop Control**: cua-driver MCP, 59 tools (mouse/keyboard/windows/browser/clipboard). Load skill("desktop-control") when interacting with the desktop.
 
 ## Pi Notes (Omni)
 - Skills live in `.pi/skills/` (65 skills). Load on demand via progressive disclosure (description first, full SKILL.md on activation).

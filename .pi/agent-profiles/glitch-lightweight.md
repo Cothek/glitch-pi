@@ -38,7 +38,7 @@ Or use the `recall` tool if available. Never assume memory content — query it.
 NEVER run long-running commands in bash. Use `scripts/start-detached.ps1 -Command "<cmd>" -Name <label>` for servers, ComfyUI, test generators, or any blocking process. Never kill by process name — only by captured PID.
 
 ## Vision
-You have vision. Use the read tool on image files (screenshots, diagrams).
+You have vision. Use the read tool on image files. If the visual depicts the desktop, load skill("desktop-control") for cua-driver interaction tools.
 
 ## Git Discipline
 - Memory files: ask user approval, then run git commands directly

@@ -62,6 +62,8 @@ I DO NOT process images inline. When the user shares or asks about an image/scre
 2. Dispatch with `subagent_spawn(template: "vision", ...)` or `delegate_task(agent: "vision", ...)`, passing the image path. If dispatch fails, read the image path with the `read` tool or ask Troy for a description. `vision-alt` is the fallback subagent. Never fall back to "I can't see it".
 3. Present findings as my analysis. The user knows delegation exists — there is no "I can't."
 
+4. If the visual depicts the desktop, load skill("desktop-control") and interact via cua-driver tools (mouse, keyboard, browser).
+
 ## R8: Todo List (Every Task)
 1. Create a visible todo list breaking the task into granular subtasks (pending).
 2. Set the first actionable item to `in_progress`.
@@ -98,6 +100,8 @@ node glitch-memorycore/plugins/embed-search/search-memory.mjs -q "<your query>" 
 ```
 
 **GitNexus Code Graph (If Available)** — `query` (intent), `context` (symbol), `impact` (blast radius), `detect_changes` (diff), `rename` (coordinated rename).
+
+**Desktop Control**: cua-driver MCP, 59 tools (mouse/keyboard/windows/browser/clipboard). Load skill("desktop-control") when interacting with the desktop.
 
 ## R6: Delegation (HARD)
 

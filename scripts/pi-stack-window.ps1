@@ -6,11 +6,13 @@
     start-pi-stack.ps1 -Windowed (or start-pi-stack-window.ps1).
 
     Three layers, all attached to THIS console:
-      1. auth-proxy   - child process sharing this console (localhost:<AuthPort> -> <WebPort>)
-      2. cloudflared  - child process sharing this console, only when no tunnel
+      1. pi-web-ui    - console-attached child, started FIRST and waited on
+                        (0.0.0.0:<WebPort>); the window parks on it, so the
+                        window lives as long as it does
+      2. auth-proxy   - child process sharing this console (localhost:<AuthPort> -> <WebPort>)
+      3. cloudflared  - child process sharing this console, only when no tunnel
                         is already running (skipped otherwise, and never killed
                         unless this window started it)
-      3. pi-web-ui    - the FOREGROUND process (0.0.0.0:<WebPort>)
 
     Because all of them run on this window's console, CLOSING THE WINDOW stops
     the whole stack (Windows terminates every process attached to the console).
@@ -53,6 +55,37 @@ if (-not (Test-Path $NodeExe)) { $NodeExe = "node" }
 $WebEntry = Join-Path $RootDir "data\node\node_modules\pi-web-ui\bin\pi-web-ui.mjs"
 $AuthProxy = Join-Path $RootDir "plugins\auth-proxy.mjs"
 $LauncherCmd = Join-Path $env:USERPROFILE "pi-web-ui-launcher.cmd"
+
+# pi-web-ui 403s browser WS upgrades whose Origin != Host (originAllowed()).
+# Behind the auth proxy / tunnel, Host reads localhost:<WebPort>, so the public
+# hostnames must be allow-listed. Kept in sync with start-pi-stack.ps1 and
+# %USERPROFILE%\pi-web-ui-launcher.cmd  -  change all three together.
+$env:PI_WEB_ALLOW_ORIGINS = "https://pi.cothekdesigns.com,https://glitch.cothekdesigns.com"
+
+# ---- PI_WEB_TOKEN (shared token gate on :8787) ------------------------------
+# Same load-or-generate block as start-pi-stack.ps1, placed before pi-web-ui
+# is spawned so the child process inherits it. start-pi-stack.ps1 -Windowed
+# usually runs first; if it did, the file already exists and we just re-load.
+# Never log the value - it is the gate secret.
+$TokenFile = Join-Path $RootDir ".server-token"
+function Ensure-ServerToken {
+    if (Test-Path $TokenFile) {
+        $existing = (Get-Content -Path $TokenFile -Raw -ErrorAction SilentlyContinue)
+        if ($existing) { $existing = $existing.Trim() }
+        if ($existing) {
+            $env:PI_WEB_TOKEN = $existing
+            Write-Host "  web token loaded from .server-token"
+            return
+        }
+    }
+    $bytes = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+    $hex = ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($TokenFile, $hex, $utf8NoBom)
+    $env:PI_WEB_TOKEN = $hex
+    Write-Host "  web token generated"
+}
+Ensure-ServerToken | Out-Null
 
 # ---- Cloudflare tunnel (windowed) -----------------------------------------
 # Same assets the detached path resolves in scripts\lib\tunnel.mjs; the env
@@ -150,8 +183,44 @@ if (Test-Path $ShowCreds) {
 $proxy = $null
 $tunnel = $null
 $tunnelOwned = $false
+$webui = $null
 try {
-    # --- 1. auth proxy: child on THIS console -----------------------------
+    # --- 1. pi-web-ui FIRST (console-attached child) ----------------------
+    # The auth proxy must not accept requests before the web UI is listening:
+    # a browser/tunnel polling during the gap gets ECONNREFUSED at the proxy
+    # which logs `Proxy error for GET ...` noise on every boot. Starting the
+    # web UI first and waiting for its port closes that race. -NoNewWindow
+    # keeps it attached to THIS console, so closing the window still stops it.
+    Write-Host "  starting pi-web-ui on 0.0.0.0:$WebPort ..." -ForegroundColor Cyan
+    if ($useLauncher) {
+        $webui = Start-Process -FilePath "cmd.exe" `
+            -ArgumentList @("/c", "`"$LauncherCmd`"") `
+            -NoNewWindow -PassThru
+    } else {
+        $webArgs = @("`"$WebEntry`"", "--port", "$WebPort", "--host", "0.0.0.0", "--cwd", "`"$RootDir`"")
+        if ($NoBrowser) { $webArgs += "--no-browser" }
+        $webui = Start-Process -FilePath $NodeExe -ArgumentList $webArgs -NoNewWindow -PassThru
+    }
+    # Wait for the port (up to ~20s). Timeout is a warning, not a refusal:
+    # slow first-time cold starts should still get the proxy + tunnel up.
+    $ready = $false
+    for ($i = 0; $i -lt 40; $i++) {
+        if ($webui.HasExited) { break }
+        if (Test-Port $WebPort) { $ready = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($webui.HasExited) {
+        Write-Host "  ERROR: pi-web-ui exited immediately (code $($webui.ExitCode))." -ForegroundColor Red
+        Write-Host "         The stack is down; fix the web server first." -ForegroundColor DarkGray
+        return
+    }
+    if ($ready) {
+        Write-Host "  pi-web-ui up (PID $($webui.Id))" -ForegroundColor DarkGreen
+    } else {
+        Write-Host "  WARNING: :$WebPort not listening after 20s - continuing anyway." -ForegroundColor Yellow
+    }
+
+    # --- 2. auth proxy: child on THIS console -----------------------------
     Write-Host "  starting auth proxy on :$AuthPort ..." -ForegroundColor Cyan
     $proxy = Start-Process -FilePath $NodeExe `
         -ArgumentList @("`"$AuthProxy`"", "$AuthPort", "http://localhost:$WebPort") `
@@ -166,7 +235,7 @@ try {
         Write-Host "  auth proxy up (PID $($proxy.Id))" -ForegroundColor DarkGreen
     }
 
-    # --- 2. cloudflared: child on THIS console ----------------------------
+    # --- 3. cloudflared: child on THIS console ----------------------------
     # Only when no tunnel is already running: Cloudflare accepts several
     # connectors on one tunnel without erroring, so a blind second start would
     # leave a duplicate that outlives this window.
@@ -199,19 +268,17 @@ try {
         }
     }
 
-    # --- 3. pi-web-ui in the FOREGROUND (window lives as long as it does) ---
-    Write-Host "  starting pi-web-ui on 0.0.0.0:$WebPort ..." -ForegroundColor Cyan
+    # --- 4. Park on the web UI (window lives as long as it does) ----------
     Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
-
-    if ($useLauncher) {
-        & $LauncherCmd
-    } else {
-        $webArgs = @("`"$WebEntry`"", "--port", "$WebPort", "--host", "0.0.0.0", "--cwd", "`"$RootDir`"")
-        if ($NoBrowser) { $webArgs += "--no-browser" }
-        & $NodeExe @webArgs
-    }
+    # Ctrl+C interrupts Wait-Process and lands in the finally block below.
+    Wait-Process -Id $webui.Id
 } finally {
+    if ($webui -and -not $webui.HasExited) {
+        Write-Host ""
+        Write-Host "  stopping pi-web-ui (PID $($webui.Id))..." -ForegroundColor Cyan
+        try { Stop-Process -Id $webui.Id -Force -ErrorAction SilentlyContinue } catch {}
+    }
     if ($tunnelOwned -and $tunnel -and -not $tunnel.HasExited) {
         Write-Host ""
         Write-Host "  stopping cloudflared (PID $($tunnel.Id))..." -ForegroundColor Cyan

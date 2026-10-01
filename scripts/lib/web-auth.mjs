@@ -8,9 +8,17 @@
 //
 // IMPORTANT: plugins/auth-proxy.mjs deliberately does NOT import this module.
 // The auth gate stays dependency-free (node builtins only) so a broken import
-// can never take remote login down. It resolves the SAME two files with its own
+// can never take remote login down. It resolves the SAME files with its own
 // local readers (mirroring its local tunnelHost() copy), so the two agree
 // without sharing code. Change the resolution rules here and change them there.
+//
+// Three credential files at the repo root, all gitignored, all optional:
+//   .server-username   - HTTP Basic username (default 'opencode' when absent)
+//   .server-password   - HTTP Basic password (gate refuses to start without it)
+//   .server-token      - shared secret exported as PI_WEB_TOKEN, closes the
+//                         unauthenticated LAN/direct surface on :8787. The
+//                         auth-proxy injects it on every upstream forward; the
+//                         two start scripts generate one on first boot.
 //
 // Both credential files are OPTIONAL. Missing .server-username means the
 // AUTH_USERNAME default; missing .server-password is an error in the gate (no
@@ -32,6 +40,7 @@ export const WEBUI_PORT = Number(process.env.GLITCH_PI_WEBUI_PORT) || 8787;
 export const AUTH_PORT = Number(process.env.GLITCH_PI_AUTH_PORT) || 4103;
 export const PASSWORD_FILE = join(ROOT_DIR, '.server-password');
 export const USERNAME_FILE = join(ROOT_DIR, '.server-username');
+export const TOKEN_FILE = join(ROOT_DIR, '.server-token');
 export const DEFAULT_TUNNEL_HOST = 'glitch.cothekdesigns.com';
 
 /** Trimmed password from .server-password, or null when the file is missing. */
@@ -39,6 +48,16 @@ export function readPassword() {
   try {
     const pw = readFileSync(PASSWORD_FILE, 'utf-8').trim();
     return pw || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Trimmed token from .server-token, or null when the file is missing or empty. */
+export function readToken() {
+  try {
+    const t = readFileSync(TOKEN_FILE, 'utf-8').trim();
+    return t || null;
   } catch {
     return null;
   }
@@ -114,7 +133,8 @@ export function printLoginBanner(opts = {}) {
   write(`   Username:  ${BOLD(readUsername())}`);
   write(`   Password:  ${BOLD(password)}`);
   write('');
-  write(`   Local:     ${CYAN(localUrl())}  ${DIM('(no auth needed)')}`);
+  const token = readToken();
+  write(`   Local:     ${CYAN(localUrl()) + (token ? `${CYAN('/?token=' + encodeURIComponent(token))}  ` : '  ') + DIM(token ? '(bookmarkable, contains the token)' : '(no auth needed)')}`);
   write(`   Remote:    ${CYAN(remoteUrl())}`);
   const one = oneClickUrl();
   if (one) {

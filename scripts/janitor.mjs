@@ -41,7 +41,6 @@ const LOG_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const PROTECTED_LOGS = [
   'launch.log',
   'auth-proxy.log',
-  'model-ui-server.log',
   'bootstrap.log',
 ];
 const LOG_TRUNCATE_LINES = 2000;

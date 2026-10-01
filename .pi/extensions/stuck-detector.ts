@@ -1,40 +1,35 @@
 /**
- * stuck-detector.ts — Pi extension: detects stuck patterns in tool calls
- * Ported from glitch-ai .opencode/plugins/stuck-detector.js (544 ln) → Pi ExtensionAPI.
+ * stuck-detector.ts — Pi extension: detects stuck patterns in tool calls.
+ * Ported from glitch-ai .opencode/plugins/stuck-detector.js → Pi ExtensionAPI.
  *
- * Formats UNCHANGED (Plan 2 Phase 1 contract):
+ * FORMATS (unchanged contract):
  *   data/.stuck-signal.<sessionID>.json  — per-session signal
  *   data/.stuck-signal.json              — global mirror (most recent active; R21)
  *
- * Detection rules (per session) — IDENTICAL to OpenCode plugin:
- *   1. tool_repetition: 3+ same tool (excluding progress tools) with >75%-similar
- *      args in last 8. Excluded: edit, write, bash, read, glob, grep, task,
- *      todowrite, skill, question. webfetch: exact-URL, threshold 5.
- *   2. error_cascade: 3+ consecutive errors (invalid counts as an error)
- *   3. command_repetition: same bash command 5+ times in last 8 (first 60 chars).
- *      Clock/time commands EXCLUDED (Get-Date, date, time, w32tm, etc.).
- *   4. readonly_repetition: 6+ CONSECUTIVE same readonly tool (read/glob/grep)
- *      with IDENTICAL fingerprints. Different files/patterns NEVER count.
- *   5. permission_loop: 2+ consecutive "invalid" tool calls (denied dispatch)
+ * v2 REFINEMENT (fixes the overzealous detector — plan 01a0da70):
+ *   - ROOT CAUSE of false positives: Pi's tool_execution_end event carries
+ *     ONLY {toolCallId, toolName, result, isError} — NO args. v1 read
+ *     event.args anyway, so every fingerprint was "{}" and any tool called 3x
+ *     fired. v2 captures args from tool_execution_start (which has them) and
+ *     joins by toolCallId. Entries with never-captured args are marked
+ *     argsKnown=false and NEVER trigger similarity-based rules.
+ *   - Detection rules refined (see stuck-detector-logic.ts): polling tools
+ *     get threshold 6, tool_repetition requires an ONGOING similar cluster
+ *     (not one stale pair), error_cascade needs 4 diverse errors or 3
+ *     identical failing calls, command_repetition must be ongoing.
+ *   - 10-minute per-session per-type signal cooldown: v1 re-fired every turn
+ *     (signal consumed on inject, next call re-detected) — one session got 8
+ *     directives in a row.
+ *   - Directive text softened to match R21: self-check first, continue when
+ *     progressing, stop only when genuinely stuck.
  *
- * Similarity: read/glob exact filePath; grep exact pattern; webfetch exact URL;
- * task fingerprint subagent_type+description; generic JSON.slice(0,80) >0.75.
- *
- * Unstuck (clear signal) ONLY on genuine progress by THAT session:
- *   successful write / edit / bash(git commit) / task / todowrite.
- *   Never clear on read/glob/grep.
- *
- * Signal freshness: SIGNAL_TTL_MS = 15 min. Sweep on init.
  * Injection: Pi `context` event appends directive to last message (one-shot,
- * flag deleted after inject — mirrors OpenCode transform+consume).
+ * flag deleted after inject).
  *
  * Pi tool mapping:
- *   OpenCode tool.execute.after → Pi tool_execution_end
  *   OpenCode tool.execute.before → Pi tool_call (pre, for bash-repetition warn)
- *   OpenCode experimental.chat.messages.transform → Pi context
- *
- * Progress tools note: Pi has no `task` tool by default; keep `task` in
- * PROGRESS_TOOLS set for forward-compat if subagent extension registers it.
+ *   OpenCode tool.execute.after  → Pi tool_execution_start (args) + tool_execution_end (result)
+ *   OpenCode chat.messages.transform → Pi context
  */
 
 import {
@@ -47,241 +42,17 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, AgentMessage, TextContent } from "@earendil-works/pi-coding-agent";
-
-// --- Pure helpers (verbatim from stuck-detector.js) ---
-
-function levenshtein(a: string, b: string): number {
-  const m = a.length;
-  const n = b.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-    }
-  }
-  return dp[m][n];
-}
-
-function genericFingerprint(args: any): string {
-  if (!args) return "";
-  try {
-    return JSON.stringify(args).slice(0, 80);
-  } catch {
-    return "";
-  }
-}
-
-function toolFingerprint(tool: string, args: any): string {
-  if (!args) return "";
-  if (tool === "read" || tool === "glob" || tool === "find") {
-    return args.filePath || args.path || "";
-  }
-  if (tool === "grep") {
-    return args.pattern || "";
-  }
-  if (tool === "webfetch") {
-    return args.url || "";
-  }
-  if (tool === "task") {
-    const subagent = args.subagent_type || args.subagent || "";
-    const desc = args.description || "";
-    if (subagent || desc) return `${subagent}|${desc}`.slice(0, 80);
-    return (args.prompt || "").trim().slice(0, 40);
-  }
-  return genericFingerprint(args);
-}
-
-const EXACT_FINGERPRINT_TOOLS = new Set(["read", "glob", "grep", "webfetch", "find"]);
-
-function readonlyFingerprintsMatch(_tool: string, fp1: string, fp2: string): boolean {
-  if (!fp1 && !fp2) return true;
-  if (!fp1 || !fp2) return false;
-  return fp1 === fp2;
-}
-
-function genericSimilar(a: string, b: string, threshold: number): boolean {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  if (a === b) return true;
-  const maxLen = Math.max(a.length, b.length);
-  if (maxLen === 0) return true;
-  return 1 - levenshtein(a, b) / maxLen > threshold;
-}
-
-function isClockCommand(cmd: unknown): boolean {
-  if (typeof cmd !== "string") return false;
-  const trimmed = cmd.trim();
-  if (/^(Get-Date|date|time|w32tm|hwclock|timedatectl|ntpdate)(\s|$)/i.test(trimmed)) return true;
-  if (/\[DateTimeOffset\]|\[DateTime\]|Get-Date|\.ToUniversalTime\(|\.ToLocalTime\(|GetSystemTime|GetTickCount/i.test(trimmed)) return true;
-  return false;
-}
-
-const PROGRESS_TOOLS = new Set([
-  "edit",
-  "write",
-  "bash",
-  "read",
-  "glob",
-  "grep",
-  "task",
-  "todowrite",
-  "skill",
-  "question",
-  "find",
-  "ls",
-  "powershell",
-]);
-
-const READONLY_TOOLS = new Set(["read", "glob", "grep", "find"]);
-
-const TOOL_REPETITION_THRESHOLDS: Record<string, number> = {
-  webfetch: 5,
-};
-
-interface HistoryEntry {
-  tool: string;
-  args: any;
-  error: boolean;
-  timestamp: number;
-}
-
-interface StuckSignal {
-  type: string;
-  tool?: string;
-  command?: string;
-  count?: number;
-  similarCalls?: number;
-  detail: string;
-}
-
-function detectStuck(history: HistoryEntry[], options: Record<string, number> = {}): StuckSignal | null {
-  const STUCK_THRESHOLD = options.STUCK_THRESHOLD ?? 3;
-  const ERROR_THRESHOLD = options.ERROR_THRESHOLD ?? 3;
-  const READONLY_THRESHOLD = options.READONLY_THRESHOLD ?? 6;
-  const INVALID_THRESHOLD = options.INVALID_THRESHOLD ?? 2;
-  const GENERIC_SIMILARITY_THRESHOLD = options.GENERIC_SIMILARITY_THRESHOLD ?? 0.75;
-
-  if (history.length < 4) return null;
-
-  const recent = history.slice(-8);
-
-  // Check 5 (priority): permission_loop — 2+ consecutive denied calls.
-  const tail = history.slice(-INVALID_THRESHOLD);
-  if (
-    tail.length >= INVALID_THRESHOLD &&
-    tail.every((e) => {
-      const t = e.tool || "";
-      if (t === "invalid") return true;
-      if (t === "task" && e.error) return true;
-      return false;
-    })
-  ) {
-    return {
-      type: "permission_loop",
-      count: tail.length,
-      detail: `${tail.length} consecutive denied tool calls. The agent is repeatedly attempting tools it is not allowed to use, or a denied dispatch (task) attempt.`,
-    };
-  }
-
-  // Check 1: tool_repetition — 3+ same non-excluded tool with similar args
-  const toolCounts: Record<string, number> = {};
-  const toolFps: Record<string, string[]> = {};
-  for (const entry of recent) {
-    const tool = entry.tool || "unknown";
-    if (PROGRESS_TOOLS.has(tool)) continue;
-    toolCounts[tool] = (toolCounts[tool] || 0) + 1;
-    if (!toolFps[tool]) toolFps[tool] = [];
-    const fp = toolFingerprint(tool, entry.args);
-    if (fp) toolFps[tool].push(fp);
-  }
-
-  for (const [tool, count] of Object.entries(toolCounts)) {
-    const threshold = TOOL_REPETITION_THRESHOLDS[tool] ?? STUCK_THRESHOLD;
-    if (count < threshold) continue;
-    const fps = toolFps[tool] || [];
-    if (fps.length < threshold) continue;
-
-    const useExact = EXACT_FINGERPRINT_TOOLS.has(tool);
-    let similarCount = 0;
-    for (let i = 0; i < fps.length; i++) {
-      for (let j = i + 1; j < fps.length; j++) {
-        const similar = useExact
-          ? readonlyFingerprintsMatch(tool, fps[i], fps[j])
-          : genericSimilar(fps[i], fps[j], GENERIC_SIMILARITY_THRESHOLD);
-        if (similar) similarCount++;
-      }
-    }
-    if (similarCount >= 1) {
-      return {
-        type: "tool_repetition",
-        tool,
-        count,
-        similarCalls: similarCount + 1,
-        detail: `${tool} called ${count} times in last ${recent.length} calls with similar arguments`,
-      };
-    }
-  }
-
-  // Check 4: readonly_repetition — 6+ CONSECUTIVE same readonly tool, ALL with
-  // fingerprints identical to the FIRST call.
-  const tailN = history.slice(-READONLY_THRESHOLD);
-  if (tailN.length >= READONLY_THRESHOLD) {
-    const tool = tailN[0].tool || "";
-    if (READONLY_TOOLS.has(tool) && tailN.every((e) => (e.tool || "") === tool)) {
-      const firstFp = toolFingerprint(tool, tailN[0].args);
-      const allMatchFirst = tailN.every((e) => {
-        const fp = toolFingerprint(tool, e.args);
-        return readonlyFingerprintsMatch(tool, firstFp, fp);
-      });
-      if (allMatchFirst) {
-        return {
-          type: "readonly_repetition",
-          tool,
-          count: tailN.length,
-          detail: `${tool} called ${tailN.length} consecutive times with identical arguments (tight read-only loop)`,
-        };
-      }
-    }
-  }
-
-  // Check 2: error_cascade — 3+ consecutive errors
-  const lastFew = recent.slice(-ERROR_THRESHOLD);
-  if (lastFew.length >= ERROR_THRESHOLD && lastFew.every((e) => e.error)) {
-    return {
-      type: "error_cascade",
-      count: lastFew.length,
-      detail: `${lastFew.length} consecutive tool calls returned errors`,
-    };
-  }
-
-  // Check 3: command_repetition — same bash command 5+ times.
-  const bashCommands = recent.filter((e) => e.tool === "bash" || e.tool === "powershell");
-  if (bashCommands.length >= 5) {
-    const cmdTexts = bashCommands.map((e) => e.args?.command || "");
-    const cmdCounts: Record<string, number> = {};
-    for (const cmd of cmdTexts) {
-      if (isClockCommand(cmd)) continue;
-      const shortCmd = String(cmd).slice(0, 60);
-      cmdCounts[shortCmd] = (cmdCounts[shortCmd] || 0) + 1;
-    }
-    for (const [cmd, count] of Object.entries(cmdCounts)) {
-      if (count >= 5 && cmd.length > 5) {
-        return {
-          type: "command_repetition",
-          command: cmd.slice(0, 80),
-          count,
-          detail: `bash command "${cmd.slice(0, 60)}..." repeated ${count} times`,
-        };
-      }
-    }
-  }
-
-  return null;
-}
+import {
+  detectStuck,
+  isGenuineProgress,
+  isClockCommand,
+  type HistoryEntry,
+  type StuckSignal,
+} from "./stuck-detector-logic.mts";
 
 const SIGNAL_TTL_MS = 15 * 60 * 1000;
+const SIGNAL_COOLDOWN_MS = 10 * 60 * 1000;
+const MAX_PENDING_ARGS = 128;
 
 function sweepStaleSignals(dataDir: string, ttlMs: number): void {
   const now = Date.now();
@@ -337,6 +108,11 @@ export default function (pi: ExtensionAPI) {
   sweepStaleSignals(dataDir, SIGNAL_TTL_MS);
 
   const histories = new Map<string, HistoryEntry[]>();
+  // Args captured at tool_execution_start, joined at tool_execution_end by
+  // toolCallId (the end event has no args — see header note).
+  const pendingArgs = new Map<string, any>();
+  // `${sessionID}|${type}` → last write timestamp. Prevents re-fire spam.
+  const lastSignalAt = new Map<string, number>();
   let currentSessionID: string | null = null;
 
   function getHistory(sessionID: string): HistoryEntry[] {
@@ -350,6 +126,15 @@ export default function (pi: ExtensionAPI) {
     return join(dataDir, `.stuck-signal.${sessionID}.json`);
   }
 
+  function cooldownActive(sessionID: string, type: string): boolean {
+    const key = `${sessionID}|${type}`;
+    const at = lastSignalAt.get(key);
+    if (!at) return false;
+    if (Date.now() - at < SIGNAL_COOLDOWN_MS) return true;
+    lastSignalAt.delete(key);
+    return false;
+  }
+
   function writeSignal(sessionID: string, signal: StuckSignal): void {
     try {
       const payload = {
@@ -359,12 +144,13 @@ export default function (pi: ExtensionAPI) {
         type: signal.type,
         detail: signal.detail,
         tool: signal.tool || signal.command || "unknown",
-        recommendation: 'You appear to be stuck in a loop. Load skill("breakthrough") to reframe the problem using a different approach.',
+        recommendation: 'Stuck-pattern detected. Self-check: if you are making progress, continue normally and this will clear on your next successful step. If genuinely stuck, load skill("breakthrough") to reframe the problem using a different approach.',
       };
       const content = JSON.stringify(payload, null, 2);
 
       writeFileSync(sessionSignalPath(sessionID), content, "utf-8");
       writeFileSync(GLOBAL_SIGNAL_FILE, content, "utf-8");
+      lastSignalAt.set(`${sessionID}|${signal.type}`, Date.now());
 
       console.log(`[stuck-detector] ⚠️ Stuck detected (session=${sessionID}): ${signal.type} — ${signal.detail}`);
     } catch (e: any) {
@@ -395,18 +181,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function isGenuineProgress(tool: string, args: any, hasError: boolean): boolean {
-    if (hasError) return false;
-    if (tool === "write" || tool === "edit") return true;
-    if (tool === "task") return true;
-    if (tool === "todowrite") return true;
-    if (tool === "bash" || tool === "powershell") {
-      const cmd = args?.command || "";
-      if (typeof cmd === "string" && /\bgit\s+commit\b/.test(cmd)) return true;
-    }
-    return false;
-  }
-
   // --- Event wiring ---
 
   pi.on("session_start", async (_event, ctx) => {
@@ -420,13 +194,32 @@ export default function (pi: ExtensionAPI) {
     getHistory(currentSessionID);
   });
 
+  // Capture args at execution start (tool_execution_end does not carry them).
+  pi.on("tool_execution_start", async (event) => {
+    try {
+      if (!event.toolCallId) return;
+      if (pendingArgs.size >= MAX_PENDING_ARGS) {
+        // Trim the oldest entries so a leak of orphaned starts stays bounded.
+        const firstKey = pendingArgs.keys().next().value;
+        if (firstKey !== undefined) pendingArgs.delete(firstKey);
+      }
+      pendingArgs.set(event.toolCallId, event.args ?? {});
+    } catch (e: any) {
+      console.error(`[stuck-detector] tool_execution_start failed: ${e.message}`);
+    }
+  });
+
   // Post-tool: build history, detect, clear on progress.
   pi.on("tool_execution_end", async (event) => {
     try {
       const now = Date.now();
       const tool = event.toolName || "unknown";
-      const args = (event as any).args ?? (event as any).input ?? {};
       const sessionID = currentSessionID || "default";
+
+      const capturedArgs = pendingArgs.get(event.toolCallId);
+      pendingArgs.delete(event.toolCallId);
+      const argsKnown = capturedArgs !== undefined;
+      const args = argsKnown ? capturedArgs : {};
 
       const hasError = Boolean(event.isError);
 
@@ -434,6 +227,7 @@ export default function (pi: ExtensionAPI) {
       history.push({
         tool,
         args,
+        argsKnown,
         error: hasError,
         timestamp: now,
       });
@@ -450,7 +244,11 @@ export default function (pi: ExtensionAPI) {
 
       if (history.length % 2 === 0) {
         const signal = detectStuck(history);
-        if (signal && !existsSync(sessionSignalPath(sessionID))) {
+        if (
+          signal &&
+          !existsSync(sessionSignalPath(sessionID)) &&
+          !cooldownActive(sessionID, signal.type)
+        ) {
           writeSignal(sessionID, signal);
         }
       }
@@ -466,9 +264,12 @@ export default function (pi: ExtensionAPI) {
       if ((event.toolName === "bash" || event.toolName === "powershell") && existsSync(sessionSignalPath(sessionID))) {
         const cmd = (event as any).input?.command || "";
         const history = getHistory(sessionID);
-        const recentBash = history.filter((e) => e.tool === "bash" || e.tool === "powershell").slice(-3);
-        const similarCmd = recentBash.some((e) => {
+        const recentShell = history
+          .filter((e) => e.tool === "bash" || e.tool === "powershell")
+          .slice(-3);
+        const similarCmd = recentShell.some((e) => {
           const prevCmd = e.args?.command || "";
+          if (typeof prevCmd !== "string" || !prevCmd) return false;
           return String(prevCmd).slice(0, 40) === String(cmd).slice(0, 40);
         });
 
@@ -524,14 +325,12 @@ export default function (pi: ExtensionAPI) {
       if (!lastMessage || !Array.isArray((lastMessage as any).content)) return;
 
       const directive =
-        `⚠️ STUCK DETECTED (type: ${signal.type}): ${signal.detail}\n` +
-        `If you are a SUB-AGENT: pause and check — are you repeating the SAME failing action with no progress? ` +
-        `If yes (genuinely stuck), stop and return partial findings plus a note about this blocker to the parent agent. ` +
-        `If you are making progress (e.g., reading different files, dispatching different tasks, sequential successful steps), ` +
-        `this is likely a false positive — CONTINUE your task normally.\n` +
-        `If you are the PRIMARY agent (including glitch-omni, which is primary AND executor): STOP. ` +
-        `Do NOT re-run the flagged command or tool. Deliver your current findings to the user now and wait for direction. ` +
-        `In glitch-omni mode there is no parent agent to return to — the loop ends with you. ` +
+        `⚠️ STUCK-PATTERN CHECK (type: ${signal.type}): ${signal.detail}\n` +
+        `Self-check FIRST: are you actually repeating the same action with no progress? ` +
+        `If you are making progress (different files or patterns, results changing between calls, sequential successful steps), ` +
+        `CONTINUE your task normally — this is a false positive and the signal clears on your next successful step.\n` +
+        `If genuinely stuck: STOP repeating the flagged call. Summarize what you have tried and the current blocker. ` +
+        `If you are the PRIMARY agent (including glitch-omni), deliver your findings to the user and wait for direction. ` +
         `Only load skill("breakthrough") if you have genuinely exhausted your current approach.`;
 
       const content = (lastMessage as any).content as Array<{ type: string; text?: string }>;
@@ -542,12 +341,15 @@ export default function (pi: ExtensionAPI) {
         content.push({ type: "text", text: directive } as TextContent);
       }
 
-      // Consume the signal so it isn't re-injected every message (matches OpenCode one-shot).
+      // Consume the signal so it isn't re-injected every message (one-shot),
+      // and remember the write so the same type won't re-fire within the
+      // cooldown window.
       try {
         unlinkSync(sp);
       } catch {
         // ignore
       }
+      lastSignalAt.set(`${sessionID}|${signal.type}`, Date.now());
 
       console.log(`[stuck-detector] injected stuck directive for session ${sessionID}`);
     } catch (e: any) {

@@ -379,13 +379,11 @@ process.on('SIGTERM', () => process.exit(143));
 
 // ---- Sessions API (port 4191) ----
 // Exposes /sessions and /tokens endpoints reading from the opencode DB.
-// See scripts/opencode-sessions-api.mjs for the server implementation.
 const SESSIONS_API_PORT = 4191;
 
 async function startSessionsApi(ROOT_DIR) {
   const isWin = process.platform === 'win32';
   const dataDir = join(ROOT_DIR, 'data');
-  const scriptPath = join(ROOT_DIR, 'scripts', 'opencode-sessions-api.mjs');
   const pidFilePath = join(dataDir, 'sessions-api.pid');
 
   if (!existsSync(scriptPath)) {

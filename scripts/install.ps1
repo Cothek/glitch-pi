@@ -58,7 +58,7 @@ param(
 )
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-$InstallerVersion = "1.0.1"
+$InstallerVersion = "1.1.0"
 
 # Set up logging - captures all output to a file for diagnosis
 # Log starts in TEMP (always exists) and is relocated into the install directory
@@ -101,7 +101,7 @@ function Write-Prompt { param([string]$msg) Write-Host "  $msg" -NoNewline -Fore
 
 # Find git.exe via the PERSISTED (global) PATH -- the source of truth for
 # whether git will be available in FUTURE terminals. The session $env:PATH is
-# NOT authoritative because launch scripts (launch-glitch.bat, glitch.bat)
+# NOT authoritative because launch scripts (launch-glitch.bat)
 # prepend bundled MinGit at every launch without persisting it -- so a
 # session-only git would still leave fresh terminals broken.
 function Get-PersistedGitPath {
@@ -560,7 +560,7 @@ if (-not (Test-Path "$InstallDir\.git")) {
     }
 
     # Finalize bundled git: move the staged MinGit into the install dir so the
-    # launcher (launch-glitch.bat / glitch.bat) finds it at data\mingit on future
+    # launcher (launch-glitch.bat) finds it at data\mingit on future
     # launches. Copy + remove, NOT Move-Item: %TEMP% may be on a different volume.
     if ($gitProvisioned -and $gitStagedDir) {
         $finalGitDir = Join-Path $InstallDir "data\mingit"
@@ -849,6 +849,198 @@ if ($gitnexusCmd) {
     Write-Warn "gitnexus command not found after install - skipping FTS repair"
 }
 
+# 4.7. Page-picker browser extension (pi-web-ui companion)
+# Downloads the official pi-web-ui page-picker Chrome/Edge extension from GitHub
+# releases and extracts it into <InstallDir>\browser-extension\page-picker\ so
+# it can be loaded unpacked straight from the installed Glitch folder.
+# Non-fatal: a failure warns and prints the manual download URL.
+Write-Header "Installing page-picker browser extension..."
+$pagePickerUrl = "https://github.com/xing-shuyin/pi-web-ui/releases/latest/download/page-picker-extension.zip"
+$pagePickerDir = Join-Path $InstallDir "browser-extension\page-picker"
+$pagePickerOk = $false
+try {
+    $extZip = Join-Path $env:TEMP "glitch-page-picker-extension.zip"
+    Write-Step "Downloading page-picker-extension.zip..."
+    # TLS 1.2 is set INSIDE the job: Start-Job spawns a fresh process, so a
+    # parent-scope [Net.ServicePointManager] change would not reach it.
+    Invoke-WithSpinner -Label "Downloading page-picker" -DoneMessage "page-picker" -ScriptBlock {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+        Invoke-WebRequest -Uri $using:pagePickerUrl -OutFile $using:extZip -UseBasicParsing -TimeoutSec 120
+    }
+
+    # Extract to staging, validate, then swap into place (keeps a broken
+    # download from destroying an existing working copy)
+    $stagingDir = Join-Path $env:TEMP "glitch-page-picker-staging"
+    if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue }
+    Invoke-WithSpinner -Label "Extracting page-picker" -DoneMessage "page-picker" -ScriptBlock {
+        Expand-Archive -Path $using:extZip -DestinationPath $using:stagingDir -Force
+    }
+    Remove-Item $extZip -Force -ErrorAction SilentlyContinue
+
+    # manifest.json must sit at the extension root for "Load unpacked"
+    if (-not (Test-Path (Join-Path $stagingDir "manifest.json"))) {
+        $nested = Get-ChildItem -Path $stagingDir -Directory | Where-Object { Test-Path (Join-Path $_.FullName "manifest.json") } | Select-Object -First 1
+        if ($nested) {
+            Write-Step "Zip layout changed (nested folder) - using $($nested.Name)"
+            $stagingDir = $nested.FullName
+        } else {
+            throw "Downloaded zip has no manifest.json (unexpected layout)"
+        }
+    }
+
+    if (Test-Path $pagePickerDir) { Remove-Item $pagePickerDir -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $pagePickerDir) -Force | Out-Null
+    Move-Item -Path $stagingDir -Destination $pagePickerDir
+    $pagePickerOk = $true
+    Write-Success "Page-picker extension installed at $pagePickerDir"
+} catch {
+    Write-Warn "Page-picker extension download failed (non-fatal): $($_.Exception.Message)"
+    if (Test-Path (Join-Path $pagePickerDir "manifest.json")) {
+        Write-Host "  Keeping existing copy at $pagePickerDir" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Manual download: $pagePickerUrl" -ForegroundColor DarkGray
+        Write-Host "  Unzip to: $pagePickerDir" -ForegroundColor DarkGray
+    }
+}
+if ($pagePickerOk) {
+    Write-Host ""
+    Write-Host "  Load it in your browser (one time):" -ForegroundColor Cyan
+    Write-Host "    1. Open chrome://extensions  (edge://extensions on Edge)"
+    Write-Host "    2. Enable Developer mode"
+    Write-Host "    3. Click 'Load unpacked' and select:"
+    Write-Host "       $pagePickerDir" -ForegroundColor Yellow
+    Write-Host "    4. Open the extension's options and set your pi-web-ui address:"
+    Write-Host "       http://localhost:8787  (default; click 'Authorize this address' if remote/LAN)"
+}
+
+# 4.8. Desktop Control (cua-driver) - the AI's eyes and hands on this machine
+# Optional install, user decision. Runs the official sudo-free installer from cua.ai
+# (user-space, no admin) and wires the MCP server into the pi config so the desktop
+# tools (screenshots, mouse, keyboard, window management) appear in pi directly.
+Write-Header "Desktop Control (cua-driver)"
+
+$cuaBin = "$env:LOCALAPPDATA\Programs\Cua\cua-driver\bin\cua-driver.exe"
+$cuaPresent = (Test-Path $cuaBin) -or (Get-Command cua-driver -ErrorAction SilentlyContinue)
+
+if ($cuaPresent) {
+    Write-Success "cua-driver already installed (desktop control MCP)"
+} else {
+    Write-Host "  Desktop control gives the AI eyes and hands on this machine:" -ForegroundColor White
+    Write-Host "    screenshots, mouse, keyboard, window management (via the cua-driver MCP server)."
+    Write-Host "  Official installer from cua.ai: user-space, sudo-free. Tools only run when the AI"
+    Write-Host "    calls them. Telemetry: pseudonymous ID only ('cua-driver telemetry disable' to opt out)."
+    Write-Prompt "  Install desktop control now? [y/N] "
+    $cuaAnswer = Read-Host
+    if ($cuaAnswer -match '^[Yy]') {
+        Write-Step "Installing cua-driver (official installer)..."
+        Write-Host "  A UAC prompt may appear for the optional logon auto-start; accept or dismiss it." -ForegroundColor DarkGray
+        $cuaOk = $false
+        try {
+            Invoke-WithSpinner -Label "Installing cua-driver" -DoneMessage "cua-driver" -ScriptBlock {
+                # irm | iex cannot pass switches, so invoke as a scriptblock instead.
+                # Default AutoStart=true registers the logon serve task (admin once).
+                & ([scriptblock]::Create((Invoke-RestMethod -Uri "https://cua.ai/driver/install.ps1")))
+            }
+            $cuaOk = $true
+        } catch {
+            Write-Warn "cua-driver installer failed (non-fatal): $($_.Exception.Message)"
+            Write-Host "  Manual install: irm https://cua.ai/driver/install.ps1 | iex" -ForegroundColor DarkGray
+        }
+        # The installer's own success is not the only signal: verify the binary.
+        if (-not $cuaOk) {
+            if (Test-Path $cuaBin) { $cuaOk = $true }
+        }
+        if ($cuaOk) {
+            Write-Success "cua-driver installed (desktop control MCP)"
+        } else {
+            Write-Warn "cua-driver install could not be verified (non-fatal)."
+        }
+    } else {
+        Write-Warn "Skipped. Add later with: irm https://cua.ai/driver/install.ps1 | iex"
+    }
+}
+
+# Wire the MCP server whenever the driver is present (also on re-install: keeps the
+# wiring in sync). The junction path is stable across driver upgrades.
+if (Test-Path $cuaBin) {
+    $wireMcp = Join-Path $PSScriptRoot "lib\wire-mcp.mjs"
+    $bundledNode = Join-Path $InstallDir "data\node\node.exe"
+    $nodeCmd = $null
+    if (Test-Path $bundledNode) { $nodeCmd = $bundledNode }
+    elseif (Get-Command node -ErrorAction SilentlyContinue) { $nodeCmd = "node" }
+    if ($nodeCmd -and (Test-Path $wireMcp)) {
+        & $nodeCmd $wireMcp --id cua-driver --command $cuaBin --args mcp
+    } else {
+        Write-Warn "Could not wire the cua-driver MCP server (no node or helper missing)."
+    }
+
+    # Record the plugin flag the launcher reads on every start/restart
+    # (scripts/launch-unified.mjs -> desktop-control ensure()).
+    # Toggle later with: node scripts/desktop-control.mjs on|off
+    $dcCfgDir = Join-Path $InstallDir "data\config"
+    $dcCfg = Join-Path $dcCfgDir "desktop-control.json"
+    $dcEnabled = (Test-Path $cuaBin) -and ($cuaPresent -or ($cuaAnswer -match '^[Yy]'))
+    if (-not (Test-Path $dcCfg)) {
+        New-Item -ItemType Directory -Path $dcCfgDir -Force | Out-Null
+        "{ `"enabled`": $($dcEnabled.ToString().ToLower()) }" | Set-Content -Path $dcCfg -Encoding UTF8
+    }
+}
+
+# 4.9. Headless display (Parsec Virtual Display Driver) - keeps GDI screen capture
+# working when the machine has no monitor attached and the RDP window is closed/
+# minimized. Without a display, Windows stops rendering and ALL screenshots fail
+# with "The handle is invalid" (0x80070006). Kernel driver -> one UAC prompt, once.
+#
+# IMPORTANT (verified 2026-09-30): the VDD alone does NOT fix capture while the user
+# is attached over RDP. In an RDP session the visible monitors live on the Microsoft
+# Remote Display Adapter (indirect display), where WGC-from-monitor and GDI BitBlt
+# both fail with 0x80070006 and raw input injection (SetCursorPos/SendInput) is
+# blocked. Attach the session to the console (VDD-backed) via
+# scripts\attach-session-to-console.ps1 for desktop-wide capture to work.
+# Per-window captures (cua-driver get_window_state) and UIA input work either way.
+Write-Header "Headless Display (virtual monitor)"
+
+$vddOk = $false
+try {
+    $vdd = Get-PnpDevice -Class Display -ErrorAction Stop |
+           Where-Object FriendlyName -match "Parsec" |
+           Where-Object Status -eq "OK" |
+           Select-Object -First 1
+    $vddOk = [bool]$vdd
+} catch { }
+
+if ($vddOk) {
+    Write-Success "Parsec Virtual Display Adapter already installed and OK"
+} else {
+    Write-Host "  Headless display gives the AI a permanent virtual monitor, so desktop" -ForegroundColor White
+    Write-Host "    capture works with no physical screen attached or RDP window open."
+    Write-Host "  One UAC prompt during install (kernel driver); then no admin ever again."
+    Write-Prompt "  Install headless display driver now? [y/N] "
+    $vddAnswer = Read-Host
+    if ($vddAnswer -match '^[Yy]') {
+        $vddScript = Join-Path $PSScriptRoot "install-headless-display.ps1"
+        if (Test-Path $vddScript) {
+            & $vddScript
+        } else {
+            Write-Warn "install-headless-display.ps1 not found at $vddScript"
+        }
+    } else {
+        Write-Warn "Skipped. Run later: scripts\install-headless-display.ps1"
+    }
+}
+
+# Final guidance: capture over an active RDP session still fails (see notes above).
+# No extra prompt here: attaching to console disconnects the current RDP session,
+# so the user must opt in deliberately when ready to reconnect.
+$vddNow = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
+          Where-Object FriendlyName -match "Parsec" |
+          Where-Object Status -eq "OK" | Select-Object -First 1
+if ($vddNow) {
+    Write-Host "  Note: with RDP sessions, desktop-wide capture requires one run of" -ForegroundColor DarkGray
+    Write-Host "        scripts\attach-session-to-console.ps1 per login (one UAC prompt; the" -ForegroundColor DarkGray
+    Write-Host "        RDP window blanks - reconnect to watch). Window automation works without it." -ForegroundColor DarkGray
+}
+
 # 5. User profile setup
 Write-Header "User Profile Setup"
 
@@ -1131,7 +1323,7 @@ Push-Location $InstallDir
 try {
     $seedOutput = & $checkNode scripts/plugin.mjs seed 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Success "Seeded default plugins (model-ui). Edit user\plugins.json to customize."
+        Write-Success "Seeded default plugins. Edit user\plugins.json to customize."
         if ($seedOutput) { Write-Host "  $seedOutput" -ForegroundColor DarkGray }
     } else {
         Write-Warn "Plugin seed returned non-zero (continuing): $seedOutput"

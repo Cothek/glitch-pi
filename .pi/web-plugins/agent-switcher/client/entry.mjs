@@ -1,5 +1,6 @@
 /**
- * agent-switcher — pi-web-ui plugin (client entry) — v0.6 FINAL
+ * agent-switcher — pi-web-ui plugin (client entry) — v0.6.1
+ * (v0.6.1: mobile <=560px collapse — icon-only chip, same as the model selector)
  *
  * Zero imports (host only serves /plugins/<id>/client/*; importing ../sdk
  * lands on the SPA fallback and breaks the module).
@@ -10,9 +11,9 @@
  * The host dispatcher invokes every handler for an action on each click, so
  * duplicate registration turns one click into N toggles ("nothing happens").
  *
- * Chip styling copied from the host's native model chip, measured against its
- * computed values from the live page (h 22, radius 8, font 12, color
- * var(--text), border 1px solid var(--border), padding 3px 8px) and scoped to
+ * Chip styling follows the host's native composer dropdowns: the current host
+ * renders `.composer-tools .chip` at padding 4px vertical with a 13px font
+ * (text box 15px, total 25px with the 1px borders, radius 8) and scoped to
  * beat the host's own `.inputbox .btn.composer-plugin-action` rule.
  */
 
@@ -38,7 +39,7 @@ const OPEN_BODY_CLASS = "agent-switcher-menu-open";
 const diag = (globalThis.__agentSwitcherClient = globalThis.__agentSwitcherClient ?? {
 	registered: [],
 	errors: [],
-	version: "0.6.0",
+	version: "0.6.1",
 	importedAt: new Date().toISOString(),
 });
 
@@ -88,24 +89,30 @@ if (typeof window !== "undefined") {
 	retry();
 }
 
-// --- chip styling: identical to the host chip values measured on the live page -
-//   Model chip computed: h 22px, radius 8, font 12px, color var(--text),
-//   border 1px solid var(--border), padding 3px 8px, gap 4, bg var(--chip-bg, var(--bg-elev2))
+// --- chip styling: matches the host's native composer dropdowns on the live page
+//   Native desktop chip (dist CSS .composer-tools .chip): padding 4px 10px,
+//   font-size 13px -> text box 15px, total 25px with the 1px borders. Chip raised
+//   22 -> 25 to match. radius 8, color var(--text),
+//   bg var(--chip-bg, var(--bg-elev2))
 if (typeof document !== "undefined" && document.head && !document.getElementById("agent-switcher-style")) {
 	const style = document.createElement("style");
 	style.id = "agent-switcher-style";
 	style.textContent = [
 		`${CHIP_SEL}{`,
 		`-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;`,
-		`min-width:0;height:22px;flex-shrink:1;`,
+		`min-width:0;height:25px;flex-shrink:1;`,
 		`border:1px solid var(--border);border-radius:8px;`,
 		`background:var(--chip-bg,var(--bg-elev2));color:var(--text);`,
 		`cursor:pointer;white-space:nowrap;align-items:center;gap:4px;`,
-		`padding:3px 8px;font-size:12px;font-weight:400;line-height:1.4;`,
+		`padding:4px 10px;font-size:13px;font-weight:400;line-height:15px;`,
 		`transition:border-color .15s,background .15s;display:inline-flex;`,
 		`box-sizing:border-box;font-family:inherit;}`,
 		`${CHIP_SEL}:hover{border-color:var(--accent);background:var(--accent-soft)}`,
-		`${CHIP_SEL}::before{content:"\\1F916";font-size:11px;line-height:1;font-family:inherit}`,
+		/* Glyph from the HOST icon set (same Feather-style 24x24 sprite as the model chip's
+		 * cpu and the thinking chip's zap): "users", because the chip switches WHO is talking.
+		 * Painted as a CSS mask with background-color:currentColor so it follows the theme and
+		 * the hover accent - the old value here was the 🤖 emoji. */
+		`${CHIP_SEL}::before{content:"";display:block;width:15px;height:15px;flex:none;background-color:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='9' cy='7' r='4'/%3E%3Cpath d='M23 21v-2a4 4 0 0 0-3-3.87'/%3E%3Cpath d='M16 3.13a4 4 0 0 1 0 7.75'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='9' cy='7' r='4'/%3E%3Cpath d='M23 21v-2a4 4 0 0 0-3-3.87'/%3E%3Cpath d='M16 3.13a4 4 0 0 1 0 7.75'/%3E%3C/svg%3E") center/contain no-repeat}`,
 		`${CHIP_SEL}::after{content:"\\25BE";color:var(--text-faint);margin-left:2px;transition:transform .15s;font-size:10px;line-height:1}`,
 		`body.${OPEN_BODY_CLASS} ${CHIP_SEL}::after{transform:rotate(180deg)}`,
 		/* dropdown — exact clones of the host .dd-menu / .dd-header / .dd-item rules */
@@ -119,6 +126,17 @@ if (typeof document !== "undefined" && document.head && !document.getElementById
 		`.agent-switcher-menu-item.active{background:var(--accent-soft);color:var(--text)}`,
 		`.agent-switcher-menu-note{color:var(--text-faint);padding:6px 10px 4px;font-size:11px;font-family:inherit}`,
 		`.agent-switcher-menu-check{color:var(--accent);font-weight:700;margin-left:auto}`,
+		/* Mobile collapse — mirrors the host's own chip rules at the same <=560px
+		 * breakpoint (.composer-tools .chip{min-width:34px;min-height:30px;padding:6px 9px;
+		 * justify-content:center} + .dd-caret{display:none}). The label lives in a raw
+		 * text node, so font-size:0 hides it while ::before keeps its own 12px. The
+	 * caret ::after is hidden like the host hides .dd-caret. aria-label/title keep the
+		 * full "Agent: <mode>" text for screen readers and the long-press tooltip. */
+		`@media (max-width:560px){`,
+		`${CHIP_SEL}{width:34px;min-width:34px;min-height:30px;padding:6px 9px;box-sizing:border-box;justify-content:center;font-size:0;gap:0}`,
+		`${CHIP_SEL}::before{width:15px;height:15px}`,
+		`${CHIP_SEL}::after{display:none}`,
+		`}`,
 	].join("\n");
 	document.head.appendChild(style);
 }

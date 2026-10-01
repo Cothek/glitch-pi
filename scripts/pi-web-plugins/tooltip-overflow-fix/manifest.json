@@ -1,0 +1,12 @@
+{
+  "id": "tooltip-overflow-fix",
+  "name": "Tooltip Overflow Fix",
+  "version": "1.0.0",
+  "description": "Removes the phantom horizontal scrollbar. Topbar tooltips were invisible opacity:0 ::after boxes that still occupied layout; wide centered tooltips on right-side chips crossed the right viewport edge and inflated the document scroll width (empty space under the bottom scrollbar). This fix generates the tooltip box only while hovered and right-anchors right-side tooltips so they grow left, away from the edge.",
+  "apiVersion": 2,
+  "permissions": [
+    "ui"
+  ],
+  "view": false,
+  "preload": true
+}

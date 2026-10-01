@@ -1,5 +1,104 @@
 {
   "$schema": "config/tools-schema.json",
-  "description": "External binary tool dependencies for Glitch AI. Launch scripts check this manifest and auto-download missing tools.",
-  "tools": []
+  "description": "External binary and npm tool dependencies for Glitch PI. Launch scripts check this manifest and the update subsystem compares installed vs latest for each entry. The bundled Node tree at data/node is the npm global prefix; npm installs go into data/node/node_modules. The nodejs-bundled entry is the one tool allowed to replace data/node itself (with snapshot + restore of every npm global).",
+  "tools": [
+    {
+      "name": "pi-coding-agent",
+      "type": "npm",
+      "package": "@earendil-works/pi-coding-agent",
+      "binary": "pi",
+      "version": "",
+      "platforms": {},
+      "restartRequired": true,
+      "updateType": "sync",
+      "latestUrl": ""
+    },
+    {
+      "name": "pi-web-ui",
+      "type": "npm",
+      "package": "pi-web-ui",
+      "binary": "pi-web-ui",
+      "version": "",
+      "platforms": {},
+      "restartRequired": true,
+      "updateType": "sync",
+      "latestUrl": ""
+    },
+    {
+      "name": "gitnexus",
+      "type": "npm",
+      "package": "gitnexus",
+      "binary": "gitnexus",
+      "version": "",
+      "platforms": {},
+      "restartRequired": false,
+      "updateType": "sync",
+      "latestUrl": ""
+    },
+    {
+      "name": "cloudflared",
+      "type": "binary",
+      "binary": "cloudflared.exe",
+      "version": "",
+      "restartRequired": true,
+      "updateType": "sync",
+      "latestUrl": "https://github.com/cloudflare/cloudflared/releases/latest",
+      "platforms": {
+        "win32": {
+          "url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe",
+          "archive": "",
+          "extract": ["cloudflared.exe"]
+        },
+        "linux": {
+          "url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+          "archive": "",
+          "extract": ["cloudflared"]
+        },
+        "darwin": {
+          "url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64",
+          "archive": "",
+          "extract": ["cloudflared"]
+        }
+      }
+    },
+    {
+      "name": "handy-voice",
+      "type": "binary",
+      "binary": "handy-voice/Handy/handy.exe",
+      "version": "",
+      "versionStrategy": "filedate",
+      "restartRequired": false,
+      "updateType": "sync",
+      "latestUrl": "https://github.com/cjpais/Handy/releases/latest",
+      "platforms": {
+        "win32": {
+          "url": "https://github.com/cjpais/Handy/releases/download/${tag}/Handy_${version}_${arch}_en-US.msi",
+          "archive": "msi",
+          "extract": ["handy.exe"]
+        }
+      }
+    },
+    {
+      "name": "nodejs-bundled",
+      "type": "binary",
+      "binary": "data/node/node.exe",
+      "version": "",
+      "restoreNpmGlobals": true,
+      "restartRequired": true,
+      "updateType": "sync",
+      "latestUrl": "https://nodejs.org/dist/index.json",
+      "platforms": {
+        "win32": {
+          "url": "https://nodejs.org/dist/${tag}/node-${tag}-win-${arch}.zip",
+          "archive": "zip",
+          "extract": ["node.exe"],
+          "replaceDir": "data/node"
+        }
+      }
+    }
+  ],
+  "notes": {
+    "handy-voice": "MSI payload extracted via msiexec /a (no install). No --version flag exists, so the update decision compares the binary's mtime with the release published date (versionStrategy: filedate); the apply step stamps mtime to now so it does not re-flag.",
+    "nodejs-bundled": "Zip payload replaces data/node wholesale (replaceDir). data/node is the npm global prefix, so the swap snapshots every npm tool's installed version and reinstalls them after; any restore failure rolls the whole swap back."
+  }
 }

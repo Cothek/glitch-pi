@@ -2,6 +2,10 @@
  * Auth Proxy — sits between cloudflare tunnel and opencode web server.
  * Enforces HTTP Basic Auth on incoming requests. Valid credentials
  * are forwarded to the upstream server with the auth header injected.
+ * When .server-token is present and non-empty, the proxy ALSO injects the token
+ * as `x-pi-token` on every non-/money forward (HTTP and WS upgrade) and drops
+ * any caller-supplied `x-pi-token` first, so the gate value arriving upstream is
+ * always the real one - never whatever the client tried to smuggle.
  *
  * Credentials accepted via:
  *   - Authorization: Basic <base64> header (browser native auth dialog)
@@ -38,13 +42,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
 const pwFile = resolve(rootDir, '.server-password');
 const userFile = resolve(rootDir, '.server-username');
+const tokenFile = resolve(rootDir, '.server-token');
 
-// Login details printed on startup. Both credentials resolve the SAME files as
-// scripts/lib/web-auth.mjs (that module is the single source of truth for the
-// banner printed by the launchers). This file stays dependency-free on purpose
-// (node builtins only) so the auth gate can never be taken down by a broken
-// import - hence the local readers instead of importing web-auth.
-// Change the resolution rules here and change them there too.
+/** .server-token when set and non-empty, else null. Missing file is not an error. */
+function readToken() {
+  try {
+    const t = readFileSync(tokenFile, 'utf-8').trim();
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+const webToken = readToken();
+
+// Login details printed on startup. All three credentials resolve the SAME
+// files as scripts/lib/web-auth.mjs (that module is the single source of
+// truth for the banner printed by the launchers). This file stays
+// dependency-free on purpose (node builtins only) so the auth gate can never
+// be taken down by a broken import - hence the local readers instead of
+// importing web-auth. Change the resolution rules here and change them there.
 const DEFAULT_USERNAME = 'opencode';
 
 /** .server-username when set, else DEFAULT_USERNAME. Missing file is not an error. */
@@ -74,6 +90,27 @@ try {
 } catch {
   console.error('Error: .server-password not found at', pwFile);
   process.exit(1);
+}
+
+// Header names are case-insensitive per RFC 7230. stripPiToken + injectPiToken
+// return a NEW headers object (never mutate the incoming one - it is shared
+// with the rest of Node's request machinery and surprises the upgrade path).
+function stripPiToken(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === 'x-pi-token') continue;
+    out[k] = v;
+  }
+  if (webToken) out['x-pi-token'] = webToken;
+  return out;
+}
+function stripOnlyPiToken(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === 'x-pi-token') continue;
+    out[k] = v;
+  }
+  return out;
 }
 const USERNAME = readUsername();
 const authToken = Buffer.from(`${USERNAME}:${password}`).toString('base64');
@@ -403,81 +440,7 @@ const server = http.createServer((req, res) => {
   // (res.writeHead replaces same-name headers set via res.setHeader, so we
   // cannot set the cookie once at the top — it must be merged per branch.)
 
-  // ---- Route /models to model UI server (port 4104) ----
-  if (req.url && (req.url === '/models' || req.url.startsWith('/models/') || req.url.startsWith('/models?'))) {
-    const modelUIUpstream = new URL('http://localhost:4104');
-    let targetPath = req.url.replace('/models', '') || '/';
-    // Strip auth_token from forwarded URL
-    try {
-      const parsed = new URL(targetPath, 'http://localhost');
-      parsed.searchParams.delete('auth_token');
-      targetPath = parsed.pathname + parsed.search;
-    } catch {}
-    const options = {
-      hostname: modelUIUpstream.hostname,
-      port: modelUIUpstream.port,
-      path: targetPath,
-      method: req.method,
-      headers: {
-        ...(Object.fromEntries(
-          Object.entries(req.headers)
-            .filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
-        )),
-        host: modelUIUpstream.host,
-      },
-    };
-    const proxyReq = http.request(options, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers, auth.sid));
-      proxyRes.pipe(res);
-    });
-    proxyReq.on('error', (err) => {
-      console.error(`Model UI proxy error for ${req.method} ${req.url}:`, err.message);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end('Model UI server unavailable');
-      }
-    });
-    req.pipe(proxyReq);
-    return;
-  }
-
-  // ---- Route /plugins/glitch-ui/* to model UI server (port 4104) ----
-  if (req.url && req.url.startsWith('/plugins/glitch-ui/')) {
-    const modelUIUpstream = new URL('http://localhost:4104');
-    let targetPath = req.url;
-    // Strip auth_token from forwarded URL
-    try {
-      const parsed = new URL(targetPath, 'http://localhost');
-      parsed.searchParams.delete('auth_token');
-      targetPath = parsed.pathname + parsed.search;
-    } catch {}
-    const options = {
-      hostname: modelUIUpstream.hostname,
-      port: modelUIUpstream.port,
-      path: targetPath,
-      method: req.method,
-      headers: {
-        ...(Object.fromEntries(
-          Object.entries(req.headers)
-            .filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
-        )),
-        host: modelUIUpstream.host,
-      },
-    };
-    const proxyReq = http.request(options, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, withAuthCookie(proxyRes.headers, auth.sid));
-      proxyRes.pipe(res);
-    });
-    proxyReq.on('error', (err) => {
-      console.error(`Model UI asset proxy error for ${req.method} ${req.url}:`, err.message);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end('Model UI asset server unavailable');
-      }
-    });
-    req.pipe(proxyReq);
-    return;
-  }
+  
 
   // Strip directory and workspace params from /agent requests
   // (server bug: workspace crashes, directory filters out custom agents)
@@ -495,16 +458,17 @@ const server = http.createServer((req, res) => {
     } catch {}
   }
 
+  const baseHeaders = Object.fromEntries(
+    Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
+  );
+  const forwarded = stripPiToken(baseHeaders);
   const options = {
     hostname: upstream.hostname,
     port: upstream.port || 80,
     path: targetPath,
     method: req.method,
     headers: {
-      ...(Object.fromEntries(
-        Object.entries(req.headers)
-          .filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
-      )),
+      ...forwarded,
       host: upstream.host,
       authorization: `Basic ${authToken}`,
     },
@@ -532,11 +496,122 @@ const server = http.createServer((req, res) => {
   req.pipe(proxyReq);
 });
 
+// ---- WebSocket upgrades ------------------------------------------------------
+// Without an 'upgrade' listener Node destroys every upgrade request, so the
+// SPA's wss:// connection dies and the app hangs on "connecting" forever when
+// opened through the tunnel (localhost works because it talks to :8787
+// directly). Browsers cannot set an Authorization header on a WebSocket, so
+// remote WS clients authenticate with the glitch_auth session cookie (set on
+// any earlier HTTP response; same-origin WS carries cookies) or ?auth_token=.
+server.on('upgrade', (req, socket, head) => {
+  const auth = authenticate(req);
+  if (!auth.ok) {
+    socket.write(
+      'HTTP/1.1 401 Unauthorized\r\n' +
+        'WWW-Authenticate: Basic realm="Glitch AI", charset="UTF-8"\r\n' +
+        'Content-Type: text/plain\r\n' +
+        'Content-Length: 22\r\n' +
+        'Connection: close\r\n' +
+        '\r\n' +
+        'Authorization required'
+    );
+    socket.destroy();
+    return;
+  }
+
+  // Same routing table as the HTTP branches above: /money -> :4110,
+  // everything else -> the upstream.
+  // auth_token is stripped, it must never reach the origin.
+  let targetPath = req.url || '/';
+  try {
+    const parsed = new URL(targetPath, 'http://localhost');
+    parsed.searchParams.delete('auth_token');
+    targetPath = parsed.pathname + parsed.search;
+  } catch {}
+
+  const url = req.url || '';
+  let target;
+  let forwardCredentials = true; // the default branch injects Basic like the HTTP proxy does
+  if (url === '/money' || url.startsWith('/money/') || url.startsWith('/money?')) {
+    target = new URL('http://localhost:4110');
+    forwardCredentials = false;
+  } else {
+    target = upstream;
+  }
+
+  const baseHeaders = Object.fromEntries(
+    Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))
+  );
+  // /money has its own auth model and must NEVER carry our token. For the
+  // default branch, strip and re-inject so the upstream sees the real value,
+  // not whatever the client tried to smuggle in.
+  const headers = forwardCredentials ? stripPiToken(baseHeaders) : stripOnlyPiToken(baseHeaders);
+  headers.host = target.host;
+  if (forwardCredentials) headers.authorization = `Basic ${authToken}`;
+
+  const proxyReq = http.request({
+    hostname: target.hostname,
+    port: target.port || 80,
+    path: targetPath,
+    method: req.method,
+    headers,
+  });
+
+  proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+    // Raw socket from here: status line and headers written by hand.
+    let out = `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage || ''}\r\n`;
+    for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
+      out += `${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}\r\n`;
+    }
+    out += '\r\n';
+    socket.write(out);
+    if (head?.length) proxySocket.write(head);
+    if (proxyHead?.length) socket.write(proxyHead);
+    proxySocket.pipe(socket);
+    socket.pipe(proxySocket);
+    const kill = () => {
+      proxySocket.destroy();
+      socket.destroy();
+    };
+    proxySocket.on('error', kill);
+    socket.on('error', kill);
+    proxySocket.on('close', () => socket.destroy());
+    socket.on('close', () => proxySocket.destroy());
+  });
+
+  // Upstream answered with a plain HTTP response instead of an upgrade (bad
+  // path, ws disabled): forward it once, then both ends close on their own.
+  proxyReq.on('response', (proxyRes) => {
+    let out = `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage || ''}\r\n`;
+    for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
+      out += `${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}\r\n`;
+    }
+    out += '\r\n';
+    socket.write(out);
+    proxyRes.pipe(socket);
+  });
+
+  proxyReq.on('error', (err) => {
+    console.error(`Upgrade proxy error for ${req.method} ${req.url}:`, err.message);
+    socket.write(
+      'HTTP/1.1 502 Bad Gateway\r\n' +
+        'Content-Type: text/plain\r\n' +
+        'Content-Length: 11\r\n' +
+        'Connection: close\r\n' +
+        '\r\n' +
+        'Bad Gateway'
+    );
+    socket.destroy();
+  });
+
+  proxyReq.end();
+});
+
 server.listen(PROXY_PORT, () => {
   console.log(`  Auth proxy listening on :${PROXY_PORT} -> ${UPSTREAM_URL}`);
-  console.log(`  /models -> http://localhost:4104`);
-  console.log(`  /plugins/glitch-ui/ -> http://localhost:4104`);
+  
   console.log(`  Auth: Basic header | ?auth_token= | glitch_auth cookie`);
+  console.log(`  Token: ${webToken ? 'injected on upstream forward (x-pi-token)' : 'off (no .server-token)'}`);
   console.log('');
   console.log(`  === Pi web UI login ===`);
   console.log(`   Username:  ${USERNAME}`);

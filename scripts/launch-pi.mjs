@@ -92,16 +92,24 @@ function pwsh(args, opts = {}) {
 
 // ---- Pi interface choice (TUI vs Web) ----
 // Stored alongside launch-unified.mjs's last_mode in user/launch-preference.json.
-const PI_PREF_FILE = join(ROOT_DIR, 'user', 'launch-preference.json');
+const PI_PREF_FILE = join(ROOT_DIR, 'data', 'launch-preference.json');
+const PI_LEGACY_PREF_FILE = join(ROOT_DIR, 'user', 'launch-preference.json');
 
-function readPiPref() {
+// Machine-local store: data/ is gitignored; the user/ memory repo is tracked
+// and synced, so it must not hold launch selections. Legacy user/ file is a
+// one-time migration read only.
+function readPrefFile(path) {
   try {
-    let content = readFileSync(PI_PREF_FILE, 'utf-8');
+    let content = readFileSync(path, 'utf-8');
     if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
     return JSON.parse(content);
   } catch {
     return null;
   }
+}
+
+function readPiPref() {
+  return readPrefFile(PI_PREF_FILE) || readPrefFile(PI_LEGACY_PREF_FILE);
 }
 
 function getSavedPiMode() {
@@ -365,8 +373,9 @@ async function main() {
 
   The interface menu (TUI vs Web) remembers your last choice — press Enter to keep it.
 
-  Web stack default: visible window when launched from a console, detached when
-  launched by an extension/automation (no console to close).
+  Web stack default: a visible window you CLOSE to stop the stack (the servers
+  also show in the web UI's Background tasks panel); --headless runs detached
+  with no window.
 
   Sequence: gitnexus-sync -> start-pi-stack -> tunnel verify -> pi
   Workspace: ${PI_ROOT}
@@ -403,6 +412,11 @@ async function main() {
   } else if (wantWeb) {
     piMode = 'web';
     modeChosen = true;
+  } else if (process.env.GLITCH_REUSE_SAVED === '1' || args.includes('--reuse-saved')) {
+    // Automation/restart: saved choice wins, 'web' fallback (the web stack is
+    // the thing being restarted). Never persisted: reuse cannot clobber a real
+    // pick. Distinct from the plain non-TTY fallback below (stays 'tui').
+    piMode = getSavedPiMode() || 'web';
   } else if (process.stdin.isTTY) {
     piMode = await showPiModeMenu(getSavedPiMode());
     modeChosen = true;
@@ -424,6 +438,9 @@ async function main() {
   } else if (wantHeadless) {
     stackMode = 'headless';
     stackModeChosen = true;
+  } else if (process.env.GLITCH_REUSE_SAVED === '1' || args.includes('--reuse-saved')) {
+    // Restart/automation: saved stack mode wins, detached headless otherwise.
+    stackMode = getSavedStackMode() || 'headless';
   } else {
     stackMode = getSavedStackMode() || (process.stdout.isTTY ? 'windowed' : 'headless');
   }
@@ -437,7 +454,7 @@ async function main() {
   if (stackOnly || piMode === 'web') {
     log(DARK_GRAY, stackMode === 'windowed'
       ? '  Web stack: visible window (close it to stop the stack)'
-      : '  Web stack: detached, no window (stop with scripts\\stop-pi-stack.ps1)');
+      : '  Web stack: detached, no window (stop from the Background tasks panel or scripts\\stop-pi-stack.ps1)');
     startPiStack({ windowed: stackMode === 'windowed' });
     await ensureTunnel(tunnelLog);
     verifyTunnel();
@@ -463,7 +480,7 @@ async function main() {
     if (stackMode === 'windowed') {
       log(DARK_GRAY, '  Stop it by CLOSING the Pi web UI window (Ctrl+C in it also works).');
     } else {
-      log(DARK_GRAY, '  Stop it: scripts\\stop-pi-stack.ps1   (or /pi-web-ui:quit in the web UI)');
+      log(DARK_GRAY, '  Stop it: Background tasks panel (stack root -> Stop) or scripts\\stop-pi-stack.ps1');
     }
     log(MAGENTA, '');
     process.exit(0);

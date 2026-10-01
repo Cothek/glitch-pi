@@ -19,11 +19,30 @@
 const PLUGIN_ID = process.argv[2] ?? null;
 const PORT = Number(process.argv[3] ?? 8787);
 
+// Token gate: when PI_WEB_TOKEN is set the WS upgrade rejects without a
+// valid token. Resolve from the repo root (this script's location), never
+// from process.cwd() — agents run it from outside the repo.
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const __root = join(__dirname, "..");
+function readServerToken() {
+  try {
+    const t = readFileSync(join(__root, ".server-token"), "utf-8").trim();
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+
 const { default: WebSocket } = await import(
 	"file:///E:/Glitch%20AI/glitch-pi/data/node/node_modules/pi-web-ui/node_modules/ws/index.js"
 );
 
-const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, {
+const _token = readServerToken();
+const _wsUrl = _token ? `ws://127.0.0.1:${PORT}/ws?token=${encodeURIComponent(_token)}` : `ws://127.0.0.1:${PORT}/ws`;
+const ws = new WebSocket(_wsUrl, {
 	headers: { "user-agent": "glitch-plugin-reload/1.0" }, // rule 4: no Origin header = admitted
 });
 

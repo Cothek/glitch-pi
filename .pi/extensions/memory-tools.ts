@@ -53,9 +53,10 @@ function runGrep(term: string, dir: string): string[] {
 }
 
 export default function (pi: ExtensionAPI) {
-    // Canonical memory lives in glitch-ai (single source of truth — avoids copy drift).
-  // glitch-pi is the harness; memory data + search deps stay in glitch-ai.
-  const dir = "E:/Glitch AI/glitch-ai";
+    // Canonical memory lives in glitch-pi/user (own git repo, gitignored by the
+  // parent repo). Unified 2026-09-29: glitch-ai/user is the legacy backup
+  // (pre-pi era); search deps live in the glitch-pi memorycore submodule.
+  const dir = "E:/Glitch AI/glitch-pi";
 
   // --- recall ---
   pi.registerTool({

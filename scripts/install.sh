@@ -18,7 +18,7 @@ USER_REPO=""
 BRANCH=""
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-INSTALLER_VERSION="1.0.1"
+INSTALLER_VERSION="1.1.0"
 
 # Set up logging - captures all output to a file for diagnosis.
 # Logs to /tmp first (the install dir may not exist yet and must not be
@@ -136,9 +136,10 @@ spinner() {
     sleep 0.2 2>/dev/null || sleep 1
   done
   
-  # Wait and capture exit code
-  wait "$pid" 2>/dev/null || true
-  local exit_code=$?
+  # Wait and capture exit code (|| assignment keeps set -e from exiting;
+  # the old `wait ... || true` always left $? at 0, so failures looked like success)
+  local exit_code=0
+  wait "$pid" 2>/dev/null || exit_code=$?
   
   # Clear spinner line
   printf "\r                                                  \r" 2>/dev/null || true
@@ -593,6 +594,167 @@ else
   warn "GitNexus install failed (non-fatal). Manual install: cd $INSTALL_DIR && ./data/node/bin/npm install -g gitnexus"
 fi
 
+# 4.7. Page-picker browser extension (pi-web-ui companion)
+# Downloads the official pi-web-ui page-picker Chrome/Edge extension from GitHub
+# releases and extracts it into $INSTALL_DIR/browser-extension/page-picker/ so it
+# can be loaded unpacked straight from the installed Glitch folder.
+# Non-fatal: a failure warns and prints the manual download URL.
+header "Installing page-picker browser extension..."
+PAGE_PICKER_URL="https://github.com/xing-shuyin/pi-web-ui/releases/latest/download/page-picker-extension.zip"
+PAGE_PICKER_DIR="$INSTALL_DIR/browser-extension/page-picker"
+PAGE_PICKER_OK=0
+if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+  STAGING_DIR="$(mktemp -d)/page-picker"
+  mkdir -p "$STAGING_DIR"
+  EXT_ZIP="$(mktemp).page-picker-extension.zip"
+  if command -v curl >/dev/null 2>&1; then
+    step "Downloading page-picker-extension.zip..."
+    spinner "Downloading page-picker" curl -sL --fail --max-time 120 -o "$EXT_ZIP" "$PAGE_PICKER_URL"
+    DL_EXIT=$?
+  else
+    step "Downloading page-picker-extension.zip (wget)..."
+    spinner "Downloading page-picker" wget -q --timeout=120 -O "$EXT_ZIP" "$PAGE_PICKER_URL"
+    DL_EXIT=$?
+  fi
+  if [ "$DL_EXIT" -eq 0 ]; then
+    # Extract: unzip (macOS/Linux standard) -> bsdtar/GNU tar (macOS bsdtar reads
+    # zips) -> python3 zipfile. Git Bash ships no unzip, tar keeps it working there.
+    EX_EXIT=1
+    if command -v unzip >/dev/null 2>&1; then
+      spinner "Extracting page-picker" unzip -q -o "$EXT_ZIP" -d "$STAGING_DIR"
+      EX_EXIT=$?
+    elif command -v python3 >/dev/null 2>&1; then
+      step "unzip not found - extracting with python3..."
+      spinner "Extracting page-picker" python3 - "$EXT_ZIP" "$STAGING_DIR" <<'PYEOF'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    z.extractall(sys.argv[2])
+PYEOF
+      EX_EXIT=$?
+    elif tar -tf "$EXT_ZIP" >/dev/null 2>&1; then
+      step "unzip not found - extracting with tar..."
+      spinner "Extracting page-picker" tar -xf "$EXT_ZIP" -C "$STAGING_DIR"
+      EX_EXIT=$?
+    else
+      warn "No unzip, python3 or zip-capable tar found - cannot extract."
+    fi
+    # manifest.json must sit at the extension root for "Load unpacked";
+    # tolerate a future nested layout
+    if [ ! -f "$STAGING_DIR/manifest.json" ]; then
+      NESTED="$(find "$STAGING_DIR" -mindepth 2 -maxdepth 2 -name manifest.json -print -quit 2>/dev/null)"
+      if [ -n "$NESTED" ]; then
+        step "Zip layout changed (nested folder) - using $(basename "$(dirname "$NESTED")")"
+        STAGING_DIR="$(dirname "$NESTED")"
+      fi
+    fi
+    if [ -f "$STAGING_DIR/manifest.json" ]; then
+      rm -rf "$PAGE_PICKER_DIR"
+      mkdir -p "$(dirname "$PAGE_PICKER_DIR")"
+      mv "$STAGING_DIR" "$PAGE_PICKER_DIR"
+      PAGE_PICKER_OK=1
+      success "Page-picker extension installed at $PAGE_PICKER_DIR"
+    else
+      warn "Downloaded zip has no manifest.json (unexpected layout)"
+    fi
+  fi
+  rm -f "$EXT_ZIP"
+else
+  warn "Neither curl nor wget found - cannot download page-picker extension."
+fi
+if [ "$PAGE_PICKER_OK" -ne 1 ]; then
+  warn "Page-picker extension install failed (non-fatal)."
+  if [ -f "$PAGE_PICKER_DIR/manifest.json" ]; then
+    printf "  ${GRAY}Keeping existing copy at $PAGE_PICKER_DIR${NC}\n"
+  else
+    printf "  ${GRAY}Manual download: $PAGE_PICKER_URL${NC}\n"
+    printf "  ${GRAY}Unzip to: $PAGE_PICKER_DIR${NC}\n"
+  fi
+else
+  printf "\n  ${CYAN}Load it in your browser (one time):${NC}\n"
+  printf "    1. Open chrome://extensions  (edge://extensions on Edge)\n"
+  printf "    2. Enable Developer mode\n"
+  printf "    3. Click 'Load unpacked' and select:\n"
+  printf "    ${YELLOW}%s${NC}\n" "$PAGE_PICKER_DIR"
+  printf "    4. Open the extension's options and set your pi-web-ui address:\n"
+  printf "    ${YELLOW}http://localhost:8787${NC}  (default; click 'Authorize this address' if remote/LAN)\n"
+fi
+
+# 4.8. Desktop Control (cua-driver) - the AI's eyes and hands on this machine
+# Optional install, user decision. Runs the official sudo-free installer from cua.ai
+# (user-space, no admin) and wires the MCP server into the pi config so the desktop
+# tools (screenshots, mouse, keyboard, window management) appear in pi directly.
+header "Desktop Control (cua-driver)"
+
+CUA_BIN="$HOME/.local/bin/cua-driver"
+cua_present=0
+if [ -x "$CUA_BIN" ] || command -v cua-driver >/dev/null 2>&1; then
+  cua_present=1
+  success "cua-driver already installed (desktop control MCP)"
+fi
+
+if [ "$cua_present" -eq 0 ]; then
+  printf "  Desktop control gives the AI eyes and hands on this machine:\n"
+  printf "    screenshots, mouse, keyboard, window management (via the cua-driver MCP server).\n"
+  printf "  Official installer from cua.ai: user-space, sudo-free. Tools only run when the AI\n"
+  printf "    calls them. Telemetry: pseudonymous ID only ('cua-driver telemetry disable' to opt out).\n"
+  printf "  Install desktop control now? [y/N] "
+  cua_answer=""
+  read -r cua_answer </dev/tty || cua_answer=""
+  if printf '%s' "$cua_answer" | grep -qi '^y'; then
+    step "Installing cua-driver (official installer)..."
+    CUA_OUT=""
+    if CUA_OUT=$("$FETCH_CMD" -fsSL https://cua.ai/driver/install.sh | /bin/bash 2>&1); then
+      cua_present=1
+    else
+      warn "cua-driver installer failed. Output:"
+      printf '%s\n' "$CUA_OUT" | sed 's/^/  /'
+      printf "  Manual install: /bin/bash -c \"\$(curl -fsSL https://cua.ai/driver/install.sh)\"\n"
+    fi
+    # The installer's own success is not the only signal: verify the binary.
+    if [ "$cua_present" -eq 0 ] && [ -x "$CUA_BIN" ]; then
+      cua_present=1
+    fi
+    if [ "$cua_present" -eq 1 ]; then
+      success "cua-driver installed (desktop control MCP)"
+    else
+      warn "cua-driver install could not be verified (non-fatal)."
+    fi
+  else
+    warn "Skipped. Add later with: /bin/bash -c \"\$(curl -fsSL https://cua.ai/driver/install.sh)\""
+  fi
+fi
+
+# Wire the MCP server whenever the driver is present (also on re-install: keeps the
+# wiring in sync). The ~/.local/bin wrapper path is stable across driver upgrades.
+if [ -x "$CUA_BIN" ] || command -v cua-driver >/dev/null 2>&1; then
+  WIRE_MCP="$(dirname "$0")/lib/wire-mcp.mjs"
+  NODE_CMD=""
+  if [ -x "$BUNDLED_NODE_BIN/node" ]; then
+    NODE_CMD="$BUNDLED_NODE_BIN/node"
+  elif command -v node >/dev/null 2>&1; then
+    NODE_CMD="$(command -v node)"
+  fi
+  if [ -n "$NODE_CMD" ] && [ -f "$WIRE_MCP" ]; then
+    # Resolve the real binary path for the MCP entry (PATH wins if set).
+    CUA_RESOLVED="$(command -v cua-driver 2>/dev/null || echo "$CUA_BIN")"
+    "$NODE_CMD" "$WIRE_MCP" --id cua-driver --command "$CUA_RESOLVED" --args mcp
+  else
+    warn "Could not wire the cua-driver MCP server (no node or helper missing)."
+  fi
+fi
+
+# 4.9. Headless display - desktop capture stays alive with no monitor attached.
+# Windows: handled by install.ps1 (Parsec Virtual Display Driver + one UAC prompt;
+# under RDP the session must also run scripts/attach-session-to-console.ps1 once
+# per login for desktop-wide capture - verified 2026-09-30).
+# Linux (native or WSL2, which is where this script usually runs): informational
+# only - capture needs an X11/Wayland session; on truly headless Linux run cua-driver
+# behind Xvfb. No prompt here to keep the Windows contract (2 questions + 1 UAC).
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && ! grep -qi microsoft /proc/version 2>/dev/null; then
+  warn "No display detected (headless Linux). Desktop capture needs Xvfb:"
+  printf "    sudo apt install xvfb && xvfb-run cua-driver serve\n"
+fi
+
 # 5. User profile setup
 header "User Profile Setup"
 cat <<'EOF'
@@ -862,7 +1024,7 @@ header "Seeding default plugins..."
 cd "$INSTALL_DIR"
 if command -v node >/dev/null 2>&1; then
     if seed_output=$(node scripts/plugin.mjs seed 2>&1); then
-        success "Seeded default plugins (model-ui). Edit user/plugins.json to customize."
+        success "Seeded default plugins. Edit user/plugins.json to customize."
         if [ -n "$seed_output" ]; then
             echo "  $seed_output"
         fi

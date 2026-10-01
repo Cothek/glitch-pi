@@ -2,7 +2,6 @@
 /**
  * sync-nvidia-models.mjs — NVIDIA NIM live model sync (Pi edition)
  *
- * Pi replacement for the OpenCode-era check-models.ps1 NVIDIA flow:
  * instead of a static catalog, ping the NVIDIA servers and let the live
  * /v1/models response determine the NVIDIA model list pi offers.
  *
@@ -13,10 +12,12 @@
  *   4. Merge metadata from pi's built-in NVIDIA catalog (context window, cost,
  *      compat flags, thinking level maps) so known models keep curated data;
  *      genuinely new ids get conservative defaults from name heuristics
- *   5. Write the merged list to ~/.pi/agent/models.json under providers.nvidia
+ *   5. Apply the curated-subset filter so the picker shows a modern subset
+ *      (env NVIDIA_CURATED=0 writes the full list instead)
+ *   6. Write the merged list to ~/.pi/agent/models.json under providers.nvidia
  *      (atomic temp+rename; other providers and user-added nvidia entries are
  *      preserved)
- *   6. Cache the result in data/nvidia-models-cache.json (TTL-gated)
+ *   7. Cache the result in data/nvidia-models-cache.json (TTL-gated)
  *
  * pi re-reads models.json every time /model or the web model picker opens,
  * so an updated file is picked up without restarting pi.
@@ -24,8 +25,17 @@
  * MERGE SEMANTICS (pi models.json)
  *   - Built-in catalog models are KEPT; custom models are upserted by id.
  *   - Same id as a built-in -> replaces it (this is how live metadata wins).
- *   - pi cannot remove built-in entries, so a model NVIDIA drops lingers in
- *     the picker until the pi package updates. Known limitation, by design.
+ *   - The web picker renders the UNION of models.json + pi's built-in catalog
+ *     + models-store.json. Built-in ids always show, so the curated subset
+ *     keeps them; ids only this script syncs vanish from the picker when
+ *     filtered out of models.json.
+ *
+ * CURATED SUBSET
+ *   The picker shows every modern family (nemotron, kimi-k, glm-5, deepseek-v4,
+ *   gemma-3/4, gpt-oss, llama-3, muse-glimmer, laguna, cosmos-reason) plus all
+ *   built-in ids. Legacy one-off models (llama2, granite-3.0, codellama,
+ *   mixtral, phi-3, palmyra-*, ...) stay out. Set NVIDIA_CURATED=0 to write
+ *   the full NIM list instead.
  *
  * USAGE
  *   node scripts/sync-nvidia-models.mjs              # sync if cache stale
@@ -88,6 +98,12 @@ const NON_CHAT_RE =
 
 // Heuristics for models absent from the built-in catalog.
 const REASONING_RE = /nemotron|reason|kimi-k|gpt-oss|^z-ai\/glm|deepseek-v4|muse-glimmer|qwen3|magistral/i;
+
+// Curated-subset keep filter (NVIDIA_CURATED=0 disables). A synced id survives
+// if it matches a modern family; built-in catalog ids are always kept because
+// pi renders them regardless of models.json (see MERGE SEMANTICS above).
+const CURATED_KEEP_RE =
+  /kimi-k|deepseek-v4|^z-ai\/glm|nemotron|gemma-[34]-|gpt-oss|muse-glimmer|laguna|llama-3|cosmos-reason/i;
 const VISION_RE = /vision|gemma-[34]|omni|glm-.*flash|cosmos-reason|muse-glimmer|phi-3.*vision/i;
 const CTX_FAMILIES = [
   [/kimi-k3/, 1048576],
@@ -229,6 +245,26 @@ function releaseLock() {
   try { if (existsSync(LOCK_FILE)) unlinkSync(LOCK_FILE); } catch { /* best-effort */ }
 }
 
+// ---- Engine disable-state (user intent) ----
+// data/nvidia-models-state.json is the NVIDIA Models panel's source of
+// truth for "the user turned this model off". This sync re-adds every
+// curated live catalog id to models.json, so without this check it
+// silently re-enables models the user disabled (they reappear in the
+// picker, and the next engine verb re-marks them enabled in the state —
+// the checkbox rechecks itself). Fail-open: missing or corrupt state =
+// no exclusions (first-run behavior).
+const ENGINE_STATE_FILE = join(ROOT_DIR, 'data', 'nvidia-models-state.json');
+
+function disabledModelIds() {
+  try {
+    const raw = readJson(ENGINE_STATE_FILE);
+    const models = raw && Array.isArray(raw.models) ? raw.models : [];
+    return new Set(models.filter((m) => m && m.id && m.enabled === false).map((m) => m.id));
+  } catch {
+    return new Set();
+  }
+}
+
 // ---- Main ----
 async function main() {
   const args = process.argv.slice(2);
@@ -236,7 +272,9 @@ async function main() {
     console.log(`Usage: node scripts/sync-nvidia-models.mjs [--force] [--dry-run] [--ttl-min N]
   --force     Ignore the cache TTL and re-ping NVIDIA
   --dry-run   Print the merged result without writing models.json
-  --ttl-min N Cache TTL in minutes (default 30, env NVIDIA_SYNC_TTL_MIN)`);
+  --ttl-min N Cache TTL in minutes (default 30, env NVIDIA_SYNC_TTL_MIN)
+
+  NVIDIA_CURATED=0 disables the curated subset (writes the full NIM list).`);
     process.exit(0);
   }
   const force = args.includes('--force');
@@ -303,6 +341,19 @@ async function main() {
       return known || heuristicsEntry(id);
     });
 
+    // 6.5 Curated subset: modern families + all built-in ids (they render in
+    //     the picker regardless, so keeping them keeps the count honest).
+    //     Ids the user disabled in the NVIDIA Models panel are excluded in
+    //     BOTH modes (curated and full): user intent beats the catalog.
+    const disabledIds = disabledModelIds();
+    const curated = process.env.NVIDIA_CURATED !== '0';
+    const builtinIds = new Set(Object.keys(catalog));
+    const visibleEntries = liveEntries.filter(
+      (e) =>
+        !disabledIds.has(e.id) &&
+        (curated ? builtinIds.has(e.id) || CURATED_KEEP_RE.test(e.id) : true)
+    );
+
     // 7. Merge into models.json, preserving other providers and user-added
     //    nvidia entries (ids this script has never synced = user-owned).
     const modelsJson = readJson(MODELS_JSON) || { providers: {} };
@@ -313,10 +364,10 @@ async function main() {
     const liveIdSet = new Set(chatIds);
 
     const keepUserEntries = (Array.isArray(prevNvidia.models) ? prevNvidia.models : []).filter(
-      (m) => m && m.id && !liveIdSet.has(m.id) && !syncedBefore.has(m.id)
+      (m) => m && m.id && !liveIdSet.has(m.id) && !syncedBefore.has(m.id) && !disabledIds.has(m.id)
     );
 
-    const mergedModels = [...liveEntries, ...keepUserEntries].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const mergedModels = [...visibleEntries, ...keepUserEntries].sort((a, b) => String(a.id).localeCompare(String(b.id)));
 
     // New = live ids that weren't in the previous sync
     const newCount = chatIds.filter((id) => !syncedBefore.has(id)).length;
@@ -325,8 +376,9 @@ async function main() {
     const newModelsJson = { ...modelsJson, providers: { ...modelsJson.providers, nvidia: newNvidiaSection } };
 
     if (dryRun) {
-      console.log(`Dry run - would write ${mergedModels.length} NVIDIA models (${newCount} new) to ${MODELS_JSON}`);
-      console.log(JSON.stringify(newModelsJson.providers.nvidia, null, 2).slice(0, 4000));
+      console.log(`Dry run - would write ${mergedModels.length} NVIDIA models (${newCount} new, ${curated ? 'curated subset' : 'full list'}) to ${MODELS_JSON}`);
+      if (curated) console.log(mergedModels.map((m) => m.id).join('\n'));
+      else console.log(JSON.stringify(newModelsJson.providers.nvidia, null, 2).slice(0, 4000));
       releaseLock();
       process.exit(0);
     }
@@ -339,10 +391,11 @@ async function main() {
       count: chatIds.length,
       ids: chatIds,
       syncedIds: chatIds,
+      ...(curated ? { curatedCount: visibleEntries.length, curatedIds: visibleEntries.map((m) => m.id) } : {}),
       baseUrl: NIM_BASE_URL,
     });
 
-    log(`NVIDIA: ${chatIds.length} live models (${newCount} new) - models.json updated`, logOpts);
+    log(`NVIDIA: ${chatIds.length} live models (${newCount} new) - ${curated ? `${visibleEntries.length} curated` : 'full list'} written to models.json${disabledIds.size ? ` (${disabledIds.size} panel-disabled kept out)` : ''}`, logOpts);
   } finally {
     releaseLock();
   }

@@ -15,8 +15,10 @@
     Only a tunnel this repo started (recorded in data\cloudflared-auto.pid) is
     stopped; one started by hand is reported and left running.
 
-    Killing a windowed stack from here also leaves that window sitting at its
-    prompt - close it afterwards.
+    Killing a windowed stack from here also closes the parked window itself
+    (a -NoExit window whose children died) via the shared
+    scripts\lib\stack-windows.ps1 helper, so windows cannot accumulate
+    across stop/restart cycles.
 
 .PARAMETER WebPort
     pi-web-ui port. Default 8787.
@@ -94,6 +96,17 @@ if ($NoTunnel) {
     } finally {
         $ErrorActionPreference = $prev
     }
+}
+
+# ---- Parked stack windows ---------------------------------------------------
+# A windowed stack window (pi-stack-window.ps1, -NoExit) parks at its prompt
+# forever once its children die. The listeners above are down now, so every
+# stack window that still exists is parked; close them so they do not
+# accumulate. Guarded so a missing helper can never break a stop.
+$StackWindowsLib = Join-Path $RootDir "scripts\lib\stack-windows.ps1"
+if (Test-Path $StackWindowsLib) {
+    . $StackWindowsLib
+    Stop-StaleStackWindows -WebPort $WebPort -AuthPort $AuthPort
 }
 
 Start-Sleep -Seconds 1

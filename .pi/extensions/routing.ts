@@ -100,6 +100,14 @@ function isOmniPrimaryMode(): boolean {
   return readAgentMode() === "glitch-omni";
 }
 
+// Direct-execution primary modes (omni, lightweight) must NEVER dispatch
+// sub-agents — they do everything themselves by design. Enforced as a hard
+// block (not a system-prompt request) because the model ignores the prose.
+function isDirectExecPrimaryMode(): boolean {
+  const mode = readAgentMode();
+  return mode === "glitch-omni" || mode === "glitch-lightweight";
+}
+
 // --- Detection sets (verbatim from OpenCode plugins) ---
 
 const COMPLEXITY_KEYWORDS = [
@@ -139,8 +147,7 @@ const READ_ONLY_BASH_COMMANDS = new Set([
 ]);
 
 const DESTRUCTIVE_BASH_COMMANDS = new Set([
-  "rm ", "del ", "remove-item", "rmdir ", "rd ", "deltree",
-  "rmdir /s", "remove-item -recurse",
+  "rm", "del", "remove-item", "rmdir", "rd", "deltree",
 ]);
 
 const CODE_WRITING_AGENTS = new Set([
@@ -183,8 +190,38 @@ function isReadOnlyBashCommand(command: string): boolean {
 }
 
 function isDestructiveBashCommand(command: string): boolean {
-  const normalized = command.trim().toLowerCase();
-  return [...DESTRUCTIVE_BASH_COMMANDS].some((cmd) => normalized.includes(cmd));
+  const segments = command.split(/&&|\|\||;|\||\n/);
+  const STRIP_EXTS = /\.(exe|com|bat|cmd|ps1)$/i;
+  for (const rawSeg of segments) {
+    const seg = rawSeg.trim();
+    if (!seg) continue;
+    const tokens = seg.split(/\s+/);
+    const stripQuotes = (s: string): string =>
+      s.length >= 2 &&
+      ((s.startsWith('"') && s.endsWith('"')) ||
+        (s.startsWith("'") && s.endsWith("'")) ||
+        (s.startsWith("`") && s.endsWith("`")))
+        ? s.slice(1, -1)
+        : s;
+    const basename = (s: string): string => {
+      const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+      return i >= 0 ? s.slice(i + 1) : s;
+    };
+    const name0 = stripQuotes(tokens[0])
+      .replace(STRIP_EXTS, "")
+      .toLowerCase();
+    let cmdName = basename(name0);
+    if ((cmdName === "cmd" || cmdName === "cmd.exe") && tokens.length >= 3) {
+      const flag = tokens[1].toLowerCase();
+      if (flag === "/c" || flag === "/k") {
+        cmdName = basename(
+          stripQuotes(tokens[2]).replace(STRIP_EXTS, "").toLowerCase(),
+        );
+      }
+    }
+    if (DESTRUCTIVE_BASH_COMMANDS.has(cmdName)) return true;
+  }
+  return false;
 }
 
 function shouldBlockDestructiveBash(command: string): boolean {
@@ -280,7 +317,7 @@ function extractFilePath(input: any): string {
 
 function extractAgentName(input: any): string {
   if (!input || typeof input !== "object") return "unknown";
-  return String(input.subagent_type || input.agent || input.subagent || "unknown");
+  return String(input.subagent_type || input.agent || input.subagent || input.template || input.type || "unknown");
 }
 
 function writeReviewPassMarker(agentName: string): void {
@@ -300,10 +337,48 @@ function writeReviewPassMarker(agentName: string): void {
   }
 }
 
+const RENAME_MARKER_RE = /\[\[\s*conv\s*:\s*rename\s*:/;
+const RENAME_TOKEN_RE = /\[\[\s*conv\s*:\s*rename\s*:(.*?)\s*\]\]/g;
+
+function hasRenameMarker(content: any): boolean {
+  if (typeof content === "string") return RENAME_MARKER_RE.test(content);
+  if (Array.isArray(content)) {
+    return content.some(
+      (p: any) => p?.type === "text" && typeof p.text === "string" && RENAME_MARKER_RE.test(p.text),
+    );
+  }
+  return false;
+}
+
+function stripRenameMarkers(content: any): any {
+  if (typeof content === "string") return content.replace(RENAME_TOKEN_RE, "").trim();
+  if (Array.isArray(content)) {
+    return content.map((p: any) =>
+      p?.type === "text" && typeof p.text === "string"
+        ? { ...p, text: p.text.replace(RENAME_TOKEN_RE, "").trim() }
+        : p,
+    );
+  }
+  return content;
+}
+
+function hasTextContent(content: any): boolean {
+  if (typeof content === "string") return content.trim().length > 0;
+  if (Array.isArray(content)) {
+    return content.some(
+      (p: any) => p?.type === "text" && typeof p.text === "string" && p.text.trim().length > 0,
+    );
+  }
+  return false;
+}
+
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
   const lastTaskTime = new Map<string, number>();
+  // Global "any dispatch" stamp. edit/bash calls carry no agent key, so the
+  // per-agent map alone can never satisfy their window check.
+  let lastDispatchTime = 0;
   let pendingReview = false;
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
@@ -317,28 +392,65 @@ export default function (pi: ExtensionAPI) {
       (ctx.sessionManager as any)?.id ||
       "default";
     currentSessionID = String(sid);
+  });
 
-    // Tell the model which plan file it owns so it never has to guess (and
-    // never touches another session's). Best-effort: if this fails silently,
-    // the gate's block reasons carry the same information.
+  // R17: rename-once guard v3 (conversation-scoped). Two producers caused the
+  // "renames on every entry" bug: (1) the old before_agent_start emission
+  // (removed) rendered a PLUGIN conv:rename card on every user entry; (2) the
+  // built-in marker service renames on ANY assistant text containing
+  // [[conv:rename:<title>]] — including replies that merely QUOTE the syntax
+  // (this repo's own conversation got renamed to "<title>", "...", and
+  // "<composed title>"). Session-keyed state cannot fix either: forks and
+  // retries mint new session ids and extension state can reset per turn. So the
+  // guard derives from the conversation itself:
+  //   turn_start -> arm a one-shot capture for this turn.
+  //   context    -> at the turn's FIRST provider request, record whether the
+  //                 LLM-request history holds any assistant message with text
+  //                 content (thinking/toolCall-only bubbles don't count, so a
+  //                 multi-bubble first reply still works). Mid-turn refires do
+  //                 not re-capture.
+  //   message_end-> if the finalized assistant message carries rename markers
+  //                 AND prior assistant text exists, strip them via
+  //                 MessageEndEventResult replacement (pi applies it before
+  //                 the message reaches pi-web-ui's marker scan — verified in
+  //                 the SDK runner's emitMessageEnd). Net effect: only the
+  //                 conversation's FIRST assistant text reply can rename; every
+  //                 later marker — real or quoted — is inert.
+  let hasPriorAssistantText = false;
+  let renameCapturePending = true;
+
+  pi.on("turn_start", () => {
+    renameCapturePending = true;
+  });
+
+  pi.on("context", (event) => {
     try {
-      pi.sendMessage(
-        {
-          customType: "plan-session-info",
-          content:
-            `Plan-First: this session's plan file is ${sessionPlanPath(currentSessionID)}. ` +
-            `Write complex-task plans there BEFORE editing code files (plan-first skill). ` +
-            `When the task is done, archive ONLY this file to data/plans/archive/<YYYY-MM-DD>-<short-task-name>.md. ` +
-            `Other sessions' plan files (data/plans/sessions/<other-id>/...) are read-only to you — the gate blocks cross-session plan writes, moves, and deletes.`,
-          display: true,
-        },
-        { deliverAs: "nextTurn" },
+      if (!renameCapturePending) return;
+      renameCapturePending = false;
+      const msgs = (event as any).messages;
+      if (!Array.isArray(msgs)) return;
+      hasPriorAssistantText = msgs.some(
+        (m: any) => m?.role === "assistant" && hasTextContent(m.content),
       );
     } catch {
-      // announce is best-effort; the block reasons repeat the paths anyway
+      /* never block context assembly on the guard */
     }
   });
 
+  pi.on("message_end", async (event) => {
+    try {
+      const mm = (event as any).message;
+      if (mm?.role !== "assistant") return undefined;
+      if (!hasRenameMarker(mm.content)) return undefined;
+      if (!hasPriorAssistantText) return undefined; // first reply of the conversation - allow the rename
+      const content = stripRenameMarkers(mm.content);
+      if (content === mm.content) return undefined;
+      return { message: { ...mm, content } } as any;
+    } catch (e: any) {
+      console.error(`[routing] rename-once guard failed: ${e?.message || e}`);
+      return undefined;
+    }
+  });
   // --- Pre-tool gates: plan-first + dispatch-first + review gate ---
   pi.on(
     "tool_call",
@@ -353,8 +465,21 @@ export default function (pi: ExtensionAPI) {
         const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimaryMode();
 
         // --- dispatch tracking on task-like custom tools ---
-        if (event.toolName === "task" || event.toolName === "dispatch") {
-          // task dispatch itself is allowed; timestamp recorded after via tool_execution_end
+        if (event.toolName === "task" || event.toolName === "dispatch" || event.toolName === "subagent_spawn" || event.toolName === "delegate_task") {
+          // Hard no-dispatch gate for direct-execution modes (omni/lightweight).
+          // The mode file is re-read per call, so mid-session /agent switches
+          // take effect immediately.
+          if (isDirectExecPrimaryMode()) {
+            return {
+              block: true,
+              reason:
+                `⛔ No-Dispatch Violation: ${event.toolName} is forbidden in ${readAgentMode()} mode.\n` +
+                "Glitch Omni / Glitch Lightweight execute everything directly — no sub-agent dispatch, ever.\n" +
+                "Do the work yourself with edit/write/bash/read. If the task needs a capability you lack, tell Troy directly.\n" +
+                "To use sub-agents, ask Troy to switch modes: /agent glitch.",
+            };
+          }
+          // task dispatch itself is allowed in dispatch-first modes; timestamp recorded after via tool_execution_end
         }
 
         // --- edit / write gates ---
@@ -397,7 +522,7 @@ export default function (pi: ExtensionAPI) {
 
           // Dispatch-First (dispatch-reflex)
           if (!isExemptFile(filePath) && isCodeFile(filePath)) {
-            const lastTask = lastTaskTime.get(agentName) || 0;
+            const lastTask = Math.max(lastTaskTime.get(agentName) || 0, lastDispatchTime);
             const timeSinceTask = Date.now() - lastTask;
             if (timeSinceTask > DISPATCH_WINDOW_MS) {
               if (isGlitchOmni) {
@@ -406,8 +531,8 @@ export default function (pi: ExtensionAPI) {
                 return {
                   block: true,
                   reason:
-                    `⛔ Dispatch-First Violation: Direct edit on ${filePath} without prior task() dispatch.\n` +
-                    `You MUST dispatch to the appropriate sub-agent (task() with subagent_type: "coder" for code) before editing files directly.\n` +
+                    `⛔ Dispatch-First Violation: Direct edit on ${filePath} without prior subagent dispatch.\n` +
+                    `You MUST dispatch to a sub-agent first (delegate_task or subagent_spawn, e.g. delegate_task with agent: "coder" for code) before editing files directly.\n` +
                     "Exempt: memory files (user/*.md), config files (opencode.json), and git operations.",
                 };
               }
@@ -439,7 +564,7 @@ export default function (pi: ExtensionAPI) {
 
           // Destructive bash → dispatch-first
           if (shouldBlockDestructiveBash(command)) {
-            const lastTask = lastTaskTime.get(agentName) || 0;
+            const lastTask = Math.max(lastTaskTime.get(agentName) || 0, lastDispatchTime);
             const timeSinceTask = Date.now() - lastTask;
             if (timeSinceTask > DISPATCH_WINDOW_MS) {
               if (isGlitchOmni) {
@@ -448,9 +573,9 @@ export default function (pi: ExtensionAPI) {
                 return {
                   block: true,
                   reason:
-                    "⛔ Dispatch-First Violation: Direct destructive bash command without prior task() dispatch.\n" +
+                    "⛔ Dispatch-First Violation: Direct destructive bash command without prior subagent dispatch.\n" +
                     `Command: ${command}\n` +
-                    'You MUST dispatch to the appropriate sub-agent (task() with subagent_type: "general") before running destructive commands.\n' +
+                    'You MUST dispatch to a sub-agent first (delegate_task or subagent_spawn, e.g. delegate_task with agent: "general") before running destructive commands.\n' +
                     "Exempt: read-only commands, git operations (git add, commit, push, pull).",
                 };
               }
@@ -486,10 +611,11 @@ export default function (pi: ExtensionAPI) {
     try {
       const tool = event.toolName || "unknown";
 
-      if (tool === "task" || tool === "dispatch") {
+      if (tool === "task" || tool === "dispatch" || tool === "subagent_spawn" || tool === "delegate_task") {
         const args = (event as any).args ?? (event as any).input ?? {};
         const agentName = extractAgentName(args);
         lastTaskTime.set(agentName, Date.now());
+        lastDispatchTime = Date.now();
 
         if (CODE_WRITING_AGENTS.has(agentName)) {
           pendingReview = true;

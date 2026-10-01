@@ -9,9 +9,9 @@
  * Run: node --test index.test.mjs
  */
 
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import plugin from "./index.mjs";
@@ -91,9 +91,18 @@ function registeredChip(host) {
 
 describe("agent-switcher plugin", () => {
 	let root;
+	let globalRoot;
 
 	beforeEach(() => {
 		root = fixtureWorkspace();
+		// Isolate the global fallback dir per test (env override; empty by default).
+		globalRoot = mkdtempSync(join(tmpdir(), "agent-switcher-global-"));
+		process.env.AGENT_SWITCHER_GLOBAL_DIR = globalRoot;
+	});
+
+	afterEach(() => {
+		rmSync(globalRoot, { recursive: true, force: true });
+		delete process.env.AGENT_SWITCHER_GLOBAL_DIR;
 	});
 
 	it("registers a composer action chip with the current mode label", async () => {
@@ -183,6 +192,46 @@ describe("agent-switcher plugin", () => {
 		const update = host.mock.calls("ui.update").at(-1);
 		assert.ok(update, "ui.update should have been called");
 		assert.equal(update.args[1]?.label, "Agent: glitch");
+	});
+
+	it("falls back to global profiles when the workspace has none", async () => {
+		writeFileSync(join(globalRoot, "glitch.md"), "---\ndescription: Global glitch\n---\n\n# Glitch\nGlobal body...", "utf-8");
+		writeFileSync(join(globalRoot, "glitch-free.md"), "# Glitch Free\n(no frontmatter)", "utf-8");
+		const bareRoot = mkdtempSync(join(tmpdir(), "agent-switcher-bare-"));
+		mkdirSync(join(bareRoot, ".pi"), { recursive: true });
+		mkdirSync(join(bareRoot, "user"), { recursive: true });
+		try {
+			const { host } = makeHost(bareRoot);
+			await plugin.activate(host);
+			const item = registeredChip(host);
+			assert.equal(item.label, "Agent: glitch");
+			const getState = host.mock.routes.find((r) => r.method === "GET" && r.path === "/state");
+			const res = { status: 0, body: "", writeHead(s) { this.status = s; }, end(b) { this.body = b; } };
+			await getState.handler({ body: {}, url: "/state" }, res);
+			const state = JSON.parse(res.body);
+			assert.deepEqual(state.modes.map((m) => m.id), ["glitch", "glitch-free"]);
+			// Switching from a global profile stages its body in the bare workspace.
+			host.mock.emit("onMessage", { action: "agent-switcher:switch", value: "glitch" }, "c1");
+			await new Promise((r) => setTimeout(r, 30));
+			const staged = readFileSync(join(bareRoot, ".pi", "SYSTEM.md"), "utf-8");
+			assert.ok(staged.startsWith("# Glitch"), `global profile body should be staged, got: ${staged.slice(0, 40)}`);
+		} finally {
+			rmSync(bareRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("lets a same-id workspace profile override the global one", async () => {
+		writeFileSync(join(globalRoot, "glitch.md"), "---\ndescription: STALE global\n---\n\n# Glitch\nStale body", "utf-8");
+		writeFileSync(join(globalRoot, "extra-global.md"), "---\ndescription: Extra\n---\n\n# Extra\nBody", "utf-8");
+		const { host } = makeHost(root);
+		await plugin.activate(host);
+		const getState = host.mock.routes.find((r) => r.method === "GET" && r.path === "/state");
+		const res = { status: 0, body: "", writeHead(s) { this.status = s; }, end(b) { this.body = b; } };
+		await getState.handler({ body: {}, url: "/state" }, res);
+		const modes = JSON.parse(res.body).modes;
+		assert.equal(modes.length, 4);
+		assert.equal(modes.find((m) => m.id === "glitch")?.description, "Full Glitch - dispatch-first workflow");
+		assert.equal(modes.find((m) => m.id === "extra-global")?.description, "Extra");
 	});
 
 	it("hides the chip when the workspace has no profiles", async () => {

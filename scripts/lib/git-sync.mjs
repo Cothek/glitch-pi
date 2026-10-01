@@ -156,9 +156,10 @@ function pullBranch(cwd, branch) {
 }
 
 /**
- * Update submodules.
+ * Update submodules. Exported so the launcher can call it directly when it
+ * needs to advance glitch-memorycore outside the git-sync flow.
  */
-function syncSubmodules(cwd) {
+export function syncSubmodules(cwd) {
   run('git', ['submodule', 'update', '--init', '--recursive'], { cwd, timeout: 60000 });
 }
 
@@ -228,6 +229,7 @@ function getChangedFiles(cwd) {
  *   - config/         + any               template configs
  *   - glitch-memorycore/ + any            engine files loaded as instructions
  *   - .opencode/       + any              agent definitions, plugins, instructions
+ *   - .pi/             + any              agent profiles, skills, settings, extensions
  *   - root files ending in .bat or .sh    entry point launchers in repo root
  *
  * @param {string} filePath - Repo-relative path using forward slashes.
@@ -244,6 +246,10 @@ function isStartupCritical(filePath) {
   if (p.startsWith('config/')) return true;
   if (p.startsWith('glitch-memorycore/')) return true;
   if (p.startsWith('.opencode/')) return true;
+  // .pi/ holds agent profiles, skills, settings, and extensions. Any change
+  // there can flip runtime behaviour (skill selection, model routing, the
+  // active agent), so we restart to pick the new config up cleanly.
+  if (p.startsWith('.pi/')) return true;
   if (p.endsWith('.bat') || p.endsWith('.sh')) return true;
   return false;
 }
@@ -299,7 +305,7 @@ const RESTART_MAX_DISPLAY = 8;
 /**
  * Update-triggered restart: spawn a fresh process with the updated launch
  * script and exit the current one. This is DIFFERENT from the user-triggered
- * restart path (data/.restart-flag + in-process loop in serve.mjs/launch.mjs).
+ * restart path (data/.restart-flag + in-process loop).
  *
  * - Uses detached:true + child.unref() so the child survives parent exit
  *   on all platforms (Windows and Unix).

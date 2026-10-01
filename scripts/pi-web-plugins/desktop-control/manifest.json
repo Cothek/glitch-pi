@@ -1,0 +1,10 @@
+{
+  "id": "desktop-control",
+  "name": "Desktop Control",
+  "version": "0.1.0",
+  "description": "Toggle the cua-driver desktop daemon (Glitch's eyes and hands on this machine) and capture a desktop screenshot. Flag lives in glitch-pi data/config/desktop-control.json, read by launch-unified.mjs on every start and stack restart.",
+  "apiVersion": 2,
+  "permissions": ["ui", "http", "tools"],
+  "view": true,
+  "preload": true
+}

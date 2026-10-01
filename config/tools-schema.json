@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://glitch-pi.local/config/tools-schema.json",
+  "title": "Glitch PI Tools Manifest",
+  "description": "Manifest of npm globals and standalone binaries the launcher expects. Read by scripts/ensure-tools.mjs (install on first run) and scripts/check-updates.mjs (compare installed vs latest, apply updates with backup + rollback).",
+  "type": "object",
+  "required": ["tools"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": { "type": "string" },
+    "description": { "type": "string" },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "restartRequired", "updateType"],
+        "properties": {
+          "name": { "type": "string", "description": "Stable identifier used in filter, status file, and apply reports." },
+          "type": { "type": "string", "enum": ["npm", "binary"] },
+          "package": { "type": "string", "description": "npm package name (required when type is npm)." },
+          "binary": { "type": "string", "description": "Binary name or repo-relative path to the executable." },
+          "version": { "type": "string", "description": "Pinned version for binary downloads (unused for npm; current/latest detected at runtime)." },
+          "platforms": {
+            "type": "object",
+            "description": "Per-platform download config for binary entries.",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "url": { "type": "string", "description": "Download URL. Supports ${version} (cleaned semver), ${tag} (raw release tag) and ${arch} (x64|arm64) templates resolved at apply time." },
+                "archive": { "type": "string", "description": "Archive type for the extractor: zip, msi, or empty for raw binaries." },
+                "extract": { "type": "array", "items": { "type": "string" }, "description": "File(s) to locate inside the extracted payload." },
+                "replaceDir": { "type": "string", "description": "For zip payloads: repo-relative directory the extracted root replaces wholesale (e.g. data/node). Implies a directory swap with rollback." }
+              },
+              "additionalProperties": true
+            }
+          },
+          "restartRequired": {
+            "type": "boolean",
+            "description": "When true, the launcher must restart after this entry is updated. The update subsystem backs up the package directory before install."
+          },
+          "updateType": {
+            "type": "string",
+            "enum": ["sync", "manual", "none"],
+            "description": "sync: subsystem compares installed vs latest and can auto-apply. manual: subsystem reports current version only and never applies. none: never checked."
+          },
+          "latestUrl": {
+            "type": "string",
+            "description": "Optional URL that resolves to the latest release. For github releases/latest URLs, the subsystem follows the redirect and parses the tag."
+          },
+          "versionStrategy": {
+            "type": "string",
+            "enum": ["probe", "filedate"],
+            "description": "How the installed state is judged: probe (default) runs the binary's --version; filedate compares the binary's mtime with the release published date (for binaries with no version flag, e.g. Handy)."
+          },
+          "restoreNpmGlobals": {
+            "type": "boolean",
+            "description": "For replaceDir payloads that wipe data/node (the npm global prefix): snapshot every npm tool's installed version before the swap and reinstall them after."
+          }
+        }
+      }
+    }
+  }
+}

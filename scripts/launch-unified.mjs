@@ -5,7 +5,7 @@ import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync, execSync, spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { checkRepoUpdates, handleRestartOnUpdate } from './lib/git-sync.mjs';
+import { checkRepoUpdates, checkUserRepoUpdates, handleRestartOnUpdate } from './lib/git-sync.mjs';
 import { initLaunchLog, logToFile } from './lib/launch-log.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -17,7 +17,12 @@ const ROOT_DIR = resolve(SCRIPT_DIR, '..');
 // appended to data/launch.log (ANSI-stripped, ISO-timestamped).
 initLaunchLog();
 
-const PrefFile = join(ROOT_DIR, 'user', 'launch-preference.json');
+// Launch-time selections are MACHINE-LOCAL state: they live in data/ (the
+// parent repo gitignores data/), NOT in the user/ memory repo which is
+// committed and synced. The user/ path remains as a legacy migration fallback
+// read only, and is untracked there going forward.
+const PrefFile = join(ROOT_DIR, 'data', 'launch-preference.json');
+const LegacyPrefFile = join(ROOT_DIR, 'user', 'launch-preference.json');
 
 const MAGENTA = '\x1b[35m';
 const CYAN = '\x1b[36m';
@@ -203,14 +208,22 @@ function normalizeMode(mode) {
   return null;
 }
 
+function readPref() {
+  // data/ store wins; adopt the legacy user/ file only when data/ is absent.
+  return readJson(PrefFile) || readJson(LegacyPrefFile);
+}
+
 function getSavedMode() {
-  const pref = readJson(PrefFile);
+  const pref = readPref();
   if (pref && pref.last_mode) return normalizeMode(pref.last_mode);
   return null;
 }
 
 function saveMode(mode) {
-  writeJson(PrefFile, { last_mode: mode, saved_at: new Date().toISOString() });
+  // Merge, never clobber: launch-pi.mjs stores last_pi_mode / pi_stack_mode
+  // in the same file.
+  const pref = readPref() || {};
+  writeJson(PrefFile, { ...pref, last_mode: mode, saved_at: new Date().toISOString() });
 }
 
 const DELIVERIES = [
@@ -236,14 +249,9 @@ const MODELS = [
 ];
 
 const SCRIPT_MAP = {
-  'normal-paid': { script: 'launch.mjs', args: [] },
-  'normal-free': { script: 'launch-free.mjs', args: [] },
-  'normal-local': { script: 'launch-local.mjs', args: [] },
-  'web-paid': { script: 'launch.mjs', args: ['--serve'] },
-  'web-free': { script: 'launch-free.mjs', args: ['--serve'] },
-  'web-local': { script: 'launch-local.mjs', args: ['--serve'] },
-  'safe': { script: 'launch-safe.mjs', args: [] },
-  // Pi is a delivery with no model tier (like safe) — Phase 4 migration path.
+  // Pi is the sole delivery in this fork (Phase 4 migration path).
+  // OpenCode-era modes (normal-paid/free/local, web-*, safe) have no SCRIPT_MAP
+  // entry and are redirected to Pi by the mode-validation block below.
   'pi': { script: 'launch-pi.mjs', args: [] },
 };
 
@@ -378,25 +386,117 @@ async function main() {
   Options:
     --help, -h       Show this help
     --mode <key>     Skip menu, launch specific mode directly
-                     Combined format: <glitch-mode>-<tier>  (e.g. normal-paid, web-free)
-                     Safe mode: safe                       (no tier)
-                     Pi mode:   pi                         (no tier)
-                     Old format: <tier>                    (assumes normal mode)
-                     Tiers: paid, free, local
+                     Pi mode (this fork): pi                (sole delivery)
+                     OpenCode-era keys (normal-*, web-*, safe) are accepted
+                     for backward compatibility and redirect to Pi.
     --reset          Clear saved preference and show menu
+    --reuse-saved    Restart mode: skip ALL prompts (branch, update, menu).
+                     Triggered automatically when stdin is not a TTY, or when
+                     env GLITCH_REUSE_SAVED=1 is set. Also skips dependency
+                     updates so a restart never applies updates on its own.
+    --skip-updates   Skip dependency updates (npm + binaries) this run.
+                     Equivalent to env GLITCH_SKIP_UPDATES=1. Wins over
+                     --apply-updates when both are passed, matching
+                     scripts/restart-pi-stack.ps1 where -SkipUpdates
+                     overrides -ApplyUpdates. A true no-op: no import,
+                     no network, no status-file write.
+    --apply-updates  Apply ALL available dependency updates without prompting.
+                     Equivalent to env GLITCH_APPLY_UPDATES=1. Mutually
+                     exclusive with --reuse-saved in spirit (--reuse-saved
+                     wins); meant for an explicit "update then relaunch".
+                     Ignored when --skip-updates is also passed.
 
   The launcher remembers your last choice. Next time, just press Enter.
     `);
     process.exit(0);
   }
 
-  // ---- Branch check: FIRST thing, before repo updates ----
-  await checkBranchBeforeLaunch();
+  // Reuse-saved gate: restarts and automation must never hang on a prompt
+  // (the branch menu, the update prompt, and every launcher menu). Triggered
+  // by --reuse-saved, env GLITCH_REUSE_SAVED=1, or a non-TTY stdin (detached
+  // runs). Saved selections win; an explicit choice anywhere still persists.
+  const REUSE_SAVED = args.includes('--reuse-saved') || process.env.GLITCH_REUSE_SAVED === '1' || !process.stdin.isTTY;
 
-  // ---- Check for repo updates before anything else ----
-  const branchOkSet = process.env.GLITCH_BRANCH_OK !== undefined && process.env.GLITCH_BRANCH_OK !== '';
-  const syncResult = await checkRepoUpdates({ cwd: ROOT_DIR, interactive: true, allowBranchSwitch: !branchOkSet });
-  handleRestartOnUpdate(spawn, syncResult, ROOT_DIR);
+  // ---- Branch check + repo updates: interactive only ------------------------
+  // Under reuse-saved, never prompt for a branch switch, a repo update, or a
+  // dependency update mid-restart. The point is relaunching exactly what the
+  // user last selected; a restart must never apply updates on its own. An
+  // explicit restart with updates is handled by scripts/restart-pi-stack.ps1
+  // -ApplyUpdates, which runs the checker BEFORE the kill (see that script).
+  if (REUSE_SAVED) {
+    log(DARK_GRAY, '  (reuse-saved: branch, repo-update, and dependency-update prompts skipped)');
+  } else {
+    // ---- Branch check: FIRST thing, before repo updates ----
+    await checkBranchBeforeLaunch();
+
+    // ---- Check for repo updates before anything else ----
+    const branchOkSet = process.env.GLITCH_BRANCH_OK !== undefined && process.env.GLITCH_BRANCH_OK !== '';
+    const syncResult = await checkRepoUpdates({ cwd: ROOT_DIR, interactive: true, allowBranchSwitch: !branchOkSet });
+    handleRestartOnUpdate(spawn, syncResult, ROOT_DIR);
+  }
+
+  // ---- Dependency updates (npm + standalone binaries) ----------------------
+  // Only runs on the non-REUSE_SAVED path. The earlier `if (REUSE_SAVED)`
+  // branch logs a skip note and falls through; it does not return. The
+  // operative gate is the `if (!REUSE_SAVED)` check immediately below.
+  // Every call is dynamic import + try/catch so a missing or broken
+  // checker (the other coder owns scripts/check-updates.mjs) never blocks
+  // startup. Headless runs (no TTY) are covered by the REUSE_SAVED gate
+  // above, which sets REUSE_SAVED=true on every non-TTY stdin; this block
+  // therefore only ever runs with a TTY attached, by design. Skip wins
+  // over Apply when both are passed, to match
+  // scripts/restart-pi-stack.ps1 where -SkipUpdates overrides
+  // -ApplyUpdates.
+  if (!REUSE_SAVED) {
+    const skipUpdates = args.includes('--skip-updates') || process.env.GLITCH_SKIP_UPDATES === '1';
+    const applyUpdates = !skipUpdates && (args.includes('--apply-updates') || process.env.GLITCH_APPLY_UPDATES === '1');
+    const checkerPath = join(SCRIPT_DIR, 'check-updates.mjs');
+
+    if (skipUpdates) {
+      // --skip-updates / GLITCH_SKIP_UPDATES=1 is a real no-op: no import,
+      // no network, no status-file write. Matches scripts/restart-pi-stack.ps1
+      // where -SkipUpdates overrides -ApplyUpdates.
+      log(DARK_GRAY, '  (updates: skipped via --skip-updates / GLITCH_SKIP_UPDATES)');
+    } else if (!existsSync(checkerPath)) {
+      // Module not present yet (the other coder owns it). Brief note on
+      // interactive runs so the user knows updates were skipped on purpose.
+      if (process.stdin.isTTY) {
+        log(DARK_GRAY, '  (dependency updates: checker not present, skipping)');
+      }
+    } else {
+      // The dynamic import runs only on the apply or interactive branches;
+      // skip stays a true no-op above. Both branches funnel through the
+      // same try/catch so a missing or broken checker never blocks startup.
+      try {
+        const checker = await import('./check-updates.mjs');
+        if (applyUpdates) {
+          log(DARK_GRAY, '  (updates: applying all without prompt)');
+          await checker.checkAndPromptUpdates({ cwd: ROOT_DIR, interactive: false, autoApplyAll: true });
+        } else {
+          // Interactive TTY: numbered-list prompt (pick numbers, Enter = all, s = skip).
+          log(CYAN, '  Checking dependency updates...');
+          const upd = await checker.checkAndPromptUpdates({ cwd: ROOT_DIR, interactive: true, autoApplyAll: false });
+          if (upd && upd.checked && upd.updatesAvailable === 0) {
+            log(DARK_GREEN, '  All dependencies up-to-date');
+          }
+        }
+      } catch (e) {
+        log(DARK_YELLOW, `  (dependency-update check failed: ${e && e.message ? e.message : 'unknown error'} - continuing)`);
+      }
+    }
+
+    // ---- Gap G3: sync the user/ memory repo on launch ---------------------
+    // The user/ repo is where main-memory.md and the diary live; if it is a
+    // git repo with an upstream, we want it pulled on the same path as the
+    // main repo so cross-machine memory stays fresh. Skipped under REUSE_SAVED
+    // (the parent branch already returns above). Non-fatal: a broken memory
+    // sync must never block startup.
+    try {
+      await checkUserRepoUpdates({ cwd: join(ROOT_DIR, 'user'), interactive: true });
+    } catch (e) {
+      log(DARK_YELLOW, `  (user/ repo sync failed: ${e && e.message ? e.message : 'unknown error'} - continuing)`);
+    }
+  }
 
   const restartFlagPath = join(ROOT_DIR, 'data', '.restart-timestamp');
   // Clean up restart flag after successful launch (5 second delay to ensure we're past the critical startup phase)
@@ -515,10 +615,14 @@ async function main() {
       savedDelivery = null;
     }
 
-    // Level 1: Glitch mode (skip the menu when only one delivery is available)
-    const deliveryId = AVAILABLE_DELIVERIES.length === 1
-      ? AVAILABLE_DELIVERIES[0].id
-      : await showGlitchModeMenu(savedDelivery);
+    // Reuse-saved never opens the menus: the saved delivery wins, else the
+    // first available delivery (Pi, on this fork). Interactive behavior is
+    // unchanged outside the gate.
+    const deliveryId = REUSE_SAVED
+      ? (savedDelivery || AVAILABLE_DELIVERIES[0].id)
+      : (AVAILABLE_DELIVERIES.length === 1
+          ? AVAILABLE_DELIVERIES[0].id
+          : await showGlitchModeMenu(savedDelivery));
 
     // Safe / Pi are deliveries with no tier — skip the model menu entirely.
     if (deliveryId === 'safe' || deliveryId === 'pi') {
@@ -526,7 +630,7 @@ async function main() {
     } else {
       // Level 2: Model tier (use saved model only if delivery didn't change)
       const modelDefault = deliveryId === savedDelivery ? savedModel : null;
-      const modelId = await showModelMenu(modelDefault);
+      const modelId = REUSE_SAVED ? (modelDefault || MODELS[0].id) : await showModelMenu(modelDefault);
       modeId = `${deliveryId}-${modelId}`;
     }
   }
@@ -537,37 +641,52 @@ async function main() {
     process.exit(1);
   }
 
-  const config = SCRIPT_MAP[modeId];
+  let config = SCRIPT_MAP[modeId];
   if (!config) {
-    log(RED, ` Unknown mode: ${modeId}`);
-    logToFile(`ERROR: Unknown mode: ${modeId}`);
-    log(YELLOW, ' Valid format: <glitch-mode>-<tier> (e.g. normal-paid, web-free)');
-    process.exit(1);
+    // OpenCode-era modes (normal-*, web-*, safe) reach this block in the
+    // Pi-only fork — normalizeMode validated the key but SCRIPT_MAP only
+    // carries Pi. Redirect to Pi with a clear log line instead of erroring.
+    log(YELLOW, `  OpenCode-era mode '${modeId}' is gone in this fork — launching Pi.`);
+    logToFile(`OpenCode-era mode '${modeId}' redirected to Pi`);
+    modeId = 'pi';
+    config = SCRIPT_MAP[modeId];
+    if (!config) {
+      // Truly invalid key (should be unreachable: normalizeMode returns null
+      // for unrecognized input, caught by the !modeId guard above).
+      log(RED, ` Unknown mode: ${modeId}`);
+      logToFile(`ERROR: Unknown mode: ${modeId}`);
+      process.exit(1);
+    }
   }
 
-  saveMode(modeId);
+  // Persist explicit choices only; a reused selection is never re-saved
+  // (matches launch-pi's "automation never clobbers a real pick" contract).
+  if (!REUSE_SAVED) saveMode(modeId);
   logToFile(`Mode selected: ${modeId}`);
   log(GREEN, ` Launching ${getModeLabel(modeId)}...`);
   logToFile(`Launching ${getModeLabel(modeId)}`);
   log('');
 
-  // GitNexus index sync (Phase 1): detached so it never blocks startup.
-  // Keeps blast-radius hook + GitNexus MCP querying a fresh index.
+  // GitNexus index sync: spawned once by launch-pi.mjs (single spawn per
+  // launch — this file used to spawn a second, duplicate sync before every
+  // launch-pi run).
+
+  // ---- Desktop control plugin (cua-driver daemon) ------------------------
+  // Starts the desktop-eyes/hands daemon on every launch AND every stack
+  // restart (restart-pi-stack.ps1 re-enters here via --reuse-saved). The
+  // daemon is spawned detached+unref'd so it outlives the launcher. Toggle:
+  // node scripts/desktop-control.mjs on|off  (flag: data/config/desktop-control.json).
+  // Non-fatal by design: desktop control must never block startup.
   try {
-    const gitnexusSync = join(SCRIPT_DIR, 'gitnexus-sync.mjs');
-    if (existsSync(gitnexusSync)) {
-      const child = spawn(process.execPath, [gitnexusSync], {
-        cwd: ROOT_DIR,
-        detached: true,
-        stdio: 'ignore',
-      });
-      child.unref();
-      log(DARK_GRAY, '  GitNexus index sync started in background.');
-      logToFile('GitNexus index sync spawned (detached)');
+    const dc = await import('./desktop-control.mjs');
+    const r = await dc.ensure();
+    if (r && r.ok && !r.already) {
+      log(DARK_GREEN, `  Desktop control: daemon started (pid ${r.pid})`);
+    } else if (r && r.skipped === 'disabled') {
+      log(DARK_GRAY, '  Desktop control: disabled (node scripts/desktop-control.mjs on to enable)');
     }
   } catch (e) {
-    log(YELLOW, `  GitNexus sync spawn failed (non-fatal): ${e.message}`);
-    logToFile(`WARN gitnexus-sync spawn failed: ${e.message}`);
+    log(DARK_YELLOW, `  (desktop control start failed: ${e && e.message ? e.message : 'unknown'} - continuing)`);
   }
 
   const result = runScript(config.script, config.args);

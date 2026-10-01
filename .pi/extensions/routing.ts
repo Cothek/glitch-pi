@@ -49,7 +49,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import type { ExtensionAPI, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 // Session-scoped plan ownership rules — dependency-free lib, unit-tested in
 // .pi/lib/plan-paths.test.mjs (dispatch-plan.mjs pattern).
@@ -82,6 +82,7 @@ const AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
 
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const DISPATCH_WINDOW_MS = 120_000; // 120s
+const QUALITY_PASS_MAX_AGE_MS = 30 * 60 * 1000; // 30 min — review marker freshness for direct-exec commits
 
 // --- Primary agent mode (user/agent-mode.json, re-read per call so mid-session
 // switches via the /agent extension take effect immediately) ---
@@ -106,6 +107,43 @@ function isOmniPrimaryMode(): boolean {
 function isDirectExecPrimaryMode(): boolean {
   const mode = readAgentMode();
   return mode === "glitch-omni" || mode === "glitch-lightweight";
+}
+
+// --- Quality gate helpers (direct-exec commit gate, docs/engineering-standards.md §4) ---
+// Dispatch-based Review Gate can't fire in omni/lightweight modes (sub-agent
+// dispatch is hard-blocked there), so staged code requires a fresh self-review
+// marker instead: `node scripts/write-review-pass.mjs --agent self-review`.
+function getStagedCodeFiles(): string[] {
+  try {
+    const out = execFileSync("git", ["diff", "--cached", "--name-only"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(
+        (f) =>
+          f.length > 0 &&
+          CODE_EXTENSIONS.has(extname(f).toLowerCase()) &&
+          !MEMORY_PATHS.some((p) => f.startsWith(p)),
+      );
+  } catch {
+    return []; // not a git repo / git failure → don't block on a broken probe
+  }
+}
+function hasFreshPassMarker(): boolean {
+  try {
+    if (!existsSync(MARKER_PATH)) return false;
+    const raw = JSON.parse(readFileSync(MARKER_PATH, "utf-8"));
+    return (
+      raw?.verdict === "PASS" &&
+      Date.now() - Number(raw?.epoch_ms ?? 0) < QUALITY_PASS_MAX_AGE_MS
+    );
+  } catch {
+    return false;
+  }
 }
 
 // --- Detection sets (verbatim from OpenCode plugins) ---
@@ -584,7 +622,7 @@ export default function (pi: ExtensionAPI) {
 
           // Review gate on git commit
           if (normalizedCmd.startsWith("git commit")) {
-            if (normalizedCmd.includes("--no-verify")) return undefined;
+            if (normalizedCmd.includes("--no-verify")) return undefined; // Troy accepts the risk by naming it
             if (pendingReview && lastCodeTaskTime > lastReviewTaskTime) {
               return {
                 block: true,
@@ -594,6 +632,25 @@ export default function (pi: ExtensionAPI) {
                   "Reviewer agents: @reviewer (free), @reviewer-paid (paid fallback)\n" +
                   "To bypass: git commit --no-verify (only if you understand the risk)",
               };
+            }
+            // Quality gate for direct-execution primaries (omni/lightweight):
+            // the dispatch-based gate above can never fire there, so staged
+            // code files require a fresh PASS marker from a self-review
+            // against docs/engineering-standards.md (code-review + testing).
+            if (isDirectExecPrimaryMode() || isOmniPrimaryMode()) {
+              const staged = getStagedCodeFiles();
+              if (staged.length > 0 && !hasFreshPassMarker()) {
+                return {
+                  block: true,
+                  reason:
+                    "⛔ Quality Gate: staged code files without a fresh review-pass marker (<30 min).\n" +
+                    `Staged code files: ${staged.slice(0, 10).join(", ")}${staged.length > 10 ? ` … +${staged.length - 10} more` : ""}\n` +
+                    "Self-review the diff with the code-review skill, run/verify tests (testing skill), then:\n" +
+                    "  node scripts/write-review-pass.mjs --agent self-review --verdict PASS\n" +
+                    "Standard: docs/engineering-standards.md §1 (definition of done).\n" +
+                    "Bypass: git commit --no-verify (only if Troy explicitly accepts the risk).",
+                };
+              }
             }
           }
         }

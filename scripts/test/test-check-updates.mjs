@@ -457,6 +457,91 @@ async function testIsHigherEdgeCases() {
 
 // ── runner ─────────────────────────────────────────────────────────────────
 
+// ── (l) static: every download/install step must emit progress on stderr ──
+//
+// The Sep-29/Sep-30 incidents: npm installs of 440-675MB packages ran with
+// ZERO console output for minutes, the window looked hung, and the window
+// was killed mid-install. This group pins the fix structurally: every apply
+// path emits feedback, and no apply-path feedback ever touches stdout
+// (stdout is the machine contract: --json purity + exact human summary lines).
+async function testUpdateFeedbackContract() {
+  await run('feedback contract: every apply step reports progress on stderr, never stdout', async () => {
+    const lines = readSourceLines(CHECK_UPDATES_FILE);
+    const idx = (re, label) => {
+      const i = lines.findIndex((l) => re.test(l));
+      assert.ok(i !== -1, `check-updates.mjs: expected ${label}`);
+      return i;
+    };
+
+    // 1. The note helpers exist and route through process.stderr.write only.
+    const helperBlock = idx(/function emitLine/, 'emitLine helper');
+    assert.match(lines[helperBlock + 1], /process\.stderr\.write/, 'emitLine must write to stderr');
+    const helpers = ['noteDim', 'noteCyan', 'noteGreen', 'noteYellow', 'noteRed', 'progressInPlace', 'progressDone'];
+    for (const h of helpers) {
+      assert.ok(
+        lines.some((l) => new RegExp(`const ${h}\\s*=`).test(l) || new RegExp(`function ${h}\\(`).test(l)),
+        `missing progress helper ${h}`
+      );
+    }
+
+    // 2. npm applies stream child output + heartbeat and use the dedicated
+    // install timeout (a 120s kill mid-install of a 440MB package is the
+    // worst outcome; rollback never fires on a killed process).
+    const installTimeout = idx(/const INSTALL_TIMEOUT_MS\s*=/, 'INSTALL_TIMEOUT_MS constant');
+    const npmApply = idx(/async function applyNpmUpdate/, 'applyNpmUpdate');
+    const npmApplyEnd = idx(/async function applyBinaryUpdate/, 'applyBinaryUpdate (bounds applyNpmUpdate)');
+    const npmBody = lines.slice(npmApply, npmApplyEnd).join('\n');
+    assert.ok(npmApply > installTimeout, 'INSTALL_TIMEOUT_MS must be declared before applyNpmUpdate');
+    assert.match(npmBody, /Updating \$\{tool\.name\}/, 'applyNpmUpdate must announce the update before running npm');
+    assert.match(npmBody, /onOutput/, 'applyNpmUpdate must stream npm output live');
+    assert.match(npmBody, /onHeartbeat/, 'applyNpmUpdate must emit heartbeat ticks while npm runs');
+    assert.match(npmBody, /timeout: INSTALL_TIMEOUT_MS/, 'applyNpmUpdate must bound installs with INSTALL_TIMEOUT_MS, not the 120s query cap');
+    assert.ok(!/timeout: NPM_TIMEOUT_MS/.test(npmBody), 'applyNpmUpdate must not use NPM_TIMEOUT_MS for installs');
+
+    // 3. Binary applies show download progress (bytes + percent) and the
+    // node-swap restore shows per-package feedback.
+    const binApply = idx(/async function applyBinaryUpdate/, 'applyBinaryUpdate');
+    const binApplyEnd = idx(/async function applyDirectBinaryUpdate/, 'applyDirectBinaryUpdate');
+    const binBody = lines.slice(binApply, binApplyEnd).join('\n');
+    assert.match(binBody, /downloadToTemp\(url, 0,/, 'applyBinaryUpdate must pass a progress callback to downloadToTemp');
+    assert.match(binBody, /progressInPlace/, 'download progress must render in place');
+    assert.match(binBody, /fmtBytes/, 'download progress must show byte counts');
+    const dlFn = idx(/function downloadToTemp\(url, depth = 0, onProgress/, 'downloadToTemp with onProgress parameter');
+    const dlBody = lines.slice(dlFn, dlFn + 60).join('\n');
+    assert.match(dlBody, /onProgress\(loaded, total\)/, 'downloadToTemp must report loaded/total bytes');
+    assert.match(dlBody, /depth \+ 1, onProgress/, 'downloadToTemp must thread progress through redirect hops');
+    const restoreFn = idx(/async function restoreNpmGlobals/, 'restoreNpmGlobals');
+    const restoreBody = lines.slice(restoreFn, restoreFn + 40).join('\n');
+    assert.match(restoreBody, /restoring \$\{spec\}/, 'restoreNpmGlobals must announce each package restore');
+    assert.match(restoreBody, /onHeartbeat/, 'restoreNpmGlobals must heartbeat during long installs');
+
+    // 4. The check phase reports per-tool liveness (the old dead air between
+    // "Checking dependency updates..." and the prompt list).
+    const collectFn = idx(/async function collectStatuses/, 'collectStatuses');
+    const collectBody = lines.slice(collectFn, collectFn + 25).join('\n');
+    assert.match(collectBody, /checking \$\{tool\.name\}/, 'collectStatuses must report per-tool checking lines');
+
+    // 5. Apply-path feedback NEVER goes to stdout: console.log inside the
+    // apply functions would corrupt the --json / exact-line stdout contracts.
+    for (const pair of [
+      ['async function applyNpmUpdate', 'async function applyBinaryUpdate'],
+      ['async function applyBinaryUpdate', 'async function applyDirectBinaryUpdate'],
+      ['async function applyDirectBinaryUpdate', 'function extractZip'],
+      ['async function restoreNpmGlobals', 'function emptyItem']
+    ]) {
+      const start = idx(new RegExp(pair[0].replace(/\(/g, '\\(')), `${pair[0]} (start)`);
+      const stop = idx(new RegExp(pair[1].replace(/\(/g, '\\(')), `${pair[1]} (end anchor)`);
+      const body = lines.slice(start, stop).join('\n');
+      assert.ok(
+        !/console\.log/.test(body),
+        `${pair[0]} must not console.log (stdout is a machine contract); use the note* helpers`
+      );
+    }
+
+    return `emitLine@${helperBlock + 1}, applyNpmUpdate@${npmApply + 1}, applyBinaryUpdate@${binApply + 1}, downloadToTemp@${dlFn + 1}`;
+  });
+}
+
 (async () => {
   await testManifestShape();
   await testStatusFileShape();
@@ -469,6 +554,7 @@ async function testIsHigherEdgeCases() {
   await testLauncherRestartSkipPolicy();
   await testRestartScriptPolicy();
   await testIsHigherEdgeCases();
+  await testUpdateFeedbackContract();
   if (failed > 0) {
     console.error(`\n${failed} group(s) failed.`);
     process.exit(1);

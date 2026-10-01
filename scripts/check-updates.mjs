@@ -39,6 +39,17 @@ const PROBE_TIMEOUT_MS = 20_000;
 const DOWNLOAD_TIMEOUT_MS = 180_000;
 const HTTP_TIMEOUT_MS = 20_000;
 
+// Dedicated cap for `npm i -g` applies. WHY NOT NPM_TIMEOUT_MS: the 120s
+// query cap used to bound installs too, but the bundled packages are huge
+// (pi-coding-agent ~440MB tree, pi-web-ui ~675MB). A healthy install can
+// legitimately run past 2 minutes, and a timeout-kill mid-install is the
+// worst outcome possible: rollback fires only on npm's own non-zero exit,
+// never on a killed process, so a half-written tree is left behind.
+// 10 minutes matches RESTORE_TIMEOUT_MS, the existing install precedent.
+// Feedback during the wait comes from streamed npm output + heartbeat below,
+// so a long install is visible, never silent.
+const INSTALL_TIMEOUT_MS = 600_000;
+
 const MAX_BACKUPS_PER_PACKAGE = 2;
 
 const NO_COLOR = !process.stdout.isTTY || process.env.NO_COLOR === '1' || process.env.TERM === 'dumb';
@@ -57,6 +68,65 @@ const green  = (m) => colorize(GREEN, m);
 const yellow = (m) => colorize(YELLOW, m);
 const cyan   = (m) => colorize(CYAN, m);
 const red    = (m) => colorize(RED, m);
+
+// ── Progress output (stderr) ────────────────────────────────────────────────
+//
+// EVERYTHING in this block writes to stderr, never stdout. WHY: stdout is a
+// machine contract here (--json must parse as pure JSON; the human --apply
+// path prints exact summary lines), while stderr is the human channel. The
+// launcher's tee (scripts/lib/launch-log.mjs) wraps stderr too, so progress
+// also lands in data/launch.log for post-mortems.
+
+function emitLine(msg) {
+  try { process.stderr.write(`${msg}\n`); } catch {}
+}
+const note       = (m) => emitLine(m);
+const noteDim    = (m) => emitLine(colorize(DIM, m));
+const noteCyan   = (m) => emitLine(colorize(CYAN, m));
+const noteGreen  = (m) => emitLine(colorize(GREEN, m));
+const noteYellow = (m) => emitLine(colorize(YELLOW, m));
+const noteRed    = (m) => emitLine(colorize(RED, m));
+
+// In-place progress line. TTY: `\r` rewrites one line (padded so shorter
+// updates erase longer ones). Non-TTY (detached restart service, pipes):
+// at most one line every 10s so logs stay readable.
+let _lastProgressAt = 0;
+function progressInPlace(text) {
+  const now = Date.now();
+  if (process.stderr.isTTY) {
+    try { process.stderr.write(`\r${text}`.padEnd(100).slice(0, 100)); } catch {}
+    _lastProgressAt = now;
+    return;
+  }
+  if (now - _lastProgressAt >= 10_000) {
+    _lastProgressAt = now;
+    emitLine(text);
+  }
+}
+
+// Close the in-place line and print the final result on a fresh line.
+function progressDone(text) {
+  if (process.stderr.isTTY) {
+    try { process.stderr.write(`\r${text}`.padEnd(100).slice(0, 100) + '\n'); } catch {}
+    _lastProgressAt = Date.now();
+    return;
+  }
+  if (text) emitLine(text);
+}
+
+function fmtBytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+  return `${v >= 100 || u === 0 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
+}
+
+function elapsedSince(startMs) {
+  const s = Math.max(0, Math.round((Date.now() - startMs) / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
+}
 
 // ── CLI / option parsing ────────────────────────────────────────────────────
 
@@ -97,8 +167,15 @@ function readManifest(cwd) {
   }
 }
 
-// ── Process invocation (timeout-bounded, no shell) ───────────────────────────
+// ── Process invocation (timeout-bounded, no shell) ─────────────────────────
 
+// opts (all optional, additive):
+//   onOutput(chunk: string, isStderr: bool) - live child output as it arrives.
+//       The stdout/stderr collectors below keep working unchanged, so the
+//       failure path still has the full buffered text.
+//   heartbeatMs + onHeartbeat(elapsedSec) - liveness ticks while the child
+//       runs. Bounded ops (npm install of 400MB+ packages) used to look like
+//       dead air for minutes; the heartbeat proves the process is alive.
 function runProcess(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     let fullArgs = args;
@@ -113,26 +190,42 @@ function runProcess(cmd, args, opts = {}) {
     let stdout = '';
     let stderr = '';
     let settled = false;
-    const timer = setTimeout(() => {
+    const startedAt = Date.now();
+    let heartbeat = null;
+    const settle = (result) => {
       if (settled) return;
       settled = true;
-      try { child.kill('SIGKILL'); } catch {}
-      resolve({ success: false, status: -1, stdout, stderr, error: 'timeout' });
-    }, opts.timeout ?? 30_000);
-
-    if (child.stdout) child.stdout.on('data', (b) => { stdout += b.toString(); });
-    if (child.stderr) child.stderr.on('data', (b) => { stderr += b.toString(); });
-    child.on('error', (err) => {
-      if (settled) return;
-      settled = true;
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
       clearTimeout(timer);
-      resolve({ success: false, status: -1, stdout, stderr, error: err.message });
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      settle({ success: false, status: -1, stdout, stderr, error: 'timeout' });
+      try { child.kill('SIGKILL'); } catch {}
+    }, opts.timeout ?? 30_000);
+    if (opts.heartbeatMs && typeof opts.onHeartbeat === 'function') {
+      heartbeat = setInterval(() => {
+        try { opts.onHeartbeat(Math.round((Date.now() - startedAt) / 1000)); } catch {}
+      }, opts.heartbeatMs);
+    }
+
+    if (child.stdout) {
+      child.stdout.on('data', (b) => {
+        stdout += b.toString();
+        if (opts.onOutput) { try { opts.onOutput(b.toString(), false); } catch {} }
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (b) => {
+        stderr += b.toString();
+        if (opts.onOutput) { try { opts.onOutput(b.toString(), true); } catch {} }
+      });
+    }
+    child.on('error', (err) => {
+      settle({ success: false, status: -1, stdout, stderr, error: err.message });
     });
     child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ success: code === 0, status: code ?? -1, stdout, stderr });
+      settle({ success: code === 0, status: code ?? -1, stdout, stderr });
     });
   });
 }
@@ -612,11 +705,18 @@ function rollbackPackageDir(pkgDir, backupDir) {
 
 
 async function applyNpmUpdate(tool, currentVersion, latestVersion, cwd) {
+  const t0 = Date.now();
+  noteCyan(`  Updating ${tool.name}: ${currentVersion || 'not installed'} -> ${latestVersion}`);
   const pkgDir = packageInstallDir(cwd, tool.package);
   const hadInstall = existsSync(pkgDir);
   let backupDir = null;
   if (tool.restartRequired && hadInstall) {
     backupDir = join(backupRoot(cwd), `${flattenPackageName(tool.package)}@${currentVersion || 'unknown'}`);
+    // The backup copies the whole installed tree (pi-coding-agent is ~440MB),
+    // so it can take tens of seconds on its own - it gets its own progress
+    // line instead of dead air.
+    const tb = Date.now();
+    noteDim(`  backing up ${tool.package}@${currentVersion || 'unknown'}...`);
     try {
       // Fresh backup dir each time so a failed install never sees a stale
       // sibling from a prior run.
@@ -624,24 +724,46 @@ async function applyNpmUpdate(tool, currentVersion, latestVersion, cwd) {
       mkdirSync(backupRoot(cwd), { recursive: true });
       copyRecursiveSync(pkgDir, backupDir);
     } catch (err) {
+      noteRed(`  ${tool.name}: backup failed: ${err.message}`);
       return { ok: false, error: `backup failed: ${err.message}` };
     }
+    noteDim(`  backup done in ${elapsedSince(tb)}`);
   }
 
+  noteDim(`  installing ${tool.package}@${latestVersion} (npm, up to ${INSTALL_TIMEOUT_MS / 1000}s)...`);
   const [npmCmd, npmArgv] = bundledNpmInvocation(cwd);
   const res = await runProcess(
     npmCmd,
     [...npmArgv, 'i', '-g', `${tool.package}@${latestVersion}`],
-    { timeout: NPM_TIMEOUT_MS, env: buildNpmEnv(cwd) }
+    {
+      timeout: INSTALL_TIMEOUT_MS,
+      env: buildNpmEnv(cwd),
+      // Stream npm's own output live (warnings, added-N-packages) and
+      // tick elapsed time every 10s so a big fetch is never silent.
+      onOutput: (chunk) => {
+        for (const line of String(chunk).split(/\r\n|\r|\n/)) {
+          const t = line.trim();
+          if (t) noteDim(`  npm: ${t}`);
+        }
+      },
+      heartbeatMs: 10_000,
+      onHeartbeat: (elapsedSec) => progressInPlace(`  installing ${tool.name}... ${elapsedSec}s elapsed`)
+    }
   );
+  progressDone(`  npm install finished in ${elapsedSince(t0)}`);
   if (!res.success) {
+    noteRed(`  ${tool.name}: npm install failed${res.error === 'timeout' ? ` (timeout after ${INSTALL_TIMEOUT_MS / 1000}s)` : ''}`);
     // Roll back: put the backup back without ever removing the live tree
     // before the restore succeeds.
     let rollbackNote = '';
     if (backupDir && existsSync(backupDir)) {
+      noteYellow(`  rolling ${tool.package} back to ${currentVersion || 'unknown'}...`);
       const rb = rollbackPackageDir(pkgDir, backupDir);
       if (!rb.ok) {
         rollbackNote = `; rollback failed: ${rb.error}; surviving paths: ${rb.surviving.join(', ') || '(none)'}; backup intact at ${backupDir}`;
+        noteRed(`  rollback failed - backup intact at ${backupDir}`);
+      } else {
+        noteGreen(`  rolled back to ${currentVersion || 'unknown'}`);
       }
     } else if (backupDir) {
       rollbackNote = `; no backup available to roll back (backupDir missing: ${backupDir})`;
@@ -652,13 +774,18 @@ async function applyNpmUpdate(tool, currentVersion, latestVersion, cwd) {
   // Verify the install actually landed. Without this, a system npm that
   // installed to the wrong prefix would silently leave the old version in
   // place and every future check would keep reporting it.
+  noteDim('  verifying installed version...');
   const verified = await readNpmInstalledVersion(cwd, tool.package);
   if (verified !== latestVersion) {
+    noteRed(`  ${tool.name}: installed ${verified || 'unknown'} != expected ${latestVersion}`);
     let rollbackNote = '';
     if (backupDir && existsSync(backupDir)) {
+      noteYellow(`  rolling ${tool.package} back to ${currentVersion || 'unknown'}...`);
       const rb = rollbackPackageDir(pkgDir, backupDir);
       if (!rb.ok) {
         rollbackNote = `; rollback failed: ${rb.error}; surviving paths: ${rb.surviving.join(', ') || '(none)'}; backup intact at ${backupDir}`;
+      } else {
+        noteGreen(`  rolled back to ${currentVersion || 'unknown'}`);
       }
     } else if (backupDir) {
       rollbackNote = `; no backup available to roll back (backupDir missing: ${backupDir})`;
@@ -667,6 +794,7 @@ async function applyNpmUpdate(tool, currentVersion, latestVersion, cwd) {
   }
 
   if (tool.restartRequired) await pruneBackups(cwd, tool.package);
+  noteGreen(`  ${tool.name}: ${latestVersion} installed in ${elapsedSince(t0)}`);
   return { ok: true };
 }
 
@@ -677,7 +805,10 @@ async function applyNpmUpdate(tool, currentVersion, latestVersion, cwd) {
 // (https -> https -> bucket -> asset) while catching loops in one or two.
 const MAX_REDIRECT_HOPS = 5;
 
-function downloadToTemp(url, depth = 0) {
+// onProgress(loadedBytes, totalBytes|null) fires as bytes arrive; total comes
+// from content-length when the server sends it. The callback is threaded
+// through redirect hops so the caller sees one continuous progress stream.
+function downloadToTemp(url, depth = 0, onProgress = null) {
   return new Promise((resolve) => {
     if (depth > MAX_REDIRECT_HOPS) {
       resolve({ ok: false, error: 'too many redirects' });
@@ -697,7 +828,7 @@ function downloadToTemp(url, depth = 0) {
     const req = transport(url, { method: 'GET', timeout: DOWNLOAD_TIMEOUT_MS }, (res) => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        resolve(downloadToTemp(res.headers.location, depth + 1));
+        resolve(downloadToTemp(res.headers.location, depth + 1, onProgress));
         return;
       }
       if (res.statusCode !== 200) {
@@ -705,9 +836,17 @@ function downloadToTemp(url, depth = 0) {
         resolve({ ok: false, error: `http ${res.statusCode}` });
         return;
       }
+      const total = Number(res.headers['content-length'] || 0) || null;
+      let loaded = 0;
+      // Byte counting does not consume the stream: pipe registers its own
+      // listener; this one just observes chunks as they flow to the file.
+      res.on('data', (c) => {
+        loaded += c.length;
+        if (onProgress) { try { onProgress(loaded, total); } catch {} }
+      });
       const ws = createWriteStream(tmpPath);
       res.pipe(ws);
-      ws.on('finish', () => ws.close(() => resolve({ ok: true, path: tmpPath })));
+      ws.on('finish', () => ws.close(() => resolve({ ok: true, path: tmpPath, size: loaded })));
       ws.on('error', (err) => { try { rmSync(tmpPath, { force: true }); } catch {} resolve({ ok: false, error: err.message }); });
     });
     req.on('error', (err) => resolve({ ok: false, error: err.message }));
@@ -827,10 +966,31 @@ async function snapshotNpmGlobals(cwd) {
 
 async function restoreNpmGlobals(cwd, snap) {
   const failed = [];
+  if (snap.length > 0) {
+    noteDim(`  restoring ${snap.length} npm global(s) wiped by the node swap (up to ${RESTORE_TIMEOUT_MS / 1000}s each)...`);
+  }
   for (const entry of snap) {
     const spec = entry.version ? `${entry.package}@${entry.version}` : `${entry.package}@latest`;
+    const t0 = Date.now();
+    noteDim(`  restoring ${spec}...`);
     const [npmCmd, npmArgv] = bundledNpmInvocation(cwd);
-    const res = await runProcess(npmCmd, [...npmArgv, 'i', '-g', spec], { timeout: RESTORE_TIMEOUT_MS, env: buildNpmEnv(cwd) });
+    const res = await runProcess(
+      npmCmd,
+      [...npmArgv, 'i', '-g', spec],
+      {
+        timeout: RESTORE_TIMEOUT_MS,
+        env: buildNpmEnv(cwd),
+        heartbeatMs: 10_000,
+        onHeartbeat: (elapsedSec) => progressInPlace(`  restoring ${entry.name}... ${elapsedSec}s elapsed`),
+        onOutput: (chunk) => {
+          for (const line of String(chunk).split(/\r\n|\r|\n/)) {
+            const t = line.trim();
+            if (t) noteDim(`  npm: ${t}`);
+          }
+        }
+      }
+    );
+    progressDone(`  ${entry.name}: npm install finished in ${elapsedSince(t0)}`);
     if (!res.success) { failed.push(entry.name); continue; }
     if (!(await readNpmInstalledVersion(cwd, entry.package))) failed.push(entry.name);
   }
@@ -845,6 +1005,7 @@ async function restoreNpmGlobals(cwd, snap) {
 //   ${tag}     = raw release tag (dist paths, e.g. nodejs.org/dist/v24.21.0/)
 //   ${arch}    = x64 | arm64
 export async function applyBinaryUpdate(tool, latestVersion, cwd, latestTag = null) {
+  const t0 = Date.now();
   const platform = tool.platforms?.[process.platform];
   if (!platform || !platform.url) return { ok: false, error: 'no platform config' };
   const tag = latestTag != null ? String(latestTag) : `v${latestVersion}`;
@@ -854,12 +1015,26 @@ export async function applyBinaryUpdate(tool, latestVersion, cwd, latestTag = nu
     .replace(/\$\{tag\}/g, tag)
     .replace(/\$\{arch\}/g, arch);
   const target = join(cwd, tool.binary);
-  const dlRes = await downloadToTemp(url);
+  noteCyan(`  Updating ${tool.name}: -> ${latestVersion}`);
+  noteDim(`  downloading ${url}`);
+  const dlRes = await downloadToTemp(url, 0, (loaded, total) => {
+    const pct = total ? ` (${Math.round((loaded / total) * 100)}%)` : '';
+    progressInPlace(`  downloading ${tool.name}: ${fmtBytes(loaded)}${total ? ` / ${fmtBytes(total)}` : ''}${pct}`);
+  });
   try {
-    if (!dlRes.ok) return { ok: false, error: `download failed: ${dlRes.error}` };
-    if (platform.archive === 'msi') return await applyMsiArchiveUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
-    if (platform.archive === 'zip') return await applyZipArchiveUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
-    return await applyDirectBinaryUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
+    if (!dlRes.ok) {
+      progressDone('');
+      noteRed(`  ${tool.name}: download failed: ${dlRes.error}`);
+      return { ok: false, error: `download failed: ${dlRes.error}` };
+    }
+    progressDone(`  downloaded ${fmtBytes(dlRes.size || 0)} in ${elapsedSince(t0)}`);
+    let res;
+    if (platform.archive === 'msi') res = await applyMsiArchiveUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
+    else if (platform.archive === 'zip') res = await applyZipArchiveUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
+    else res = await applyDirectBinaryUpdate(tool, dlRes.path, target, cwd, latestVersion, platform);
+    if (res.ok) noteGreen(`  ${tool.name}: ${latestVersion} installed in ${elapsedSince(t0)}`);
+    else noteRed(`  ${tool.name}: update failed: ${res.error}`);
+    return res;
   } finally {
     try { rmSync(dlRes.path, { force: true }); } catch {}
   }
@@ -869,6 +1044,7 @@ export async function applyBinaryUpdate(tool, latestVersion, cwd, latestTag = nu
 // against overwrite, so the live file is renamed aside first - renaming a
 // running executable's directory entry works even while it executes.
 async function applyDirectBinaryUpdate(tool, dlPath, target, cwd, latestVersion, platform) {
+  noteDim('  verifying downloaded binary...');
   // The download temp file can lack the target's extension (redirect URLs
   // and name sanitizing); Windows needs .exe to execute it for the probe.
   let probePath = dlPath;
@@ -893,6 +1069,7 @@ async function applyDirectBinaryUpdate(tool, dlPath, target, cwd, latestVersion,
     try { currentVersion = await readBinaryInstalledVersion(cwd, target); } catch {}
     if (currentVersion) {
       const backupPath = join(binaryBackupRoot(cwd), `${flattenPackageName(tool.binary)}@${currentVersion}`);
+      noteDim(`  backing up current binary (${currentVersion})...`);
       try {
         mkdirSync(binaryBackupRoot(cwd), { recursive: true });
         rmSync(backupPath, { recursive: true, force: true });
@@ -903,6 +1080,7 @@ async function applyDirectBinaryUpdate(tool, dlPath, target, cwd, latestVersion,
     }
   }
 
+  noteDim(`  replacing ${tool.binary}...`);
   mkdirSync(dirname(target), { recursive: true });
   const staging = `${target}.new`;
   const oldTarget = `${target}.old`;
@@ -935,6 +1113,7 @@ async function applyZipArchiveUpdate(tool, dlPath, target, cwd, latestVersion, p
   const extractDir = join(tmpdir(), `glitch-zip-${Date.now()}`);
   mkdirSync(extractDir, { recursive: true });
   try {
+    noteDim(`  extracting archive (${fmtBytes(statSync(dlPath).size)})...`);
     const ex = await extractZip(dlPath, extractDir);
     if (!ex.success) {
       return { ok: false, error: `zip extract failed: ${ex.stderr || ex.error || `status ${ex.status}`}` };
@@ -947,6 +1126,7 @@ async function applyZipArchiveUpdate(tool, dlPath, target, cwd, latestVersion, p
     const rootDir = dirname(found);
     // Verify the payload actually reports the expected version before it
     // goes anywhere near the live tree.
+    noteDim('  verifying extracted payload version...');
     const probe = await probeBinary(found);
     if (!probe.success) return { ok: false, error: `extracted ${wanted} failed version probe` };
     const m = probe.output.match(/v?(\d+\.\d+(?:\.\d+)?)/);
@@ -958,18 +1138,24 @@ async function applyZipArchiveUpdate(tool, dlPath, target, cwd, latestVersion, p
       const dest = join(cwd, platform.replaceDir);
       const oldDir = `${dest}.old`;
       let snap = [];
-      if (tool.restoreNpmGlobals) snap = await snapshotNpmGlobals(cwd);
+      if (tool.restoreNpmGlobals) {
+        noteDim('  snapshotting installed npm globals (the swap wipes them)...');
+        snap = await snapshotNpmGlobals(cwd);
+      }
       try { rmSync(oldDir, { recursive: true, force: true }); } catch {}
       let renamed = false;
       if (existsSync(dest)) {
+        noteDim(`  moving current ${platform.replaceDir} aside...`);
         renamed = await renameWithRetry(dest, oldDir);
         if (!renamed) return { ok: false, error: `could not move ${dest} aside (${oldDir} locked?) - nothing changed` };
       }
+      noteDim(`  copying new tree into ${platform.replaceDir}...`);
       try {
         mkdirSync(dest, { recursive: true });
         copyDirContents(rootDir, dest);
       } catch (err) {
         // The live tree must never be left partial: undo the swap.
+        noteYellow('  copy failed - rolling the tree back...');
         try { rmSync(dest, { recursive: true, force: true }); } catch {}
         if (renamed) { try { renameSync(oldDir, dest); } catch {} }
         return { ok: false, error: `copying extracted tree failed: ${err.message}; rolled back` };
@@ -978,6 +1164,7 @@ async function applyZipArchiveUpdate(tool, dlPath, target, cwd, latestVersion, p
         const rr = await restoreNpmGlobals(cwd, snap);
         if (rr.failed.length > 0) {
           // A stack that cannot start is worse than a skipped update.
+          noteYellow(`  npm global restore failed (${rr.failed.join(', ')}) - rolling the tree back...`);
           try { rmSync(dest, { recursive: true, force: true }); } catch {}
           if (renamed) { try { renameSync(oldDir, dest); } catch {} }
           return { ok: false, error: `npm global restore failed (${rr.failed.join(', ')}) - node tree rolled back` };
@@ -1004,6 +1191,7 @@ async function applyMsiArchiveUpdate(tool, dlPath, target, cwd, latestVersion, p
   const extractDir = join(tmpdir(), `glitch-msi-${Date.now()}`);
   mkdirSync(extractDir, { recursive: true });
   try {
+    noteDim(`  extracting MSI payload (${fmtBytes(statSync(dlPath).size)}) - this runs msiexec, can take a minute...`);
     const ex = await extractMsi(dlPath, extractDir);
     if (!ex.success) {
       return { ok: false, error: `msi extract failed: ${ex.stderr || ex.error || `status ${ex.status}`}` };
@@ -1015,25 +1203,29 @@ async function applyMsiArchiveUpdate(tool, dlPath, target, cwd, latestVersion, p
     }
     const srcDir = dirname(found);
     const targetDir = dirname(target);
+    noteDim(`  stopping ${wanted} if running (by exe path, never by name)...`);
     await stopProcessByExePath(target); // path-scoped; no-op when not running
     const oldDir = `${targetDir}.old`;
     try { rmSync(oldDir, { recursive: true, force: true }); } catch {}
     let renamed = false;
     if (existsSync(targetDir)) {
+      noteDim('  moving current install aside...');
       renamed = await renameWithRetry(targetDir, oldDir);
       if (!renamed) return { ok: false, error: `could not move ${targetDir} aside - is ${wanted} running?` };
     }
+    noteDim(`  installing new files into ${targetDir}...`);
     try {
       copyDirContents(srcDir, targetDir);
       if (renamed) {
         const merged = mergeMissingFiles(oldDir, targetDir);
-        if (merged > 0) console.log(dim(`  (merged ${merged} file(s) from previous install)`));
+        if (merged > 0) noteDim(`  merged ${merged} file(s) from the previous install`);
       }
       // Stamp mtime: extraction preserves the payload's build date, which
       // can predate the release and would re-flag the update forever
       // (filedate tools compare mtime with the release date).
       try { utimesSync(target, new Date(), new Date()); } catch {}
     } catch (err) {
+      noteYellow('  replace failed - rolling the install back...');
       try { rmSync(targetDir, { recursive: true, force: true }); } catch {}
       if (renamed && existsSync(oldDir)) { try { renameSync(oldDir, targetDir); } catch {} }
       return { ok: false, error: `replace failed: ${err.message}` };
@@ -1126,6 +1318,10 @@ async function collectStatuses(manifest, cwd) {
   const items = [];
   const errors = [];
   for (const tool of manifest.tools || []) {
+    // Per-tool liveness during the check: version lookups (`npm view`, a
+    // binary --version probe, a GitHub API hit) can each take seconds, and
+    // without this line the whole check phase was dead air.
+    noteDim(`  checking ${tool.name}...`);
     const item = await checkSingle(tool, cwd);
     items.push(item);
     if (item.status === 'error' && item.error_message) {
@@ -1204,6 +1400,22 @@ function askLine(prompt) {
   });
 }
 
+// Shared end-of-apply summary for BOTH apply branches (interactive selection
+// and autoApplyAll). stderr so stdout contracts stay byte-identical; the
+// restart-required notice is the piece users most need to see (an updated
+// pi-coding-agent / pi-web-ui only takes effect after the stack restarts).
+function reportApplyOutcome(applied, pending) {
+  for (const name of applied.applied) noteGreen(`  ${name}: updated`);
+  for (const name of applied.failed) noteRed(`  ${name}: FAILED`);
+  if (applied.applied.length > 0) noteGreen('  Updates complete.');
+  const restartNames = pending
+    .filter((i) => i.restart_required && applied.applied.includes(i.name))
+    .map((i) => i.name);
+  if (restartNames.length > 0) {
+    noteYellow(`  Restart required to use: ${restartNames.join(', ')}`);
+  }
+}
+
 export async function checkAndPromptUpdates({
   cwd = DEFAULT_CWD,
   interactive = true,
@@ -1229,6 +1441,7 @@ export async function checkAndPromptUpdates({
 
   if (!interactive || autoApplyAll) {
     const applied = await applyAllUpdates({ cwd, filter });
+    reportApplyOutcome(applied, pending);
     return {
       checked: true,
       updatesAvailable: updates.length,
@@ -1246,6 +1459,9 @@ export async function checkAndPromptUpdates({
     console.log(cyan(`  [${i + 1}] ${item.name}`));
     console.log(`      ${item.current || '(not installed)'} -> ${item.latest}`);
   });
+  console.log('');
+  console.log(dim('  Large packages (pi ~440MB) can take a few minutes to download and install.'));
+  console.log(dim('  Live progress is shown while applying - the window is NOT hung.'));
   console.log('');
   console.log("  Enter numbers to select (e.g. '1,3'),");
   console.log("  press Enter to apply all, or type 's' to skip:");
@@ -1271,15 +1487,7 @@ export async function checkAndPromptUpdates({
   }
   console.log(cyan(`  Applying ${selectedNames.length} update(s)...`));
   const applied = await applyAllUpdates({ cwd, filter: selectedNames });
-  for (const name of applied.applied) console.log(green(`  ${name}: updated`));
-  for (const name of applied.failed) console.log(red(`  ${name}: FAILED`));
-  console.log(green('  Updates complete.'));
-  const restartNames = pending
-    .filter((i) => i.restart_required && applied.applied.includes(i.name))
-    .map((i) => i.name);
-  if (restartNames.length > 0) {
-    console.log(yellow(`  Restart required to use: ${restartNames.join(', ')}`));
-  }
+  reportApplyOutcome(applied, pending);
   // Refresh the status file so UI surfaces reflect the applied state.
   try {
     const { manifest: m } = readManifest(cwd);
@@ -1308,6 +1516,10 @@ export async function applyAllUpdates({
     if (!matches(tool.name)) continue;
     if (tool.updateType !== 'sync') continue;
     try {
+      // Covers the silent lookup gap (npm view / GitHub probe) before the
+      // apply step prints its own header. Placed after the filter + sync
+      // gates so an empty-filter no-op run prints nothing.
+      noteDim(`  ${tool.name}: checking latest...`);
       if (tool.type === 'npm') {
         const currentVersion = await readNpmInstalledVersion(cwd, tool.package);
         // Reuse a pre-computed latest when the caller already paid for it
@@ -1383,18 +1595,21 @@ async function main() {
         if (!matches(tool.name)) continue;
         if (tool.updateType !== 'sync') continue;
         try {
+          // stderr liveness during the pre-flight lookups; after the gates so
+          // the empty-filter no-op run prints nothing on either stream.
+          noteDim(`  ${tool.name}: checking latest...`);
           if (tool.type === 'npm') {
             const current = (await readNpmInstalledVersion(cwd, tool.package)) || '';
             const latest  = (await readNpmLatestVersion(cwd, tool.package)) || '';
             if (!latest) continue;
             if (current && !isHigher(latest, current)) continue;
-            pending.push({ name: tool.name, current: current || 'not installed', latest });
+            pending.push({ name: tool.name, current: current || 'not installed', latest, restart_required: !!tool.restartRequired });
           } else if (tool.type === 'binary') {
             const platform = tool.platforms?.[process.platform];
             if (!tool.latestUrl || !platform || !platform.url) continue;
             const decision = await binaryUpdateNeeded(tool, cwd);
             if (decision.error || !decision.needed) continue;
-            pending.push({ name: tool.name, current: decision.current, latest: decision.latest });
+            pending.push({ name: tool.name, current: decision.current, latest: decision.latest, restart_required: !!tool.restartRequired });
           }
         } catch {
           // Pre-flight is best-effort; applyAllUpdates below is authoritative.
@@ -1430,6 +1645,15 @@ async function main() {
           console.log(`  FAILED ${name} update failed`);
         }
         console.log(`  applied ${res.applied.length}, failed ${res.failed.length}`);
+      }
+      // Restart-required notice on the human path too (the --json path
+      // stays untouched). restart-pi-stack -ApplyUpdates runs BEFORE the
+      // kill, so this notice names exactly what the restart will pick up.
+      const restartNames = pending
+        .filter((p) => p.restart_required && res.applied.includes(p.name))
+        .map((p) => p.name);
+      if (restartNames.length > 0) {
+        noteYellow(`  Restart required to use: ${restartNames.join(', ')}`);
       }
     }
     process.exit(res.failed.length === 0 ? 0 : 1);

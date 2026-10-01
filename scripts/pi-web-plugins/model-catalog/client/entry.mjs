@@ -27,7 +27,7 @@ const POLL_MS = 15_000;
 const STYLE_ID = "model-catalog-style";
 const MOUNT_LABEL = "nvidia-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.2.1";
+const PLUGIN_VERSION = "0.2.2";
 
 /** Per-container instance store. A module-level singleton was wrong: the host
  *  mounts the same module in more than one place (main view pane, Settings
@@ -70,8 +70,9 @@ const STYLE_CSS = `
 .nv-row{display:grid;grid-template-columns:64px 1fr auto;gap:8px;align-items:center;padding:8px 10px;border-top:1px solid var(--border-soft)}
 .nv-row:first-child{border-top:none}
 .nv-toggle-btn{display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:22px;padding:0 10px;font-size:11.5px;font-weight:600;border-radius:6px;border:1px solid var(--border);background:var(--bg-elev2);color:var(--text-dim);cursor:pointer;user-select:none}
-.nv-toggle-btn:hover{border-color:var(--accent);color:var(--text)}
-.nv-toggle-btn[aria-label^="Enable"]:not(:disabled){border-color:var(--border)}
+.nv-toggle-btn.nv-on{border-color:var(--green);color:var(--green)}
+.nv-toggle-btn.nv-off{border-color:var(--red);color:var(--red)}
+.nv-toggle-btn:hover{background:var(--bg-elev)}
 .nv-name{font-family:var(--mono, monospace);font-size:11.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .nv-name .nv-meta{color:var(--text-faint);font-size:10.5px;margin-left:6px}
 .nv-why{font-size:11px;color:var(--text-faint);grid-column:1 / -1;margin-top:-2px;padding-left:64px}
@@ -367,7 +368,9 @@ function createInstance(container, ctx) {
     //      reach web content in background mode — the Resync button's click
     //      fired its handler and POSTed (proven by the server's 400 notice).
     //      The button text carries the state; clicking toggles.
-    const toggleBtn = el("button", "nv-toggle-btn", effectiveEnabled ? "On" : "Off");
+    // v0.2.2: nv-on/nv-off classes color the button green/red so the state is
+    // readable at a glance, idle and hover alike (hover only brightens bg).
+    const toggleBtn = el("button", `nv-toggle-btn ${effectiveEnabled ? "nv-on" : "nv-off"}`, effectiveEnabled ? "On" : "Off");
     toggleBtn.type = "button";
     toggleBtn.setAttribute("aria-label", `Enable ${id}`);
     toggleBtn.disabled = state.busy !== null;

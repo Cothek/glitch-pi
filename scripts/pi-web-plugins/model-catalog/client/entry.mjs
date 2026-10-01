@@ -27,7 +27,7 @@ const POLL_MS = 15_000;
 const STYLE_ID = "model-catalog-style";
 const MOUNT_LABEL = "nvidia-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.2.1";
 
 /** Per-container instance store. A module-level singleton was wrong: the host
  *  mounts the same module in more than one place (main view pane, Settings
@@ -69,8 +69,9 @@ const STYLE_CSS = `
 .nv-rows{display:flex;flex-direction:column}
 .nv-row{display:grid;grid-template-columns:64px 1fr auto;gap:8px;align-items:center;padding:8px 10px;border-top:1px solid var(--border-soft)}
 .nv-row:first-child{border-top:none}
-.nv-toggle{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
-.nv-toggle input{accent-color:var(--accent)}
+.nv-toggle-btn{display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:22px;padding:0 10px;font-size:11.5px;font-weight:600;border-radius:6px;border:1px solid var(--border);background:var(--bg-elev2);color:var(--text-dim);cursor:pointer;user-select:none}
+.nv-toggle-btn:hover{border-color:var(--accent);color:var(--text)}
+.nv-toggle-btn[aria-label^="Enable"]:not(:disabled){border-color:var(--border)}
 .nv-name{font-family:var(--mono, monospace);font-size:11.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .nv-name .nv-meta{color:var(--text-faint);font-size:10.5px;margin-left:6px}
 .nv-why{font-size:11px;color:var(--text-faint);grid-column:1 / -1;margin-top:-2px;padding-left:64px}
@@ -202,7 +203,10 @@ function createInstance(container, ctx) {
   refresh.addEventListener("click", () => {
     state.diag.lastAction = "sync";
     state.diag.lastAt = new Date().toLocaleTimeString();
-    void doBulk(null, "sync");
+    // v0.2.1: doBulk's sync branch compares the STRING "sync". Passing null
+    // fell to the /bulk branch with action null -> the server answered 400
+    // "unknown bulk action" and Resync never synced. Pass the action string.
+    void doBulk("sync", "sync");
   });
   head.append(title, sub, el("div", "nv-spacer"), refresh);
 
@@ -349,25 +353,28 @@ function createInstance(container, ctx) {
     row.setAttribute("data-nv-id", id);
     row.setAttribute("data-nv-tier", model.tier ?? "X");
 
-    // Toggle (label + checkbox; checkbox is the actual control).
-    const toggle = el("label", "nv-toggle");
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = effectiveEnabled;
-    // autocomplete=off: browsers restore form-control state on reload and
-    // apply it AFTER this render, overriding the JS-set checked state without
-    // firing change. That decoupled the checkbox from the label/pill (the
-    // engine truth) and, with the signature key freezing rebuilds, the
-    // inconsistent row never healed.
-    checkbox.autocomplete = "off";
-    checkbox.disabled = state.busy !== null;
-    checkbox.setAttribute("aria-label", `Enable ${id}`);
-    checkbox.addEventListener("change", () => {
-      void toggle(id, checkbox.checked);
+    // Toggle button (v0.2.1). TWO defects fixed here:
+    //   1. The old label+checkbox block declared `const toggle = el("label",...)`
+    //      which SHADOWED the async function toggle(id, next). The change
+    //      handler called the LABEL ELEMENT as a function -> TypeError -> no
+    //      POST ever fired -> the poll's reconcile healed the checkbox back.
+    //      Clicking a model did nothing, silently.
+    //   2. Desktop control (cua-driver UIA) cannot reach a web checkbox:
+    //      posted synthetic clicks on web content are dropped by Chromium, and
+    //      UIA TogglePattern sets checked WITHOUT firing change (verified:
+    //      the flip was healed back, no server write, no backup). A plain
+    //      <button> (no aria-pressed) exposes UIA InvokePattern, which DOES
+    //      reach web content in background mode — the Resync button's click
+    //      fired its handler and POSTed (proven by the server's 400 notice).
+    //      The button text carries the state; clicking toggles.
+    const toggleBtn = el("button", "nv-toggle-btn", effectiveEnabled ? "On" : "Off");
+    toggleBtn.type = "button";
+    toggleBtn.setAttribute("aria-label", `Enable ${id}`);
+    toggleBtn.disabled = state.busy !== null;
+    toggleBtn.addEventListener("click", () => {
+      void toggle(id, !effectiveEnabled);
     });
-    toggle.appendChild(checkbox);
-    toggle.appendChild(el("span", undefined, effectiveEnabled ? "On" : "Off"));
-    row.appendChild(toggle);
+    row.appendChild(toggleBtn);
 
     // Name + meta.
     const name = el("div", "nv-name", id);

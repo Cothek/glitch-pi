@@ -835,6 +835,18 @@ DASHEOF
   done
 
   success "Local user profile created at $USER_DIR"
+
+  # Initialize the profile as a git repo on 'main' (never 'master'), the same
+  # thing the Windows installer does. The completion message tells users to
+  # `git add -A && git commit && git push` from user/ for cross-machine sync;
+  # without a repo that push fails on macOS/Linux.
+  if [ ! -d "$USER_DIR/.git" ]; then
+    if git -C "$USER_DIR" init -b main >/dev/null 2>&1 || { git -C "$USER_DIR" init >/dev/null 2>&1 && git -C "$USER_DIR" branch -m main >/dev/null 2>&1; }; then
+      success "  User profile git repo initialized on main"
+    else
+      warn "  Could not initialize git in the user profile (non-fatal)."
+    fi
+  fi
 else
   success "User profile already exists at $USER_DIR (kept as-is)"
 fi

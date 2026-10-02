@@ -41,6 +41,16 @@ fi
 
 LOG_FILE="$DIR/data/launch.log"
 mkdir -p "$DIR/data"
+
+# First launch: sync engine skills into .pi/skills (Windows gets this from
+# bootstrap-pi.ps1 step 5/6; on macOS/Linux nothing else does it, so the TUI
+# would start without its skills). Idempotent: skipped once .pi/skills exists,
+# non-fatal on any failure.
+if [ ! -d "$DIR/.pi/skills" ] && [ -f "$DIR/scripts/sync-skills.mjs" ]; then
+  echo "Syncing engine skills to .pi/skills..."
+  "$NODE_CMD" "$DIR/scripts/sync-skills.mjs" --pi || echo "  (skills sync failed - continuing; run: node scripts/sync-skills.mjs --pi)"
+fi
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Glitch starting..." > "$LOG_FILE"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Args: $*" >> "$LOG_FILE"
 

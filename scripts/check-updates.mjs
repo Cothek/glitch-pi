@@ -1056,7 +1056,14 @@ export async function applyBinaryUpdate(tool, latestVersion, cwd, latestTag = nu
     .replace(/\$\{version\}/g, String(latestVersion))
     .replace(/\$\{tag\}/g, tag)
     .replace(/\$\{arch\}/g, arch);
-  const target = join(cwd, tool.binary);
+  // Windows keeps the manifest's .exe name; on POSIX the platform entry
+  // names the extracted file without the extension (cloudflared), and every
+  // consumer (check-install.mjs, tunnel.mjs) resolves the extension-less
+  // name. Installing 'cloudflared.exe' on Linux left the binary present but
+  // invisible to every lookup, so the check reported it missing.
+  const posixName = (Array.isArray(platform.extract) && platform.extract[0]) || String(tool.binary).replace(/\.exe$/i, '');
+  const targetName = process.platform === 'win32' ? tool.binary : posixName;
+  const target = join(cwd, targetName);
   noteCyan(`  Updating ${tool.name}: -> ${latestVersion}`);
   noteDim(`  downloading ${url}`);
   const dlRes = await downloadToTemp(url, 0, (loaded, total) => {

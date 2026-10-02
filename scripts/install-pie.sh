@@ -522,14 +522,17 @@ if [ ! -d "$INSTALL_DIR/.git" ]; then
     fi
 fi
 
-# 4. Run bootstrap (if exists - it's Windows-specific but launch scripts handle deps)
+# 4. Bootstrap check (Windows has bootstrap-pi.ps1; on macOS/Linux the launch
+#    scripts self-provision: Node.js via launch-glitch.sh, the Pi engine via
+#    the first-run dependency installer inside launch-unified.mjs)
 header "Checking for bootstrap script..."
-BOOTSTRAP_PATH="$INSTALL_DIR/scripts/bootstrap.ps1"
+BOOTSTRAP_PATH="$INSTALL_DIR/scripts/bootstrap-pi.ps1"
 if [ -f "$BOOTSTRAP_PATH" ]; then
-    warn "bootstrap.ps1 is Windows-specific (PowerShell)."
-    warn "On macOS/Linux, dependencies are handled by the launch scripts automatically."
+    step "bootstrap-pi.ps1 present (used by Windows installs; not run here)."
+    step "On macOS/Linux, launch-glitch.sh downloads Node.js and the first"
+    step "interactive launch installs the Pi engine (pi CLI + pi-web-ui)."
 else
-    step "No bootstrap needed - launch scripts handle Node.js/OpenCode download."
+    warn "bootstrap-pi.ps1 not found — launch-glitch.sh will still fetch Node.js."
 fi
 
 
@@ -1044,34 +1047,17 @@ if [ "$NO_LAUNCH" = false ]; then
         step "Starting Glitch Pie..."
         cd "$INSTALL_DIR"
         echo ""
-        echo "Select launch mode:"
-        echo "  1) Normal (paid) - Recommended for most users"
-        echo "  2) Free - Emergency fallback when paid quota is exhausted"
-        echo "  3) Local - Use local LM Studio models"
-        echo "  4) Safe - Minimal config for troubleshooting"
+        echo "First launch note: Node.js and the Pi engine are installed now"
+        echo "(one-time, large download). This terminal runs the TUI directly."
         echo ""
-        prompt "Enter choice [1-4, Enter for Normal (paid)]: "
-        MODE_FLAG=""
-        while true; do
-            read -r mode_choice </dev/tty
-            case "$mode_choice" in
-                1|"") MODE_FLAG="--mode normal-paid"; break ;;
-                2) MODE_FLAG="--mode normal-free"; break ;;
-                3) MODE_FLAG="--mode normal-local"; break ;;
-                4) MODE_FLAG="--mode safe"; break ;;
-                *) echo "Invalid choice. Please enter 1, 2, 3, or 4 (or Enter for default)." ;;
-            esac
-        done
-        step "Launching in $(echo "$MODE_FLAG" | sed 's/--mode //') mode..."
-        nohup ./launch-glitch.sh "$MODE_FLAG" > glitch.log 2>&1 &
-        PID=$!
-        success "Glitch Pie launched (PID: $PID)"
+        # Foreground launch, NOT nohup: the TUI needs this terminal, and the
+        # first-run engine install needs an interactive (TTY) launch so
+        # launch-unified.mjs's dependency installer actually runs. A detached
+        # (non-TTY) first launch would skip the install and leave the engine
+        # missing. When the TUI exits, control returns to this installer.
+        ./launch-glitch.sh --mode pi
         echo ""
-        echo "  To launch again later, run:" 
-        echo "    cd $INSTALL_DIR"
-        echo "    ./launch-glitch.sh"
-        echo ""
-        echo "  Logs: tail -f $INSTALL_DIR/glitch.log"
+        success "Glitch Pie exited. To launch again: cd $INSTALL_DIR && ./launch-glitch.sh"
     fi
 fi
 
@@ -1097,9 +1083,8 @@ Glitch Pie is installed at: $INSTALL_DIR
 
 Next steps:
   • Launch:        cd $INSTALL_DIR && ./launch-glitch.sh
-  • Free mode:     cd $INSTALL_DIR && ./launch-glitch.sh (select Free at prompt)
-  • Local mode:    cd $INSTALL_DIR && ./launch-glitch.sh (select Local at prompt)
-  • Safe mode:     cd $INSTALL_DIR && ./launch-glitch.sh (select Safe at prompt)
+  • Pi TUI:       cd $INSTALL_DIR && ./launch-glitch.sh --mode pi
+  • Web UI:       start glitch, then pick the Web interface (stack on :8787)
   • Update:        Re-run this installer (it will pull latest)
   • User sync:     cd $INSTALL_DIR/user && git add -A && git commit -m 'update' && git push  (after making changes)
 

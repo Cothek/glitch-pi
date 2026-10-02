@@ -79,7 +79,13 @@ function Ensure-ServerToken {
             return
         }
     }
-    $bytes = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+    # PS 5.1 (.NET Framework) has NO static RandomNumberGenerator.GetBytes —
+    # that overload is .NET 6+. Create() + the instance method works on BOTH
+    # PowerShell 5.1 and 7, so fresh installs stop crashing Ensure-ServerToken.
+    $bytes = New-Object byte[] 24
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+    $rng.Dispose()
     $hex = ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($TokenFile, $hex, $utf8NoBom)

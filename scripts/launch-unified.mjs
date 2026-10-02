@@ -689,7 +689,31 @@ async function main() {
     log(DARK_YELLOW, `  (desktop control start failed: ${e && e.message ? e.message : 'unknown'} - continuing)`);
   }
 
-  const result = runScript(config.script, config.args);
+  // ---- Forward unconsumed args to the mode script ---------------------------
+  // launch-pi.mjs has its own flags (--tui, --web, --windowed, --headless,
+  // --stack-only). Before this block they were silently discarded, so
+  // `launch-glitch --mode pi --tui` never reached launch-pi.mjs and the TUI
+  // flag did nothing. Only unified's own flags are held back; launch-pi.mjs
+  // already filters what it passes on to the pi CLI.
+  const UNIFIED_FLAGS = new Set([
+    '--help', '-h', '--mode', '--reset', '--reuse-saved',
+    '--skip-updates', '--apply-updates',
+  ]);
+  const forwardArgs = [];
+  for (let i = 0; i < args.length; i++) {
+    if (UNIFIED_FLAGS.has(args[i])) {
+      // --mode takes a value; consume it too. Other unified flags are boolean.
+      if (args[i] === '--mode') i++;
+      continue;
+    }
+    forwardArgs.push(args[i]);
+  }
+  if (forwardArgs.length) {
+    log(DARK_GRAY, `  (forwarding to ${config.script}: ${forwardArgs.join(' ')})`);
+    logToFile(`Forwarding args to ${config.script}: ${forwardArgs.join(' ')}`);
+  }
+
+  const result = runScript(config.script, [...config.args, ...forwardArgs]);
   if (!result.success) {
     process.exit(result.error?.status || 1);
   }

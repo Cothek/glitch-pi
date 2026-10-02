@@ -540,7 +540,11 @@ if (-not (Test-Path "$InstallDir\.git")) {
 
     try {
       Invoke-WithSpinner -Label "Cloning Glitch Pie repository" -DoneMessage "Repository" -ScriptBlock {
-        $r = & $using:gitPath clone https://github.com/Cothek/glitch-pi.git "$using:InstallDir" 2>&1
+        # cothek@ prefix: the repo is private and GCM stores credentials under
+        # the username. A username-less URL leaves GCM waiting for an interactive
+        # username prompt, which hangs headless installs. Verified: the plain URL
+        # stalls >45s; the cothek@ form resolves from the credential store instantly.
+        $r = & $using:gitPath clone https://cothek@github.com/Cothek/glitch-pi.git "$using:InstallDir" 2>&1
         if ($LASTEXITCODE -ne 0) { throw "Clone failed (exit $LASTEXITCODE)`n$r" }
         $script:CloneSucceeded = $true
       }
@@ -675,16 +679,16 @@ if ($script:LogFile -and $script:LogFile -ne $targetLog) {
 }
 
 # 4. Run bootstrap
-Write-Header "Running bootstrap (downloads Node.js, OpenCode, Handy, etc.)..."
-$bootstrapPath = "$InstallDir\scripts\bootstrap.ps1"
+Write-Header "Running bootstrap (downloads Node.js, Pi engine: pi CLI + pi-web-ui, etc.)..."
+$bootstrapPath = "$InstallDir\scripts\bootstrap-pi.ps1"
 if (-not (Test-Path $bootstrapPath)) {
-    Write-Error "bootstrap.ps1 not found at $bootstrapPath"
+    Write-Error "bootstrap-pi.ps1 not found at $bootstrapPath"
     throw "Installation failed"
 }
 
 Push-Location $InstallDir
-Write-Step "Executing bootstrap.ps1..."
-powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\bootstrap.ps1"
+Write-Step "Executing bootstrap-pi.ps1..."
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\bootstrap-pi.ps1"
 $bootstrapExit = $LASTEXITCODE
 Pop-Location
 

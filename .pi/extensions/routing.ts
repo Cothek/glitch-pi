@@ -376,7 +376,6 @@ function writeReviewPassMarker(agentName: string): void {
 }
 
 const RENAME_MARKER_RE = /\[\[\s*conv\s*:\s*rename\s*:/;
-const RENAME_TOKEN_RE = /\[\[\s*conv\s*:\s*rename\s*:(.*?)\s*\]\]/g;
 
 function hasRenameMarker(content: any): boolean {
   if (typeof content === "string") return RENAME_MARKER_RE.test(content);
@@ -388,26 +387,80 @@ function hasRenameMarker(content: any): boolean {
   return false;
 }
 
-function stripRenameMarkers(content: any): any {
-  if (typeof content === "string") return content.replace(RENAME_TOKEN_RE, "").trim();
-  if (Array.isArray(content)) {
-    return content.map((p: any) =>
-      p?.type === "text" && typeof p.text === "string"
-        ? { ...p, text: p.text.replace(RENAME_TOKEN_RE, "").trim() }
-        : p,
-    );
-  }
-  return content;
+/** Junk-title detection: placeholder echoes must never rename a chat.
+ *  Born from the 2026-09-30 incident (chats renamed to "<title>", "...",
+ *  "<composed title>"). rename.js only rejects empty/>80; this runs BEFORE
+ *  pi-web-ui's marker scan, so junk markers never reach it. */
+function isJunkRenameTitle(raw: string): boolean {
+  const t = (raw ?? "").trim();
+  if (!t) return true;
+  if (t.length > 80) return true;
+  if (/^<[^>]*>$/.test(t)) return true; // <title>, <new title>, <3-6 word title>
+  if (/^\{[^}]*\}$/.test(t)) return true; // {title}
+  if (/^[.\u2026_-]+$/.test(t)) return true; // "...", "…", "---"
+  if (/^(new\s+|succinct\s+|composed\s+)*(chat\s+)?(session\s+)?title$/i.test(t)) return true;
+  if (/conv\s*:\s*rename/i.test(t)) return true; // echoes the marker syntax itself
+  return false;
 }
 
-function hasTextContent(content: any): boolean {
-  if (typeof content === "string") return content.trim().length > 0;
-  if (Array.isArray(content)) {
-    return content.some(
-      (p: any) => p?.type === "text" && typeof p.text === "string" && p.text.trim().length > 0,
-    );
+// --- R17 rename state (per conversation, keyed by session file) ---
+// pi-web-ui runs every conversation in ONE process, so module-level state
+// must be keyed, never global. Forks/restarts get a fresh entry and re-derive
+// from the transcript (session_info entries survive everything).
+type RenameState = {
+  named: boolean; // once true, never re-checked — names are never un-set
+  lastScan: number; // throttle for the raw transcript scan while unnamed
+  lastStop?: string; // stopReason of the most recent assistant message
+};
+const renameStates = new Map<string, RenameState>();
+
+function renameStateFor(ctx: any): RenameState {
+  let key = "default";
+  try {
+    const f = ctx?.sessionManager?.getSessionFile?.();
+    if (typeof f === "string" && f) key = f;
+  } catch {
+    /* best-effort */
   }
-  return false;
+  let s = renameStates.get(key);
+  if (!s) {
+    s = { named: false, lastScan: 0 };
+    renameStates.set(key, s);
+  }
+  return s;
+}
+
+/** True when this conversation already carries a name. Two sources:
+ *  1. pi-side session_info (the /name command, ctx.setSessionName) via the
+ *     live sessionManager's own memory;
+ *  2. a raw scan of the transcript file — pi-web-ui's marker rename and its
+ *     renameSession append session_info through a SEPARATE SessionManager
+ *     handle, invisible to the live one's memory. */
+function sessionIsNamed(ctx: any, state: RenameState): boolean {
+  if (state.named) return true;
+  try {
+    const name = ctx?.sessionManager?.getSessionName?.();
+    if (typeof name === "string" && name.trim()) {
+      state.named = true;
+      return true;
+    }
+  } catch {
+    /* best-effort */
+  }
+  try {
+    const now = Date.now();
+    if (now - state.lastScan < 5_000) return false; // throttle: big files, hot path
+    state.lastScan = now;
+    const file = ctx?.sessionManager?.getSessionFile?.();
+    if (typeof file === "string" && file && existsSync(file)) {
+      if (readFileSync(file, "utf-8").includes('"type":"session_info"')) {
+        state.named = true;
+      }
+    }
+  } catch {
+    /* best-effort — treat as unnamed */
+  }
+  return state.named;
 }
 
 // --- Extension ---
@@ -432,61 +485,121 @@ export default function (pi: ExtensionAPI) {
     currentSessionID = String(sid);
   });
 
-  // R17: rename-once guard v3 (conversation-scoped). Two producers caused the
-  // "renames on every entry" bug: (1) the old before_agent_start emission
-  // (removed) rendered a PLUGIN conv:rename card on every user entry; (2) the
-  // built-in marker service renames on ANY assistant text containing
-  // [[conv:rename:<title>]] — including replies that merely QUOTE the syntax
-  // (this repo's own conversation got renamed to "<title>", "...", and
-  // "<composed title>"). Session-keyed state cannot fix either: forks and
-  // retries mint new session ids and extension state can reset per turn. So the
-  // guard derives from the conversation itself:
-  //   turn_start -> arm a one-shot capture for this turn.
-  //   context    -> at the turn's FIRST provider request, record whether the
-  //                 LLM-request history holds any assistant message with text
-  //                 content (thinking/toolCall-only bubbles don't count, so a
-  //                 multi-bubble first reply still works). Mid-turn refires do
-  //                 not re-capture.
-  //   message_end-> if the finalized assistant message carries rename markers
-  //                 AND prior assistant text exists, strip them via
-  //                 MessageEndEventResult replacement (pi applies it before
-  //                 the message reaches pi-web-ui's marker scan — verified in
-  //                 the SDK runner's emitMessageEnd). Net effect: only the
-  //                 conversation's FIRST assistant text reply can rename; every
-  //                 later marker — real or quoted — is inert.
-  let hasPriorAssistantText = false;
-  let renameCapturePending = true;
-
-  pi.on("turn_start", () => {
-    renameCapturePending = true;
-  });
-
-  pi.on("context", (event) => {
-    try {
-      if (!renameCapturePending) return;
-      renameCapturePending = false;
-      const msgs = (event as any).messages;
-      if (!Array.isArray(msgs)) return;
-      hasPriorAssistantText = msgs.some(
-        (m: any) => m?.role === "assistant" && hasTextContent(m.content),
-      );
-    } catch {
-      /* never block context assembly on the guard */
-    }
-  });
-
-  pi.on("message_end", async (event) => {
+  // R17 rename guard v4 (conversation-scoped). The invariant is "named",
+  // not "first reply": a conversation may be renamed by ANY assistant text
+  // while it is still UNNAMED, and NEVER once it has a name. "Named" comes
+  // from the conversation itself — pi-side session_info plus a raw scan of
+  // the transcript — so forks, retries, restarts, and cross-instance renames
+  // (pi-web-ui's marker service appends session_info via its own
+  // SessionManager handle) all agree. v3's "first assistant text" heuristic
+  // is gone: it blocked the enforcer's follow-up replies below, and it let a
+  // resumed conversation's first reply rename an already-named chat.
+  // Junk-title markers are stripped even while unnamed — the 2026-09-30
+  // incident saw chats renamed to "<title>", "...", and "<composed title>".
+  pi.on("message_end", async (event, ctx) => {
     try {
       const mm = (event as any).message;
       if (mm?.role !== "assistant") return undefined;
+      const state = renameStateFor(ctx);
+      state.lastStop = mm.stopReason;
       if (!hasRenameMarker(mm.content)) return undefined;
-      if (!hasPriorAssistantText) return undefined; // first reply of the conversation - allow the rename
-      const content = stripRenameMarkers(mm.content);
-      if (content === mm.content) return undefined;
+      const named = sessionIsNamed(ctx, state);
+      let kept = 0;
+      const filterText = (text: string): string => {
+        let out = "";
+        let last = 0;
+        const re = /\[\[\s*conv\s*:\s*rename\s*:(.*?)\s*\]\]/g;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+          const keep = !named && kept === 0 && !isJunkRenameTitle(m[1] ?? "");
+          if (keep) kept = 1;
+          out += text.slice(last, m.index);
+          if (keep) out += m[0];
+          last = m.index + m[0].length;
+        }
+        out += text.slice(last);
+        return kept === 0 ? out.trim() : out;
+      };
+      const rebuild = (content: any): any => {
+        if (typeof content === "string") return filterText(content);
+        if (Array.isArray(content)) {
+          return content.map((p: any) =>
+            p?.type === "text" && typeof p.text === "string"
+              ? { ...p, text: filterText(p.text) }
+              : p,
+          );
+        }
+        return content;
+      };
+      const content = rebuild(mm.content);
+      if (kept === 1) state.named = true; // a rename is now in flight for this conversation
       return { message: { ...mm, content } } as any;
     } catch (e: any) {
-      console.error(`[routing] rename-once guard failed: ${e?.message || e}`);
+      console.error(`[routing] rename guard failed: ${e?.message || e}`);
       return undefined;
+    }
+  });
+
+  // --- R17 enforcer: rename even when the model forgets the marker ---
+  // Models routinely skip the R17 instruction (verified 2026-10-01: most
+  // recent sessions emitted no marker at all; the 3 that did all renamed
+  // fine — the plumbing works, the emission is the failure). So after a run
+  // settles on an UNNAMED conversation, ask once (invisible custom message,
+  // triggerTurn) for a marker-only reply. The guard above lets exactly that
+  // reply through. Self-limiting: attempts are persisted in the transcript
+  // via appendEntry (survives restarts; counted from getBranch), capped at 2.
+  const RENAME_NUDGE_ENTRY = "glitch-rename-nudge";
+  const underPiWebUi = () => Boolean(process.env.PI_WEB_PORT || process.env.PI_WEB_TOKEN);
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    try {
+      if (process.env.GLITCH_SUBAGENT === "1") return; // dispatcher subagents: separate process, flagged
+      // pi-web-ui's own subagents are in-process conversations with an
+      // in-memory session (no transcript file, no session_info to write) and
+      // no GLITCH_SUBAGENT flag — detect them by the missing file instead.
+      let sessionFile: string | undefined;
+      try {
+        sessionFile = (ctx as any).sessionManager?.getSessionFile?.();
+      } catch {
+        /* best-effort */
+      }
+      if (typeof sessionFile !== "string" || !sessionFile) return;
+      if (!underPiWebUi()) return; // the marker executor lives in pi-web-ui; TUI has /name
+      const state = renameStateFor(ctx);
+      if (state.lastStop === "aborted" || state.lastStop === "error") return; // don't chase a dead run
+      if (sessionIsNamed(ctx, state)) return;
+      let attempts = 0;
+      try {
+        const branch = (ctx as any).sessionManager?.getBranch?.() ?? [];
+        attempts = (branch as any[]).filter(
+          (e: any) => e?.type === "custom" && e?.customType === RENAME_NUDGE_ENTRY,
+        ).length;
+      } catch {
+        /* best-effort */
+      }
+      if (attempts >= 2) return;
+      pi.appendEntry(RENAME_NUDGE_ENTRY, { at: new Date().toISOString() });
+      // Deferred: let settle fully complete before starting the nudge turn
+      // (same mechanism as the restart-stack continuation injection).
+      setTimeout(() => {
+        try {
+          pi.sendMessage(
+            {
+              customType: RENAME_NUDGE_ENTRY,
+              display: false,
+              content:
+                "This conversation still has no title. Reply with ONLY the rename marker: " +
+                "[[conv:rename:<3-6 word title>]] — compose the title from the user's goal " +
+                "(never their raw words, never a placeholder like <title>). No other text, no tools.",
+            },
+            { triggerTurn: true },
+          );
+        } catch (e: any) {
+          console.error(`[routing] rename nudge failed: ${e?.message || e}`);
+        }
+      }, 50);
+    } catch (e: any) {
+      console.error(`[routing] rename enforcer failed: ${e?.message || e}`);
     }
   });
   // --- Pre-tool gates: plan-first + dispatch-first + review gate ---

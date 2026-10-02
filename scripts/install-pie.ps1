@@ -553,14 +553,22 @@ if (-not (Test-Path "$InstallDir\.git")) {
       Write-Error "Clone failed: $_"
       throw "Installation failed"
     }
-    if ($Branch -ne "main") {
-        Write-Step "Checking out branch: $Branch..."
-        Push-Location $InstallDir
-        $prevEAP = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        & $gitPath checkout $Branch 2>&1 | Out-Null
-        $ErrorActionPreference = $prevEAP
-        Pop-Location
+    # Always check out the requested branch. The clone follows the repo's
+    # DEFAULT branch (develop for glitch-pi), so even the default -Branch main
+    # needs a real checkout. Non-fatal: on failure continue on the cloned branch.
+    Write-Step "Checking out branch: $Branch..."
+    Push-Location $InstallDir
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $coOut = & $gitPath checkout $Branch 2>&1
+    $coCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    Pop-Location
+    if ($coCode -ne 0) {
+        Write-Warn "git checkout $Branch failed (exit $coCode): $coOut"
+        Write-Warn "Continuing on the cloned default branch."
+    } else {
+        Write-Success "On branch: $Branch"
     }
 
     # Finalize bundled git: move the staged MinGit into the install dir so the

@@ -54,8 +54,16 @@ function Stop-StaleStackWindows {
     if ($windows.Count -eq 0) { return }
 
     # The parent PIDs of the live stack listeners own the stack; never touch those.
+    # Scan THIS run's ports PLUS the stack defaults (8787/4103). With custom
+    # -WebPort/-AuthPort the defaults are absent from the list, so the live
+    # window of a concurrently running stack (another install, or the default
+    # instance this run is side-stepping) looked "parked" and got force-closed
+    # (verified live: a -WebPort 8799 run closed a 29-hour-old production stack
+    # window). Protecting a few extra PIDs is free; closing a live stack's
+    # window is not.
+    $ownerPorts = @($WebPort, $AuthPort, 8787, 4103) | Sort-Object -Unique
     $owners = @()
-    foreach ($port in @($WebPort, $AuthPort)) {
+    foreach ($port in $ownerPorts) {
         foreach ($lpid in (Get-PortListenerPids -Port $port)) {
             try {
                 $parent = (Get-CimInstance Win32_Process -Filter "ProcessId = $lpid").ParentProcessId

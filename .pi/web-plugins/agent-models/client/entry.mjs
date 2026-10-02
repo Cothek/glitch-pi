@@ -28,7 +28,7 @@ const POLL_MS = 15000;
 const STYLE_ID = "agent-models-style";
 const MOUNT_LABEL = "agent-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.4.0";
 /**
  * Render cap. Deliberately above any realistic catalog size: the catalog is ~500
  * entries and these are plain DOM rows, not a virtual list.
@@ -155,6 +155,33 @@ const STYLE_CSS = `
 .am-empty{padding:14px;border:1px dashed var(--border);border-radius:8px;color:var(--text-dim);font-size:12px}
 .am-error{border:1px solid var(--red);background:var(--red-soft, transparent);border-radius:8px;padding:10px;font-size:12px;color:var(--text)}
 .am-diag{border-top:1px solid var(--border-soft);padding-top:6px;color:var(--text-faint);font-family:var(--mono, monospace);font-size:10px;word-break:break-all}
+/* Configs bar: preset dropdown + save/apply/delete, between the header and the row list */
+.am-configs-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:4px 0;border-bottom:1px solid var(--border-soft);margin-bottom:6px}
+.am-config-dropdown{position:relative;flex:1;min-width:120px}
+/* Chip styling matches the agent drop-down chip (agent-switcher) exactly: same
+ * chip-bg var (semi-transparent in the host theme), border, radius 8, 25px metrics,
+ * caret ::after with the open-state rotation. Verified by computed-style capture. */
+.am-config-dropdown-btn{background:var(--chip-bg,var(--bg-elev2));border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer;white-space:nowrap;align-items:center;gap:4px;padding:4px 10px;font-size:13px;font-weight:400;line-height:15px;box-sizing:border-box;font-family:inherit;display:inline-flex;transition:border-color .15s,background .15s}
+.am-config-dropdown-btn:hover{border-color:var(--accent);background:var(--accent-soft)}
+.am-config-dropdown-btn:focus{outline:none}
+.am-config-dropdown-btn::after{content:"\\25BE";color:var(--text-faint);margin-left:auto;font-size:10px;line-height:1;transition:transform .15s}
+.am-config-dropdown-btn[aria-expanded="true"]::after{transform:rotate(180deg)}
+/* Menu clones the agent drop-down menu (.agent-switcher-menu): same surface, radius 10,
+ * padding 6, shadow, z-index 1000, compact 340-480px width, max-height + scroll. */
+.am-config-options{position:absolute;top:100%;left:0;z-index:1000;min-width:340px;max-width:480px;max-height:min(360px,100vh - 240px);overflow-y:auto;background:var(--menu-bg,var(--bg-elev2));border:1px solid var(--border);border-radius:10px;padding:6px;box-shadow:0 12px 40px #00000080;color:var(--text)}
+.am-config-menu-header{letter-spacing:.6px;text-transform:uppercase;color:var(--text-faint);padding:6px 10px 4px;font-size:11px;font-weight:700}
+.am-config-option{width:100%;color:var(--text-dim);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;display:flex;align-items:center;gap:10px;line-height:1.4}
+.am-config-option:hover{background:var(--bg-elev);color:var(--text)}
+.am-config-option.am-current{color:var(--text);background:var(--accent-soft)}
+.am-config-option:disabled{opacity:.4;cursor:not-allowed}
+.am-config-option-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.am-config-option-desc{color:var(--text-faint);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
+.am-config-option-check{color:var(--accent);font-weight:700;margin-left:auto}
+.am-config-form{display:flex;flex-direction:column;gap:6px;width:100%}
+.am-config-input{width:100%;font-size:12px;font-family:var(--mono, monospace);border:1px solid var(--border);border-radius:7px;background:var(--bg);color:var(--text);padding:5px 8px;box-sizing:border-box}
+.am-config-input:focus{border-color:var(--accent);outline:none}
+.am-config-form-btns{display:flex;gap:6px}
+.am-config-err{border:1px solid var(--red);background:var(--red-soft, transparent);border-radius:6px;padding:6px 8px;font-size:11.5px;color:var(--text)}
 /* Chat-bar button (server entry registers kind:"view", label "Agent Models").
    Sized to the native composer dropdowns: 25x25 at desktop (the host renders
    .composer-tools .chip with 4px vertical padding and a 13px font -> text box
@@ -247,6 +274,54 @@ async function postRestore(agent) {
 	}
 }
 
+/** Save current agent pins as a named configuration. If editId is provided, renames the existing config instead of capturing fresh pins. Never throws. */
+async function postSaveConfig(name, description, editId) {
+	try {
+		const res = await fetch(`${API_BASE}/configs/save`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name, description, editId }),
+		});
+		const payload = await res.json().catch(() => null);
+		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		return payload;
+	} catch (err) {
+		return { ok: false, error: errorText(err) };
+	}
+}
+
+/** Apply a saved configuration (batch-set all pins). Never throws. */
+async function postApplyConfig(id) {
+	try {
+		const res = await fetch(`${API_BASE}/configs/apply`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ id }),
+		});
+		const payload = await res.json().catch(() => null);
+		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		return payload;
+	} catch (err) {
+		return { ok: false, error: errorText(err) };
+	}
+}
+
+/** Delete a saved configuration. Never throws. */
+async function postDeleteConfig(id) {
+	try {
+		const res = await fetch(`${API_BASE}/configs/delete`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ id }),
+		});
+		const payload = await res.json().catch(() => null);
+		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		return payload;
+	} catch (err) {
+		return { ok: false, error: errorText(err) };
+	}
+}
+
 /** A cost chip: green for free, amber for priced, faint for unknown. */
 function costChipNode(short, title) {
 	const cls = short === "free" ? "am-cost am-free" : String(short).startsWith("$") ? "am-cost am-paid" : "am-cost";
@@ -276,6 +351,15 @@ function createInstance(container, ctx) {
 		saving: null,
 		pickerError: null,
 		savedNote: null,
+		configs: [],
+		selectedConfig: null,
+		configFormOpen: false,
+		configDropdownOpen: false,
+		editingConfigId: null,
+		configName: "",
+		configDesc: "",
+		configError: null,
+		savingConfig: false,
 		diag: {
 			mounts: 1,
 			lastAction: "mount",
@@ -321,17 +405,28 @@ function createInstance(container, ctx) {
 	}
 
 	const list = el("div", "am-list");
+	const configBar = el("div", "am-configs-bar");
 	const diagLine = el("div", "am-diag");
-	root.append(head, filters, list, diagLine);
+	root.append(head, configBar, filters, list, diagLine);
 
 	document.addEventListener?.("keydown", onKeydown);
+		document.addEventListener?.("click", onDocumentClick);
+
+		function onDocumentClick(event) {
+			if (state.configDropdownOpen) {
+				const target = event.target;
+				if (!configBar.contains(target)) {
+					state.configDropdownOpen = false;
+					state.configError = null;
+					render();
+				}
+			}
+		}
 
 	function onKeydown(event) {
-		if (event.key !== "Escape" || !state.openFor) return;
-		state.openFor = null;
-		state.query = "";
-		state.pickerError = null;
-		render();
+		if (event.key !== "Escape") return;
+		if (state.openFor) { state.openFor = null; state.query = ""; state.pickerError = null; render(); return; }
+		if (state.configDropdownOpen) { state.configDropdownOpen = false; state.configError = null; render(); return; }
 	}
 
 	function renderDiag() {
@@ -546,7 +641,7 @@ function createInstance(container, ctx) {
 		inheritBtn.type = "button";
 		inheritBtn.disabled = saving;
 		inheritBtn.setAttribute("data-am-option", "__inherit__");
-		inheritBtn.appendChild(el("span", "am-option-label", "Inherit (no pin) - follow the main conversation model"));
+		inheritBtn.appendChild(el("span", "am-config-option-label", "Inherit (no pin) - follow the main conversation model"));
 		if (!refs.pin) inheritBtn.appendChild(el("span", "am-option-mark", "✓"));
 		inheritBtn.addEventListener("click", () => void applyModel(refs.agent, ""));
 		refs.options.appendChild(inheritBtn);
@@ -566,7 +661,7 @@ function createInstance(container, ctx) {
 			btn.disabled = saving;
 			btn.setAttribute("data-am-option", model);
 			if (model === refs.pin) btn.className = "am-option am-current";
-			btn.appendChild(el("span", "am-option-label", model));
+			btn.appendChild(el("span", "am-config-option-label", model));
 			const meta = info(model);
 			if (meta?.tier && meta.tier !== "unknown") {
 				btn.appendChild(el("span", `am-option-tier am-tier-${meta.tier}`, meta.tier));
@@ -668,6 +763,241 @@ function createInstance(container, ctx) {
 		return wrap;
 	}
 
+
+	/**
+	 * Render the configuration bar: preset dropdown + save/apply/delete buttons.
+	 * Inserted between the header and the filter row so it stays visible
+	 * while scrolling the agent roster.
+	 */
+	function renderConfigBar() {
+		configBar.textContent = "";
+		configBar.setAttribute("data-am-configs", "1");
+		if (state.configError) {
+			const err = el("div", "am-config-err", state.configError);
+			const retry = el("button", "am-btn", "Retry");
+			retry.type = "button";
+			retry.addEventListener("click", () => { state.configError = null; render(); });
+			err.appendChild(retry);
+			configBar.appendChild(err);
+		}
+		if (state.configFormOpen) {
+			const form = el("div", "am-config-form");
+			const nameInput = el("input");
+			nameInput.type = "text";
+			nameInput.className = "am-config-input";
+			nameInput.placeholder = "Configuration name";
+			nameInput.setAttribute("maxlength", "80");
+			nameInput.setAttribute("data-am-config-name", "1");
+			nameInput.value = state.configName;
+			nameInput.addEventListener("input", () => { state.configName = nameInput.value.trim(); });
+			nameInput.addEventListener("keydown", (e) => {
+				if (e.key === "Enter") { e.preventDefault(); void saveConfig(); }
+				if (e.key === "Escape") { state.configFormOpen = false; state.configName = ""; state.configDesc = ""; render(); }
+			});
+			const descInput = el("textarea");
+			descInput.className = "am-config-input";
+			descInput.placeholder = "Description (optional)";
+			descInput.setAttribute("rows", "2");
+			descInput.setAttribute("data-am-config-desc", "1");
+			descInput.value = state.configDesc;
+			descInput.addEventListener("input", () => { state.configDesc = descInput.value.trim(); renderConfigBar(); });
+			const saveBtn = el("button", "am-btn am-primary");
+			saveBtn.type = "button";
+			saveBtn.textContent = "Save";
+			saveBtn.setAttribute("data-am-config-save-submit", "1");
+			saveBtn.disabled = !state.configName || state.savingConfig;
+			saveBtn.addEventListener("click", () => void saveConfig());
+			const cancelBtn = el("button", "am-btn");
+			cancelBtn.type = "button";
+			cancelBtn.textContent = "Cancel";
+			cancelBtn.addEventListener("click", () => { state.configFormOpen = false; state.configName = ""; state.configDesc = ""; render(); });
+			const btns = el("div", "am-config-form-btns");
+			btns.append(saveBtn, cancelBtn);
+			form.append(nameInput, descInput, btns);
+			if (state.savingConfig) form.appendChild(el("span", "am-note", "saving…"));
+			configBar.appendChild(form);
+			return;
+		}
+		const selectWrap = el("div", "am-config-dropdown");
+		selectWrap.setAttribute("data-am-config-select", "1");
+		const selectBtn = el("button", "am-config-dropdown-btn");
+		selectBtn.type = "button";
+		selectBtn.disabled = state.savingConfig;
+		const selected = state.configs.find((c) => c.id === state.selectedConfig);
+		selectBtn.textContent = selected ? selected.name + " (" + selected.agentCount + ")" : (state.configs.length ? "Select a preset…" : "No saved presets");
+		selectBtn.setAttribute("data-am-config-btn", "1");
+		// aria-expanded drives the caret rotation (same as the agent drop-down chip)
+		selectBtn.setAttribute("aria-expanded", state.configDropdownOpen ? "true" : "false");
+		selectBtn.addEventListener("click", (event) => {
+			// stopPropagation is REQUIRED: renderConfigBar() below rebuilds the bar DOM
+			// synchronously during this click dispatch, so the bubbling document-level
+			// outside-click handler (onDocumentClick) would see the original button node
+			// as detached ("outside") and close the dropdown in the same tick - the menu
+			// could never stay open. Found live via the CDP UI drive.
+			event.stopPropagation();
+			state.configDropdownOpen = !state.configDropdownOpen;
+			state.configError = null;
+			renderConfigBar();
+		});
+		selectWrap.appendChild(selectBtn);
+		if (state.configDropdownOpen) {
+			const panel = el("div", "am-options am-config-options");
+			panel.setAttribute("data-am-config-options", "1");
+			// header matches the agent drop-down menu header (uppercase 11px)
+			panel.appendChild(el("div", "am-config-menu-header", "Saved presets"));
+			const noneOpt = el("button", "am-config-option");
+			noneOpt.type = "button";
+			noneOpt.setAttribute("data-am-config-option", "");
+			noneOpt.textContent = "None";
+			noneOpt.disabled = !state.selectedConfig;
+			noneOpt.addEventListener("click", () => {
+				state.selectedConfig = null;
+				state.configDropdownOpen = false;
+				state.configError = null;
+				render();
+			});
+			panel.appendChild(noneOpt);
+			for (const c of state.configs) {
+				const opt = el("button", "am-config-option");
+				opt.type = "button";
+				opt.setAttribute("data-am-config-option", c.id);
+				if (c.id === state.selectedConfig) opt.className = "am-config-option am-current";
+				const label = el("span", "am-config-option-label", c.name + " (" + c.agentCount + ")");
+				opt.appendChild(label);
+				if (c.description) opt.appendChild(el("span", "am-config-option-desc", c.description));
+				// check mark on the current preset (same as the agent drop-down menu)
+				if (c.id === state.selectedConfig) opt.appendChild(el("span", "am-config-option-check", "\u2713"));
+				opt.addEventListener("click", () => {
+					state.selectedConfig = c.id;
+					state.configDropdownOpen = false;
+					state.configError = null;
+					render();
+				});
+				panel.appendChild(opt);
+			}
+			selectWrap.appendChild(panel);
+		}
+		const saveBtn = el("button", "am-btn");
+		saveBtn.type = "button";
+		saveBtn.textContent = "Save current";
+		saveBtn.setAttribute("data-am-config-save", "1");
+		saveBtn.title = "Snapshot all agent model pins into a named configuration";
+		saveBtn.addEventListener("click", () => {
+			state.configFormOpen = true;
+			state.configName = "";
+			state.configDesc = "";
+			state.configError = null;
+			renderConfigBar();
+		});
+		const applyBtn = el("button", "am-btn am-primary");
+		applyBtn.type = "button";
+		applyBtn.textContent = "Apply";
+		applyBtn.setAttribute("data-am-config-apply", "1");
+		applyBtn.disabled = !state.selectedConfig || state.savingConfig;
+		applyBtn.title = state.selectedConfig ? "Apply " + ((state.configs.find((c) => c.id === state.selectedConfig) || {}).name || state.selectedConfig) : "Select a preset to apply";
+		applyBtn.addEventListener("click", () => void applyConfig());
+		const editBtn = el("button", "am-btn");
+		editBtn.type = "button";
+		editBtn.disabled = !state.selectedConfig || state.savingConfig;
+		editBtn.setAttribute("data-am-config-edit", "1");
+		editBtn.title = "Rename this preset (keeps its pins)";
+		editBtn.textContent = "Edit";
+		editBtn.addEventListener("click", () => editConfig());
+		const deleteBtn = el("button", "am-btn");
+		deleteBtn.type = "button";
+		deleteBtn.disabled = !state.selectedConfig || state.savingConfig;
+		deleteBtn.setAttribute("data-am-config-delete", "1");
+		deleteBtn.title = "Delete the selected preset";
+		deleteBtn.innerHTML = "\u00d7";
+		deleteBtn.addEventListener("click", () => void deleteConfig());
+		configBar.append(selectWrap, saveBtn, applyBtn, editBtn, deleteBtn);
+	}
+
+	function editConfig() {
+		const cfg = state.configs.find((c) => c.id === state.selectedConfig);
+		if (!cfg) return;
+		state.editingConfigId = cfg.id;
+		state.configFormOpen = true;
+		state.configName = cfg.name;
+		state.configDesc = cfg.description || "";
+		state.configError = null;
+		renderConfigBar();
+	}
+
+	async function saveConfig() {
+		if (!state.configName) return;
+		state.savingConfig = true;
+		renderConfigBar();
+		const payload = await postSaveConfig(state.configName, state.configDesc, state.editingConfigId);
+		if (state.destroyed) return;
+		state.savingConfig = false;
+		if (payload && payload.ok) {
+			state.configFormOpen = false;
+			state.configName = "";
+			state.configDesc = "";
+			state.configError = null;
+			if (payload.report && payload.report.configs) state.configs = payload.report.configs;
+			state.selectedConfig = (payload.config && payload.config.id) || null;
+			state.diag.lastWrite = "save-config:" + (state.selectedConfig || "?") + " @ " + new Date().toLocaleTimeString();
+			state.diag.lastAction = "save-config";
+			state.diag.lastAt = new Date().toLocaleTimeString();
+		} else {
+			state.configError = (payload && payload.error) || "unknown error";
+			state.diag.lastWrite = "save-config FAILED";
+		}
+		render();
+	}
+
+	async function applyConfig() {
+		const id = state.selectedConfig;
+		if (!id) return;
+		state.savingConfig = true;
+		state.configError = null;
+		renderConfigBar();
+		const cfgName = (state.configs.find((c) => c.id === id) || {}).name || id;
+		const payload = await postApplyConfig(id);
+		if (state.destroyed) return;
+		state.savingConfig = false;
+		if (payload && payload.ok) {
+			if (payload.report && payload.report.configs) state.configs = payload.report.configs;
+			state.diag.lastWrite = "apply:" + id + " @ " + new Date().toLocaleTimeString();
+			state.diag.lastAction = "apply:" + cfgName;
+			state.diag.lastAt = new Date().toLocaleTimeString();
+			const s = payload.summary || {};
+			const skipped = s.invalid ? ", " + s.invalid + " skipped (unavailable)" : "";
+			state.savedNote = { agent: "(all)", text: "applied " + (payload.name || id) + ": " + (s.applied || 0) + " agents updated" + skipped };
+			state.openFor = null;
+			state.query = "";
+		} else {
+			state.configError = (payload && payload.error) || "unknown error";
+			state.diag.lastWrite = "apply:" + id + " FAILED";
+		}
+		render();
+	}
+
+	async function deleteConfig() {
+		const id = state.selectedConfig;
+		if (!id) return;
+		const cfgName = (state.configs.find((c) => c.id === id) || {}).name || id;
+		if (!confirm("Delete preset: " + cfgName + "? This cannot be undone.")) return;
+		state.savingConfig = true;
+		renderConfigBar();
+		const payload = await postDeleteConfig(id);
+		if (state.destroyed) return;
+		state.savingConfig = false;
+		if (payload && payload.ok) {
+			state.configs = payload.configs || [];
+			state.selectedConfig = null;
+			state.diag.lastWrite = "delete:" + id + " @ " + new Date().toLocaleTimeString();
+			state.diag.lastAction = "delete-config";
+			state.diag.lastAt = new Date().toLocaleTimeString();
+		} else {
+			state.configError = (payload && payload.error) || "unknown error";
+		}
+		render();
+	}
+
+
 	function render() {
 		if (state.destroyed) return;
 		// Every full render rebuilds the open picker (or closes it), so the cached
@@ -715,6 +1045,7 @@ function createInstance(container, ctx) {
 			sub.title = [state.report.catalogSource ?? "", costMeta.missing ? costMeta.hint : "", costMeta.generatedAt ? `costs generated ${costMeta.generatedAt}` : ""]
 				.filter(Boolean)
 				.join(" | ");
+			renderConfigBar();
 
 			const rows = (state.report.rows ?? []).filter((r) => matchesFilter(r, state.filter));
 			if (!rows.length) {
@@ -747,6 +1078,7 @@ function createInstance(container, ctx) {
 		if (payload?.ok) {
 			state.report = payload;
 			state.error = null;
+			state.configs = payload.configs ?? [];
 			state.diag.agentCount = payload.counts?.total ?? 0;
 			state.diag.lastFetch = `ok ${new Date().toLocaleTimeString()}`;
 		} else {

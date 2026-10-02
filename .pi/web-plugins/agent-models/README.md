@@ -21,8 +21,12 @@ Live example when this was built: 10 agents, 2 pins OK, **6 dead pins**, 2 inher
 1. **Chat-bar button** — a small 🧠 chip in the composer, right of the thinking dropdown (order 135: after model 120 / thinking 130, before the DSH chips). Click opens the page. Registered as `kind:"view"`, so the stock client's click handler does the navigation — no custom client code on the click path. Restyled by the client entry to the native chip look (25x25, radius 8) so it matches the native composer dropdowns.
 2. **Right-panel "Agent Models" tab** — one row per agent: name + status badge, `pin -> effective`, then the note.
 3. **`/agent-models`** in the chat box (server-side command, no browser needed).
-4. **`GET /plugins-api/agent-models/state`** — the JSON the tab renders.
-5. **`node scripts/agent-models.mjs`** — the same table on the CLI. `--json`, `--strict` (exit 1 when anything needs attention, usable as a gate), `--help`.
+4. **`GET /plugins-api/agent-models/state`** — the JSON the tab renders (now includes a `configs` summary list).
+5. **`GET /plugins-api/agent-models/configs`** — full saved config list (with pins).
+6. **`POST /plugins-api/agent-models/configs/save`** — snapshot current pins into a named preset (upserts by slug id).
+7. **`POST /plugins-api/agent-models/configs/apply`** — batch-apply a saved preset; validates each pin against the live catalog, skips unresolvable ones.
+8. **`POST /plugins-api/agent-models/configs/delete`** — remove a saved preset.
+9. **`node scripts/agent-models.mjs`** — the same table on the CLI, plus `--save-config`, `--apply-config`, `--list-configs`, `--delete-config`, `--edit-config`, `--config-desc`, and `--dry-run`. `--json`, `--strict` (exit 1 when anything needs attention, usable as a gate), `--help`.
 
 ## Statuses
 
@@ -110,7 +114,7 @@ The host re-scans `<dataDir>/plugins` on every WS attach (`pluginMgr.ensureLoade
 node --test .pi/web-plugins/agent-models/index.test.mjs .pi/web-plugins/agent-models/client.test.mjs
 ```
 
-47 tests: 35 server-side (parser, status truth table, lints, cost labels, the `/state` payload, the frontmatter rewrite, the write route) and 12 for the CLIENT via a fake DOM (`client.test.mjs`).
+72 tests: 52 server-side (parser, status truth table, lints, cost labels, the `/state` payload, the frontmatter rewrite, the write route, and the new config save/apply/delete/edit routes) and 20 for the CLIENT via a fake DOM (`client.test.mjs`), including 9 tests for the presets bar (render, save flow, empty-name guard, apply, apply-error, delete, config count in the `/state` payload, edit rename + edit-on-unknown-id).
 
 The client harness exists because every bug this plugin actually shipped was client-side and invisible to the server tests: a picker whose tail referenced a variable removed in a refactor (the panel rendered "Render failed"), an id-only stylesheet guard that pinned the first deploy's CSS for the life of the page, and a flex container that squashed rows instead of scrolling. The harness mounts the client, clicks a row to open the picker, filters by provider/tier/capability, applies a model (asserting the POST body), rolls back, and re-mounts over a deliberately stale stylesheet. It is a regression net for wiring mistakes, not a substitute for looking at the real page.
 
@@ -181,6 +185,49 @@ Safety, in order:
 
 `POST /plugins-api/agent-models/set-model` accepts `{ agent, model }` (`model: null` = inherit) and returns `{ ok, agent, model, previous, changed, reason, backup, report }`, where `report` is the refreshed roster so the UI updates in one round trip. The manifest therefore requests `fs:write`; the plugin could not write a byte without it.
 
+## Saved configurations (presets)
+
+Between the header and the filters there is a bar that snapshots the **current** pin of every agent into a named, editable preset, so a whole model setup can be swapped in one click instead of repinning agents one by one.
+
+**Where presets live:** `.pi/agent-models/configs.json` (gitignored, like `costs.json`). The host plugin writes it directly via `fs:write` (already requested). The format is:
+
+```json
+{
+  "configs": [
+    { "id": "free-tier", "name": "Free Tier", "description": "All free models",
+      "createdAt": "2026-09-25T12:00:00Z", "updatedAt": "2026-09-25T12:00:00Z",
+      "agentCount": 3, "pins": { "coder": "nvidia/nvidia/nemotron-4", "reviewer": "opencode/mimo-v2.5-free", "vision": null } }
+  ]
+}
+```
+
+`id` is a slug of the name; `pins` captures the model line (or `null` for inherit) for each agent as it is right now.
+
+**In the panel:** the bar shows a dropdown (or "No saved presets"), a **Save current** button, an **Apply** button, an **Edit** button (enabled when a preset is selected), and a **×** delete button.
+
+**Styling (matches the agent drop-down):** the dropdown button reuses the agent-switcher chip recipe — `var(--chip-bg,var(--bg-elev2))` surface, 1px border, radius 8, 25px metrics (padding 4px 10px, font 13px, line-height 15px), caret `::after` with the open-state 180° rotation via `aria-expanded`. The menu clones the agent drop-down menu: same surface, radius 10, padding 6, `0 12px 40px #00000080` shadow, z-index 1000, compact 340-480px width, `max-height:min(360px,100vh - 240px)` with scroll, an uppercase 11px **Saved presets** header, and a ✓ on the current row. Verified by computed-style capture (headless Edge + CDP).
+
+**Toggle bug (found live, fixed):** the dropdown toggle used to call `renderConfigBar()` synchronously during the click dispatch, so the bubbling document-level outside-click handler saw the original button node as detached ("outside") and closed the menu in the same tick — the dropdown could never stay open. Fix: `event.stopPropagation()` in the toggle listener, pinned by a client test that models real click bubbling in the FakeNode fixture.
+
+- **Save current** opens an inline form (name + optional description). Saving POSTs `POST /plugins-api/agent-models/configs/save` with `{ name, description }`. If a config is currently selected and being edited, the `editId` is also sent — the server renames the existing config (preserving its id and pins) instead of creating a new one. Otherwise the server slugifies the id, upserts by id, and returns the refreshed `report` (which includes the updated config list).
+- **Edit** (enabled when a preset is selected) pre-fills the same save form with the config's current name and description, and switches save mode to rename-in-place (same id + pins, new name/description). On the CLI this is `--edit-config <id>` paired with `--save-config "<new name>" --config-desc "<new desc>"`.
+- **Apply** sends `POST /plugins-api/agent-models/configs/apply` with `{ id }`. The server walks every pin: each one is re-validated against the **live** catalog. Models that still exist are written (with backup + frontmatter rewrite, exactly like the per-agent write); models that no longer resolve are **skipped** and counted as `invalid` in the summary rather than being written to an invalid pin. The response carries `{ ok, id, name, summary: { applied, invalid, skipped }, report }`.
+- **Delete** POSTs `POST /plugins-api/agent-models/configs/delete` with `{ id }` and requires a browser `confirm()`. The server removes the config and returns the new list.
+
+**On the CLI:**
+
+```
+node scripts/agent-models.mjs --save-config "Free Tier" --config-desc "All free"
+node scripts/agent-models.mjs --list-configs
+node scripts/agent-models.mjs --apply-config free-tier
+node scripts/agent-models.mjs --delete-config free-tier
+node scripts/agent-models.mjs --edit-config free-tier --save-config "Free Tier" --config-desc "All on free endpoints"
+```
+
+`--save-config` captures the current pins of every agent file found (reads frontmatter, same as the panel). `--apply-config` walks the saved pins and writes each agent file using `setModelInFrontmatter`, skipping any whose model is no longer in the catalog with a warning (the CLI also has `--dry-run` to preview without writing).
+
+Config summaries (id, name, description, createdAt, updatedAt, agentCount) are included in every `/state` payload, so the bar needs no extra fetch.
+
 ## Verified end to end (2026-09-24)
 
 Driven through the real UI in the running web UI, not from curl:
@@ -193,4 +240,4 @@ Driven through the real UI in the running web UI, not from curl:
 
 ## Not built
 
-Bulk actions (repin every dead pin in one go) and a provider/key editor. The picker covers one agent at a time by design.
+Bulk actions (repin every dead pin in one go) and a provider/key editor. The picker covers one agent at a time by design. Saved presets (configs) are built, as described above.

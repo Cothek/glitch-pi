@@ -103,7 +103,23 @@ class FakeNode {
 		this._listeners.set(type, (this._listeners.get(type) ?? []).filter((f) => f !== fn));
 	}
 	dispatch(type, extra = {}) {
-		for (const fn of [...(this._listeners.get(type) ?? [])]) fn({ type, target: this, ...extra });
+		if (type !== "click") {
+			for (const fn of [...(this._listeners.get(type) ?? [])]) fn({ type, target: this, stopPropagation() {}, preventDefault() {}, ...extra });
+			return;
+		}
+		// click events BUBBLE up the parentNode chain like the real DOM, unless a
+		// listener calls stopPropagation() — this is what makes the outside-click
+		// closer testable: without propagation the fixture never ran onDocumentClick,
+		// which is why the dropdown-closed-in-same-tick bug was invisible to tests.
+		const ev = { type, target: this, _stopped: false, stopPropagation() { ev._stopped = true; }, preventDefault() {}, ...extra };
+		let node = this;
+		while (node) {
+			for (const fn of [...(node._listeners.get(type) ?? [])]) {
+				fn(ev);
+				if (ev._stopped) return;
+			}
+			node = node.parentNode;
+		}
 	}
 	/** Browser-shaped event dispatch: accepts an "input"/"change" string or {type}. */
 	dispatchEvent(event) {
@@ -113,6 +129,12 @@ class FakeNode {
 	}
 	click() {
 		this.dispatch("click");
+	}
+	/** Node.contains(child): identity check by subtree walk (the entry's outside-click
+	 * closer calls configBar.contains(target) — the classList contains is NOT this). */
+	contains(child) {
+		if (child === this) return true;
+		return this.children.some((c) => c.contains(child));
 	}
 	focus() {
 		doc.activeElement = this;
@@ -295,8 +317,12 @@ const STATE = {
 			{ id: "largeContext", label: "200K+ context", count: 2 },
 		],
 	},
-	costMeta: { path: ".pi/agent-models/costs.json", generatedAt: "2026-09-25T00:00:00Z", summary: { total: 530, priced: 451, free: 79 } },
+	costMeta: { path: ".pi/agent-models/costs.json", generatedAt: "2026-09-25T00:00:00.000Z", summary: { total: 530, priced: 451, free: 79 } },
+	configs: [],
 };
+
+/** STATE variant that has a saved configuration, for apply/delete tests. */
+const STATE_WITH_CONFIG = { ...STATE, configs: [{ id: "free-tier", name: "Free Tier", description: "All free models", createdAt: "2026-09-25T00:00:00.000Z", updatedAt: "2026-09-25T12:00:00.000Z", agentCount: 3 }] };
 
 /** Deterministic fetch stand-in. Records every call into the array it is given. */
 function makeFetch(calls) {
@@ -327,6 +353,7 @@ beforeEach(async () => {
 	globalThis.clearInterval = () => {};
 	fetchCalls = [];
 	globalThis.fetch = makeFetch(fetchCalls).impl;
+	globalThis.confirm = () => true;
 	if (!client) client = (await import("./client/entry.mjs")).default;
 });
 
@@ -529,5 +556,217 @@ describe("agent-models client: robustness", () => {
 		const box = container.querySelector(".am-error");
 		assert.ok(box, "an error box is shown");
 		assert.match(box.textContent, /503/);
+	});
+});
+
+describe("agent-models client: config bar", () => {
+	it("renders the presets bar with select + save/apply/delete buttons when no configs exist", async () => {
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		assert.ok(bar, "config bar exists");
+		assert.ok(bar.querySelector('[data-am-config-btn]'), "dropdown button exists");
+		assert.ok(bar.querySelector('.am-options') === null, "options panel not open initially");
+		assert.ok(bar.querySelector('[data-am-config-save]'), "save-current button exists");
+		assert.ok(bar.querySelector('[data-am-config-apply]'), "apply button exists");
+		assert.ok(bar.querySelector('[data-am-config-delete]'), "delete button exists");
+		// When no configs exist, the select prompt says "No saved presets"
+		const btn = bar.querySelector('[data-am-config-btn]');
+		assert.match(btn.textContent, /No saved presets/);
+	});
+
+	it("keeps the presets dropdown open when the toggle click bubbles to the document (regression: the old code closed it in the same tick)", async () => {
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		const btn = bar.querySelector('[data-am-config-btn]');
+		btn.click();
+		// The FakeNode now models real click bubbling: without the toggle's
+		// stopPropagation() the document-level outside-click handler would see the
+		// ORIGINAL (rebuilt-away) button node as "outside" and close the menu in the
+		// same tick. Found live via the CDP UI drive; this test pins the fix.
+		await new Promise((r) => setTimeout(r, 5));
+		assert.ok(bar.querySelector('[data-am-config-options]'), "options panel stays open after the toggle click");
+		// a click OUTSIDE the bar still closes it
+		doc.body.click();
+		await new Promise((r) => setTimeout(r, 5));
+		assert.equal(bar.querySelector('[data-am-config-options]'), null, "outside click closes the dropdown");
+	});
+
+	it("opens the inline save form when 'Save current' is clicked", async () => {
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		bar.querySelector('[data-am-config-save]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		assert.ok(bar.querySelector('[data-am-config-name]'), "name input is visible");
+		assert.ok(bar.querySelector('[data-am-config-desc]'), "desc textarea is visible");
+		assert.ok(bar.querySelector('[data-am-config-save-submit]'), "save-submit button is visible");
+	});
+
+	it("edits a selected config: Edit button opens save form with current name/desc", async () => {
+		globalThis.fetch = async (url, init = {}) => {
+			const method = init.method ?? "GET";
+			const body = init.body ? JSON.parse(init.body) : null;
+			fetchCalls.push({ url: String(url), method, body });
+			if (String(url).includes("/state")) return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+			if (String(url).includes("/configs/save")) return { ok: true, status: 200, json: async () => ({ ok: true, config: { id: "free-tier", name: body.name, description: body.description, agentCount: 3 }, report: { ...STATE_WITH_CONFIG, configs: [{ id: "free-tier", name: body.name, description: body.description, createdAt: "2026-09-25T12:00:00Z", updatedAt: "2026-09-25T12:00:00Z", agentCount: 3 }] } }) };
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		// Open dropdown and select a preset
+		bar.querySelector('[data-am-config-btn]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-option="free-tier"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		// Click Edit
+		bar.querySelector('[data-am-config-edit]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		// Form should be open with the config's name/description pre-filled
+		const nameInput = bar.querySelector('[data-am-config-name]');
+		assert.ok(nameInput, "name input is visible in edit form");
+		assert.equal(nameInput.value, "Free Tier", "name is pre-filled with current config name");
+		// Change the name
+		nameInput.value = "Budget Tier";
+		nameInput.dispatchEvent("input");
+		await new Promise((r) => setTimeout(r, 5));
+		// Save
+		bar.querySelector('[data-am-config-save-submit]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		// Verify POST includes editId
+		const saveCall = fetchCalls.find((c) => c.url.includes("/configs/save"));
+		assert.ok(saveCall, "POST /configs/save was made");
+		assert.equal(saveCall.body.name, "Budget Tier");
+		assert.equal(saveCall.body.editId, "free-tier", "editId is sent when editing");
+	});
+
+	it("saves a named config via POST /configs/save and closes the form", async () => {
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		bar.querySelector('[data-am-config-save]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		// Type a name
+		const nameInput = bar.querySelector('[data-am-config-name]');
+		nameInput.value = "My Setup";
+		nameInput.dispatchEvent("input");
+		await new Promise((r) => setTimeout(r, 5));
+		// Save
+		bar.querySelector('[data-am-config-save-submit]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		// Verify POST
+		const saveCall = fetchCalls.find((c) => c.url.includes("/configs/save"));
+		assert.ok(saveCall, "POST /configs/save was made");
+		assert.equal(saveCall.body.name, "My Setup");
+		// Form is closed, dropdown is shown
+		assert.equal(bar.querySelector('[data-am-config-name]'), null, "name input is gone (form closed)");
+		assert.ok(bar.querySelector('[data-am-config-select]'), "select is back after save");
+		// Diag records the write
+		assert.match(container.querySelector(".am-diag").textContent, /save-config/);
+	});
+
+	it("does not save when the name is empty", async () => {
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		bar.querySelector('[data-am-config-save]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		// Type and then clear
+		const nameInput = bar.querySelector('[data-am-config-name]');
+		nameInput.value = "";
+		nameInput.dispatchEvent("input");
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-save-submit]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		const saveCall = fetchCalls.find((c) => c.url.includes("/configs/save"));
+		assert.equal(saveCall, undefined, "no POST /configs/save when name is empty");
+	});
+
+	it("applies a selected preset via POST /configs/apply", async () => {
+		// Override fetch so /state returns a config list
+		globalThis.fetch = async (url, init = {}) => {
+			const method = init.method ?? "GET";
+			const body = init.body ? JSON.parse(init.body) : null;
+			fetchCalls.push({ url: String(url), method, body });
+			if (String(url).includes("/state")) return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+			if (String(url).includes("/configs/apply")) return { ok: true, status: 200, json: async () => ({ ok: true, id: body.id, name: "Free Tier", summary: { applied: 3, invalid: 0 }, report: STATE_WITH_CONFIG }) };
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		// Open the dropdown and select a preset
+		const btn = bar.querySelector('[data-am-config-btn]');
+		assert.ok(btn, "dropdown button exists");
+		btn.click();
+		await new Promise((r) => setTimeout(r, 5));
+		const option = bar.querySelector('[data-am-config-option="free-tier"]');
+		assert.ok(option, "free-tier option is visible in dropdown");
+		option.click();
+		await new Promise((r) => setTimeout(r, 5));
+		// Apply
+		bar.querySelector('[data-am-config-apply]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		// Verify POST
+		const applyCall = fetchCalls.find((c) => c.url.includes("/configs/apply"));
+		assert.ok(applyCall, "POST /configs/apply was made");
+		assert.deepEqual(applyCall.body, { id: "free-tier" });
+		// Diag records the write
+		assert.match(container.querySelector(".am-diag").textContent, /write apply:free-tier/);
+	});
+
+	it("shows an error when apply returns an error payload", async () => {
+		globalThis.fetch = async (url, init = {}) => {
+			const method = init.method ?? "GET";
+			const body = init.body ? JSON.parse(init.body) : null;
+			fetchCalls.push({ url: String(url), method, body });
+			if (String(url).includes("/state")) return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+			if (String(url).includes("/configs/apply")) return { ok: false, status: 500, json: async () => ({ ok: false, error: "server exploded" }) };
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		const btn = bar.querySelector('[data-am-config-btn]');
+		btn.click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-option="free-tier"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-apply]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		const err = bar.querySelector(".am-config-err");
+		assert.ok(err, "an error is shown in the config bar");
+		assert.match(err.textContent, /server exploded/);
+	});
+
+	it("deletes a selected preset via POST /configs/delete after confirmation", async () => {
+		globalThis.fetch = async (url, init = {}) => {
+			const method = init.method ?? "GET";
+			const body = init.body ? JSON.parse(init.body) : null;
+			fetchCalls.push({ url: String(url), method, body });
+			if (String(url).includes("/state")) return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+			if (String(url).includes("/configs/delete")) return { ok: true, status: 200, json: async () => ({ ok: true, deleted: body.id, configs: [] }) };
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		const btn = bar.querySelector('[data-am-config-btn]');
+		btn.click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-option="free-tier"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-delete]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		// Verify POST
+		const delCall = fetchCalls.find((c) => c.url.includes("/configs/delete"));
+		assert.ok(delCall, "POST /configs/delete was made");
+		assert.deepEqual(delCall.body, { id: "free-tier" });
+		// Config removed: dropdown button shows "No saved presets" (configs is now empty)
+		const newBar = container.querySelector(".am-configs-bar");
+		const newBtn = newBar.querySelector('[data-am-config-btn]');
+		assert.match(newBtn.textContent, /No saved presets/);
 	});
 });

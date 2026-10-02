@@ -20,10 +20,14 @@
  *      via kind:"view": the stock client navigates to view:"plugin:agent-models"
  *      on click, so no client handler is involved.
  *   1. right-panel tab (manifest "view": true) -> client fetches GET /state
- *   2. GET  /plugins-api/agent-models/state     -> JSON report (catalog, models, facets)
+ *   2. GET  /plugins-api/agent-models/state     -> JSON report (catalog, models, facets, configs)
  *   3. POST /plugins-api/agent-models/set-model -> rewrite one agent's model pin
  *   4. POST /plugins-api/agent-models/restore   -> restore an agent's newest backup
- *   5. /agent-models slash command -> same table as text, no browser needed
+ *   5. GET  /plugins-api/agent-models/configs    -> full saved-config list (with pins)
+ *   6. POST /plugins-api/agent-models/configs/save   -> snapshot current pins under a name
+ *   7. POST /plugins-api/agent-models/configs/apply  -> batch-set all pins from a saved config
+ *   8. POST /plugins-api/agent-models/configs/delete -> remove a saved config
+ *   9. /agent-models slash command -> same table as text, no browser needed
  *
  * WRITE PATH SAFETY (POST /set-model): the agent name is validated against the
  * files actually discovered in .pi/agents (never interpolated blindly), the
@@ -61,6 +65,14 @@ const BACKUP_DIR = ".pi/agent-models/backups";
 const COSTS_PATH = ".pi/agent-models/costs.json";
 /** Report cache: cheap to rebuild, but /state is polled by the tab. */
 const STATE_TTL_MS = 5000;
+
+/**
+ * Named model configurations — snapshots of every agent's model pin that the
+ * user can save and swap between (e.g. "free models", "cheaper models",
+ * "premium models"). Stored workspace-relative alongside costs/backups so no
+ * extra directory grant is needed beyond the fs:write the plugin already holds.
+ */
+const CONFIGS_PATH = ".pi/agent-models/configs.json";
 
 const EXCLUDED_AGENTS = new Set(["glitch-omni", "memory-paid"]);
 
@@ -150,6 +162,47 @@ async function countBackups(host) {
 		/* no backups yet */
 	}
 	return counts;
+}
+
+/** Read saved model configurations. Returns [] if the file is absent or unreadable. */
+async function readConfigs(host) {
+	try {
+		const doc = JSON.parse(await host.fs.readText(CONFIGS_PATH));
+		return Array.isArray(doc?.configs) ? doc.configs : [];
+	} catch {
+		return [];
+	}
+}
+
+/** Write configs back to disk (workspace-relative, no extra grant needed). */
+async function writeConfigs(host, configs) {
+	try {
+		await host.fs.mkdir(".pi/agent-models");
+	} catch {
+		/* already there */
+	}
+	await host.fs.write(CONFIGS_PATH, JSON.stringify({ configs }, null, 1));
+}
+
+/** Stable slug from a display name: "Free Models" -> "free-models". */
+function slugifyConfigId(name) {
+	return String(name ?? "")
+		.toLowerCase()
+				.trim()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "") || "config";
+}
+
+/** Summary of one config for the /state payload: no pins, just metadata. */
+function configSummary(config) {
+	return {
+		id: config.id,
+		name: config.name,
+		description: config.description ?? null,
+		createdAt: config.createdAt,
+		updatedAt: config.updatedAt,
+		agentCount: config.pins ? Object.keys(config.pins).length : 0,
+	};
 }
 
 export default definePlugin({
@@ -242,6 +295,8 @@ export default definePlugin({
 				row.contextWindow = info?.contextWindow ?? null;
 				row.backups = backupCounts.get(row.name) ?? 0;
 			}
+			// Saved configurations summary (no pins) — the client polls /state.
+			report.configs = (await readConfigs(host)).map(configSummary);
 			return report;
 		}
 
@@ -385,6 +440,198 @@ export default definePlugin({
 					await host.fs.write(file, restored);
 					host.log(`restored ${agent} from ${backups[0]} (pre-restore state saved as ${safety})`);
 					json(res, 200, { ok: true, agent, restoredFrom: backups[0], safety, report: await state(true) });
+				} catch (err) {
+					json(res, 500, { ok: false, error: err?.message ?? String(err) });
+				}
+			}),
+		);
+
+		/**
+		 * GET /configs — full config list (with pins). The /state payload already
+		 * ships a lightweight summary; this is for inspection and for the CLI.
+		 */
+		cleanup.push(
+			host.route("GET", "/configs", async (_req, res) => {
+				try {
+					const configs = await readConfigs(host);
+					json(res, 200, { ok: true, configs });
+				} catch (err) {
+					json(res, 500, { ok: false, error: err?.message ?? String(err) });
+				}
+			}),
+		);
+
+		/**
+		 * POST /configs/save — snapshot every agent's current model pin under a name.
+		 * The server reads the live state (not the client's cache), so the snapshot
+		 * is always current regardless of when the client last polled.
+		 */
+		cleanup.push(
+			host.route("POST", "/configs/save", async (req, res) => {
+				try {
+					const body = req && typeof req.body === "object" && req.body !== null ? req.body : {};
+					const name = String(body.name ?? "").trim();
+					const description = String(body.description ?? "").trim() || null;
+					const editId = String(body.editId ?? "").trim() || null;
+					if (!name || name.length > 80) {
+						return json(res, 400, { ok: false, error: "name is required (max 80 chars)" });
+					}
+
+					const existing = await readConfigs(host);
+					const now = new Date().toISOString();
+
+					let config;
+					if (editId) {
+						// Editing an existing config: rename it, keep its pins.
+						const prev = existing.find((c) => c.id === editId);
+						if (!prev) {
+							return json(res, 404, { ok: false, error: "config not found: " + editId });
+						}
+						config = {
+							...prev,
+							id: editId,
+							name,
+							description,
+							updatedAt: now,
+						};
+						const updated = existing.filter((c) => c.id !== editId);
+						updated.push(config);
+						updated.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+						await writeConfigs(host, updated);
+						host.log("renamed config: " + prev.name + " -> " + name + " (" + editId + ")");
+						json(res, 200, { ok: true, config: configSummary(config), report: await state(true) });
+					} else {
+						// New config: capture current pins.
+						const report = await state(true);
+						const pins = {};
+						for (const row of report.rows) {
+							pins[row.name] = row.pin; // null if inheriting
+						}
+						const id = slugifyConfigId(name);
+						config = {
+							id,
+							name,
+							description,
+							createdAt: existing.find((c) => c.id === id)?.createdAt ?? now,
+							updatedAt: now,
+							pins,
+							agentCount: Object.keys(pins).length,
+						};
+						const updated = existing.filter((c) => c.id !== id);
+						updated.push(config);
+						updated.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+						await writeConfigs(host, updated);
+						host.log("saved config: " + name + " (" + id + ") - " + Object.keys(pins).length + " pins");
+						json(res, 200, {
+							ok: true,
+							config: configSummary(config),
+							report: await state(true),
+						});
+					}
+				} catch (err) {
+					json(res, 500, { ok: false, error: err?.message ?? String(err) });
+				}
+			}),
+		);
+
+		/**
+		 * POST /configs/apply — batch-set every agent pin from a saved config.
+		 *
+		 * Each affected file is backed up first (same as the /set-model write path),
+		 * so a mistaken apply is roll-back-able per-agent. Pins whose model is not
+		 * in the live catalog are skipped and reported rather than failing the batch:
+		 * a config saved with a key active may outlive that key's validity, and the
+		 * user should still apply the pins that ARE still available.
+		 */
+		cleanup.push(
+			host.route("POST", "/configs/apply", async (req, res) => {
+				try {
+					const body = req && typeof req.body === "object" && req.body !== null ? req.body : {};
+					const id = String(body.id ?? "").trim();
+					if (!id) {
+						return json(res, 400, { ok: false, error: "config id is required" });
+					}
+
+					const configs = await readConfigs(host);
+					const config = configs.find((c) => c.id === id);
+					if (!config) {
+						return json(res, 404, { ok: false, error: `config not found: ${id}` });
+					}
+
+					const catalog = await readCatalog(host);
+					const files = await listAgentFiles(host);
+					const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+					const applied = [];
+					const skipped = [];
+					const invalid = [];
+
+					for (const [agent, model] of Object.entries(config.pins ?? {})) {
+						// Safety: same validation as /set-model.
+						if (!/^[A-Za-z0-9._-]+$/.test(agent)) {
+							skipped.push({ agent, model, reason: "invalid agent name" });
+							continue;
+						}
+						if (!files.includes(`${agent}.md`)) {
+							skipped.push({ agent, model, reason: "agent file no longer exists" });
+							continue;
+						}
+						if (model && model !== "" && !catalog.ids.has(model)) {
+							invalid.push({ agent, model, reason: "model not in live catalog" });
+							continue;
+						}
+
+						const file = `${AGENTS_DIR}/${agent}.md`;
+						const before = await host.fs.readText(file);
+						const edit = setModelInFrontmatter(before, model || null);
+						if (!edit.ok || !edit.changed) continue;
+
+						try {
+							await host.fs.mkdir(BACKUP_DIR);
+						} catch {
+							/* already there */
+						}
+						const backup = `${BACKUP_DIR}/config-apply-${config.id}-${agent}-${stamp}.md`;
+						await host.fs.write(backup, before);
+						await host.fs.write(file, edit.text);
+						applied.push({ agent, model: model || null, previous: edit.previous, backup });
+					}
+
+					if (applied.length) {
+						host.log(
+							`applied config "${config.name}": ${applied.length} updated, ${invalid.length} skipped (invalid), ${skipped.length} skipped (missing)`,
+						);
+					}
+					json(res, 200, {
+						ok: true,
+						id,
+						name: config.name,
+						summary: { applied: applied.length, invalid: invalid.length, skipped: skipped.length, invalidList: invalid, skippedList: skipped },
+						report: await state(true),
+					});
+				} catch (err) {
+					json(res, 500, { ok: false, error: err?.message ?? String(err) });
+				}
+			}),
+		);
+
+		/** POST /configs/delete — remove a saved configuration. */
+		cleanup.push(
+			host.route("POST", "/configs/delete", async (req, res) => {
+				try {
+					const body = req && typeof req.body === "object" && req.body !== null ? req.body : {};
+					const id = String(body.id ?? "").trim();
+					if (!id) {
+						return json(res, 400, { ok: false, error: "config id is required" });
+					}
+					const configs = await readConfigs(host);
+					const remaining = configs.filter((c) => c.id !== id);
+					if (remaining.length === configs.length) {
+						return json(res, 404, { ok: false, error: `config not found: ${id}` });
+					}
+					await writeConfigs(host, remaining);
+					host.log(`deleted config ${id}`);
+					json(res, 200, { ok: true, deleted: id, configs: remaining.map(configSummary) });
 				} catch (err) {
 					json(res, 500, { ok: false, error: err?.message ?? String(err) });
 				}

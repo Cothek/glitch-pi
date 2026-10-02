@@ -27,7 +27,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SCRIPT_DIR = __dirname;
 const ROOT_DIR = resolve(SCRIPT_DIR, '..');
-const PI_ROOT = process.env.GLITCH_PI_ROOT || 'E:\\Glitch AI\\glitch-pi';
+// Portable default: the launcher's own repo root, so any install folder launches
+// ITS OWN pi (engine + workspace + data all relative to it). GLITCH_PI_ROOT still
+// overrides for restart tooling that pins a specific install. Identical behavior
+// for the live install, where ROOT_DIR is the previously hardcoded path.
+const PI_ROOT = process.env.GLITCH_PI_ROOT || ROOT_DIR;
 const isWin = process.platform === 'win32';
 
 const MAGENTA = '\x1b[35m';

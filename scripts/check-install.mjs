@@ -10,7 +10,7 @@
  *   1 = one or more critical components missing
  */
 
-import { existsSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
 import { execFileSync, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -32,9 +32,15 @@ const NODE_BUNDLED = isWin
 const CLOUDFLARED = isWin
   ? join(ROOT_DIR, 'cloudflared.exe')
   : join(ROOT_DIR, 'cloudflared');
-const OPENCODE_BIN = isWin
-  ? join(ROOT_DIR, 'opencode', 'opencode.exe')
-  : join(ROOT_DIR, 'opencode', 'opencode');
+// Pi engine entry points (kept in sync with scripts/bootstrap-pi.ps1).
+// Windows layout: npm globals land in data/node/node_modules; unix uses
+// data/node/lib/node_modules. Both are checked.
+const piNodeModulesDir = isWin
+  ? join(ROOT_DIR, 'data', 'node', 'node_modules')
+  : join(ROOT_DIR, 'data', 'node', 'lib', 'node_modules');
+const PI_CLI_JS = join(piNodeModulesDir, '@earendil-works', 'pi-coding-agent', 'dist', 'bundle', 'cli.js');
+const PI_PKG_JSON = join(piNodeModulesDir, '@earendil-works', 'pi-coding-agent', 'package.json');
+const PI_WEB_UI_ENTRY = join(piNodeModulesDir, 'pi-web-ui', 'bin', 'pi-web-ui.mjs');
 const HANDY_BIN = isWin
   ? join(ROOT_DIR, 'handy-voice', 'Handy', 'handy.exe')
   : isMac
@@ -149,22 +155,51 @@ check('Node.js', 'Core', () => {
   };
 });
 
-check('OpenCode', 'Core', () => {
-  const exePath = isWin ? 'opencode/opencode.exe' : 'opencode/opencode';
-  if (!existsSync(OPENCODE_BIN)) {
+// Reads the version out of an installed npm package.json (best-effort).
+function readPkgVersion(pkgJsonPath) {
+  try {
+    const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'));
+    return pkg && pkg.version ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+// The Pi CLI is the fork's engine (TUI mode). bootstrap-pi.ps1 installs it as an
+// npm global into data/node; launch-pi.mjs spawns its dist/bundle/cli.js.
+check('Pi CLI', 'Core', () => {
+  if (!existsSync(PI_CLI_JS)) {
     return {
       ok: false,
       version: null,
       path: null,
-      note: 'install: scripts/bootstrap.ps1',
+      note: 'install: scripts/bootstrap-pi.ps1 (npm -g @earendil-works/pi-coding-agent)',
     };
   }
-  const v = tryReadVersion(OPENCODE_BIN);
   return {
     ok: true,
-    version: v || 'unknown',
-    path: exePath,
-    note: null,
+    version: readPkgVersion(PI_PKG_JSON) || 'unknown',
+    path: 'data/node/node_modules/@earendil-works/pi-coding-agent',
+    note: 'pi engine (TUI)',
+  };
+});
+
+// pi-web-ui is the fork's Web delivery (web stack on :8787). Installed by the
+// same bootstrap step; start-pi-stack.ps1 runs its bin/pi-web-ui.mjs.
+check('pi-web-ui', 'Core', () => {
+  if (!existsSync(PI_WEB_UI_ENTRY)) {
+    return {
+      ok: false,
+      version: null,
+      path: null,
+      note: 'install: scripts/bootstrap-pi.ps1 (npm -g pi-web-ui)',
+    };
+  }
+  return {
+    ok: true,
+    version: readPkgVersion(join(piNodeModulesDir, 'pi-web-ui', 'package.json')) || 'unknown',
+    path: 'data/node/node_modules/pi-web-ui',
+    note: 'web delivery (stack)',
   };
 });
 
@@ -459,43 +494,20 @@ check('Image Gen', 'Tools', () => {
 // --- Config ---
 
 check('Agent Config', 'Config', () => {
-  const opencodeDir = join(ROOT_DIR, '.opencode');
-  const agentsDir = join(opencodeDir, 'agents');
-  const pluginsDir = join(opencodeDir, 'plugins');
-  if (!existsSync(opencodeDir)) {
+  // The Pi fork's agent organs live under .pi/ (profiles, subagents, extensions).
+  const piDir = join(ROOT_DIR, '.pi');
+  const profilesDir = join(piDir, 'agent-profiles');
+  const agentsDir = join(piDir, 'agents');
+  const extensionsDir = join(piDir, 'extensions');
+  if (!existsSync(piDir)) {
     return {
       ok: false,
       version: null,
       path: null,
-      note: '.opencode/ missing -- repo incomplete',
+      note: '.pi/ missing -- repo incomplete',
     };
   }
-  const hasAgents = existsSync(agentsDir);
-  const hasPlugins = existsSync(pluginsDir);
-  if (!hasAgents || !hasPlugins) {
-    return {
-      ok: false,
-      version: null,
-      path: null,
-      note: `missing ${!hasAgents ? 'agents/' : ''}${!hasAgents && !hasPlugins ? ' and ' : ''}${!hasPlugins ? 'plugins/' : ''}`,
-    };
-  }
-  return {
-    ok: true,
-    version: 'present',
-    path: '.opencode/{agents,plugins}',
-    note: null,
-  };
-});
-
-check('Config Templates', 'Config', () => {
-  const templates = [
-    'opencode-normal.json',
-    'opencode-free.json',
-    'opencode-local.json',
-    'opencode-safe.json',
-  ];
-  const missing = templates.filter((t) => !existsSync(join(ROOT_DIR, 'config', t)));
+  const missing = [!existsSync(profilesDir) && 'agent-profiles/', !existsSync(agentsDir) && 'agents/', !existsSync(extensionsDir) && 'extensions/'].filter(Boolean);
   if (missing.length > 0) {
     return {
       ok: false,
@@ -506,8 +518,43 @@ check('Config Templates', 'Config', () => {
   }
   return {
     ok: true,
-    version: '4/4',
-    path: 'config/opencode-*.json',
+    version: 'present',
+    path: '.pi/{agent-profiles,agents,extensions}',
+    note: null,
+  };
+});
+
+// .pi/skills is generated from the glitch-memorycore submodule by
+// scripts/sync-skills.mjs --pi (bootstrap-pi.ps1 step 5). Empty here means the
+// TUI starts with zero engine skills.
+check('Engine Skills', 'Config', () => {
+  const skillsDir = join(ROOT_DIR, '.pi', 'skills');
+  if (!existsSync(skillsDir)) {
+    return {
+      ok: false,
+      version: null,
+      path: null,
+      note: 'run: node scripts/sync-skills.mjs --pi',
+    };
+  }
+  let count = 0;
+  try {
+    count = readdirSync(skillsDir).length;
+  } catch {
+    count = 0;
+  }
+  if (count === 0) {
+    return {
+      ok: false,
+      version: '0',
+      path: '.pi/skills',
+      note: 'empty -- run: node scripts/sync-skills.mjs --pi',
+    };
+  }
+  return {
+    ok: true,
+    version: String(count),
+    path: '.pi/skills',
     note: null,
   };
 });
@@ -578,7 +625,7 @@ check('Glitch Head', 'Config', () => {
 // Run + Report
 // ---------------------------------------------------------------------------
 
-const CRITICAL = new Set(['Node.js', 'OpenCode', 'Git Repo', 'glitch-memorycore']);
+const CRITICAL = new Set(['Node.js', 'Pi CLI', 'pi-web-ui', 'Git Repo', 'glitch-memorycore']);
 
 function runAll() {
   const results = checks.map((c) => ({ name: c.name, group: c.group, ...c.run() }));

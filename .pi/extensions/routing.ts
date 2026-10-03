@@ -23,20 +23,33 @@
  *      Bypass: "quick task" / --no-plan. Ownership: a session may only
  *      mutate its own plan file and the shared data/plans/archive —
  *      cross-session plan writes/moves/deletes are blocked (plan-paths.mjs).
- *   2. Dispatch-First: code-file edit or destructive bash without a prior
- *      task() dispatch within 120s. glitch-omni warns instead of blocks.
+ *   2. Dispatch-First: every mutating tool or shell command (per
+ *      .pi/lib/mutating-ops.mjs) without a fresh dispatch credit. Each
+ *      successful task/dispatch/subagent_spawn/delegate_task adds +1 credit;
+ *      every mutating call consumes 1. glitch-omni warns instead of blocks.
  *   3. Review Gate: git commit when pendingReview && lastCode > lastReview.
  *      Bypass: --no-verify.
  *
  * GATE MODES (2026-09-23 fixes)
  *   - REPO_ROOT walks up from cwd to the nearest .git/.pi (sessions started
  *     in subdirectories like data/node resolved plan/marker paths wrong).
+ *   - REPO_ROOT is seeded from ctx.cwd on session_start (setRepoRoot) and
+ *     MUST match agent-switcher.ts's root, or the gate reads a different
+ *     user/agent-mode.json than the prompt was built from. process.cwd() is
+ *     a pre-session fallback only; session_start re-seeds from ctx.cwd.
  *   - Dispatcher-spawned sub-agents (GLITCH_SUBAGENT=1) skip the primary's
  *     gates — matches the OpenCode design where sub-agents ran plugin-free.
  *   - Primary glitch-omni mode (user/agent-mode.json "mode": "glitch-omni")
  *     gets warn-only dispatch gates, same as the omni sub-agent. The mode
  *     file is re-read on every gated call, so mid-session switches via the
  *     /agent extension (agent-switcher.ts) apply immediately.
+ *
+ * STRICT DISPATCH GATE (2026-10-03, feat/strict-dispatch-gate):
+ *   The dispatch-first gate is now CREDIT-BASED with NO time window. Each
+ *   task/subagent_spawn/delegate_task success adds +1 credit; every mutating
+ *   tool/bash call (per .pi/lib/mutating-ops.mjs) consumes 1 credit. Zero
+ *   credit → block. The old 120s window is removed entirely. The bypass
+ *   phrase "self-execute" in the prompt still opts out (warned).
  *
  * REVIEW PASS MARKER
  *   On reviewer task result with PASS verdict → run scripts/write-review-pass.mjs
@@ -60,6 +73,14 @@ import {
   isPlanPath,
   sessionPlanPath,
 } from "../lib/plan-paths.mjs";
+// Strict dispatch-gate classifier — dependency-free lib, unit-tested in
+// .pi/lib/mutating-ops.test.mjs. Powers the credit-based dispatch-first
+// gate (replaces the old 120s time window).
+import {
+  explainMutatingCall,
+  isMutatingBashCommand,
+  isMutatingToolCall,
+} from "../lib/mutating-ops.mjs";
 
 // --- Paths (resolve repo root by walking up from cwd to the nearest .git/.pi) ---
 function resolveRepoRoot(startDir: string): string {
@@ -101,7 +122,6 @@ function setRepoRoot(root: string): void {
 }
 
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
-const DISPATCH_WINDOW_MS = 120_000; // 120s
 const QUALITY_PASS_MAX_AGE_MS = 30 * 60 * 1000; // 30 min — review marker freshness for direct-exec commits
 
 // --- Primary agent mode (user/agent-mode.json, re-read per call so mid-session
@@ -490,6 +510,10 @@ export default function (pi: ExtensionAPI) {
   // Global "any dispatch" stamp. edit/bash calls carry no agent key, so the
   // per-agent map alone can never satisfy their window check.
   let lastDispatchTime = 0;
+  // Strict dispatch-gate credit. Every successful task/dispatch/subagent_spawn/
+  // delegate_task adds +1; every mutating tool/bash call consumes 1.
+  // Replaces the old 120s time window — credit is the only constraint now.
+  let dispatchCredit = 0;
   let pendingReview = false;
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
@@ -684,6 +708,48 @@ export default function (pi: ExtensionAPI) {
           // task dispatch itself is allowed in dispatch-first modes; timestamp recorded after via tool_execution_end
         }
 
+        // --- Strict dispatch-first gate (covers every mutating tool call) ---
+        // The old 120s time window is GONE. Every mutating tool (edit / write /
+        // patch / multi_edit / apply_patch / notebook_edit / browser_page mutating
+        // ops, etc. — see isMutatingToolCall) consumes 1 dispatchCredit; each
+        // successful task/dispatch/subagent_spawn/delegate_task adds +1.
+        if (isMutatingToolCall(event.toolName, (event as any).input)) {
+          const normalizedPath = extractFilePath((event as any).input).replace(/\\/g, "/");
+          // Memory files, config files, plan files, and the shared plan archive
+          // stay writable by the primary without spending a credit.
+          if (normalizedPath && isExemptFile(normalizedPath)) return undefined;
+          if (normalizedPath) {
+            const planClass = classifyPlanPath(normalizedPath, currentSessionID);
+            if (planClass === "owned" || planClass === "shared") return undefined;
+          }
+          const promptHint = String((event as any).input?.prompt || "");
+          if (promptHint.toLowerCase().includes("self-execute")) {
+            console.warn("[routing] dispatch-first bypassed via 'self-execute'");
+            return undefined;
+          }
+          if (isGlitchOmni) {
+            console.warn(`[routing] Warning: Agent ${agentName} making mutating ${event.toolName} call directly — glitch-omni mode`);
+            return undefined;
+          }
+          if (dispatchCredit <= 0) {
+            const target = normalizedPath || `command ${String((event as any).input?.command || "").trim() || "(no command)"}`;
+            const isCodeLike = normalizedPath ? isCodeFile(normalizedPath) : true;
+            const suggestedAgent = isCodeLike ? "coder" : "general";
+            return {
+              block: true,
+              reason:
+                `⛔ Dispatch-First Violation: mutating ${event.toolName} call without a prior sub-agent dispatch.\n` +
+                `Target: ${target}\n` +
+                `Classifier: ${explainMutatingCall(event.toolName, (event as any).input)}\n` +
+                `You MUST dispatch a sub-agent first (e.g. delegate_task with agent: "${suggestedAgent}"). ` +
+                `Every mutating tool call consumes 1 dispatch credit; task/dispatch/subagent_spawn/delegate_task each add +1. There is NO time window.\n` +
+                "Exempt: memory files (user/*.md), config files (opencode.json), this session's own plan file, the shared plan archive.\n" +
+                'Bypass phrase (use sparingly): include "self-execute" in the prompt.',
+            };
+          }
+          dispatchCredit -= 1;
+        }
+
         // --- edit / write gates ---
         if (event.toolName === "edit" || event.toolName === "write") {
           const filePath = extractFilePath((event as any).input);
@@ -722,24 +788,8 @@ export default function (pi: ExtensionAPI) {
             }
           }
 
-          // Dispatch-First (dispatch-reflex)
-          if (!isExemptFile(filePath) && isCodeFile(filePath)) {
-            const lastTask = Math.max(lastTaskTime.get(agentName) || 0, lastDispatchTime);
-            const timeSinceTask = Date.now() - lastTask;
-            if (timeSinceTask > DISPATCH_WINDOW_MS) {
-              if (isGlitchOmni) {
-                console.warn(`[routing] Warning: Agent ${agentName} editing directly — glitch-omni mode`);
-              } else {
-                return {
-                  block: true,
-                  reason:
-                    `⛔ Dispatch-First Violation: Direct edit on ${filePath} without prior subagent dispatch.\n` +
-                    `You MUST dispatch to a sub-agent first (delegate_task or subagent_spawn, e.g. delegate_task with agent: "coder" for code) before editing files directly.\n` +
-                    "Exempt: memory files (user/*.md), config files (opencode.json), and git operations.",
-                };
-              }
-            }
-          }
+          // Dispatch-First is now handled by the strict dispatch-first gate
+          // above (covers every mutating tool, credit-based, no time window).
         }
 
         // --- bash gates ---
@@ -764,23 +814,31 @@ export default function (pi: ExtensionAPI) {
             }
           }
 
-          // Destructive bash → dispatch-first
-          if (shouldBlockDestructiveBash(command)) {
-            const lastTask = Math.max(lastTaskTime.get(agentName) || 0, lastDispatchTime);
-            const timeSinceTask = Date.now() - lastTask;
-            if (timeSinceTask > DISPATCH_WINDOW_MS) {
-              if (isGlitchOmni) {
-                console.warn(`[routing] Warning: Agent ${agentName} running destructive bash directly — glitch-omni mode`);
-              } else {
-                return {
-                  block: true,
-                  reason:
-                    "⛔ Dispatch-First Violation: Direct destructive bash command without prior subagent dispatch.\n" +
-                    `Command: ${command}\n` +
-                    'You MUST dispatch to a sub-agent first (delegate_task or subagent_spawn, e.g. delegate_task with agent: "general") before running destructive commands.\n' +
-                    "Exempt: read-only commands, git operations (git add, commit, push, pull).",
-                };
-              }
+          // Mutating bash (lib + destructive fallback) → strict dispatch-first gate.
+          // isMutatingBashCommand covers every shell mutator (mv / sed -i / npm
+          // test / node script.mjs / redirection / pipes to tee / etc.);
+          // shouldBlockDestructiveBash is the older rm/del/Move-Item fallback
+          // kept for parity with the old gate.
+          if (isMutatingBashCommand(command) || shouldBlockDestructiveBash(command)) {
+            const promptHint = String((event as any).input?.prompt || "");
+            if (promptHint.toLowerCase().includes("self-execute")) {
+              console.warn("[routing] dispatch-first bypassed via 'self-execute'");
+            } else if (isGlitchOmni) {
+              console.warn(`[routing] Warning: Agent ${agentName} running mutating bash directly — glitch-omni mode`);
+            } else if (dispatchCredit <= 0) {
+              return {
+                block: true,
+                reason:
+                  `⛔ Dispatch-First Violation: mutating bash command without a prior sub-agent dispatch.\n` +
+                  `Command: ${command}\n` +
+                  `Classifier: ${explainMutatingCall("bash", (event as any).input)}\n` +
+                  'You MUST dispatch a sub-agent first (e.g. delegate_task with agent: "general"). ' +
+                  `Every mutating shell command consumes 1 dispatch credit; task/dispatch/subagent_spawn/delegate_task each add +1. There is NO time window.\n` +
+                  "Exempt: read-only commands, git operations (git add, commit, push, pull).\n" +
+                  'Bypass phrase (use sparingly): include "self-execute" in the prompt.',
+              };
+            } else {
+              dispatchCredit -= 1;
             }
           }
 
@@ -837,6 +895,12 @@ export default function (pi: ExtensionAPI) {
         const agentName = extractAgentName(args);
         lastTaskTime.set(agentName, Date.now());
         lastDispatchTime = Date.now();
+        // Strict dispatch-gate credit (see .pi/lib/mutating-ops.mjs). Each
+        // successful dispatch adds +1; the gate then consumes 1 per mutating
+        // tool/bash call. The lastTaskTime / lastDispatchTime bookkeeping above
+        // is preserved byte-identical so the Review Gate and Quality Gate keep
+        // working — dispatchCredit is an INDEPENDENT counter.
+        dispatchCredit += 1;
 
         if (CODE_WRITING_AGENTS.has(agentName)) {
           pendingReview = true;

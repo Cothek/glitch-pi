@@ -487,13 +487,23 @@ if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
 } else {
     # Git NOT on the global PATH (or no bash beside it). Provision if needed, then ask to persist.
     if ((-not $gitPath) -or -not (Test-BashBesideGit -GitExe $gitPath)) {
-        # Check if MinGit was already downloaded to the install dir (partial re-run)
+        # Check if MinGit was already downloaded to the install dir (partial re-run).
+        # Only reuse when bash.exe sits beside git.exe: an earlier install may
+        # have left a busybox MinGit (git.exe present, no bash). In that case
+        # wipe the stale tree and fall through to the normal provisioning path
+        # so we download a full (bashful) MinGit instead.
         $existingBundledGit = Join-Path $InstallDir "data\mingit\cmd\git.exe"
+        $existingBundledBash = Join-Path $InstallDir "data\mingit\usr\bin\bash.exe"
         if (Test-Path $existingBundledGit) {
-            $gitPath = $existingBundledGit
-            $env:PATH = "$(Split-Path $gitPath -Parent);$env:PATH"
-            Write-Step "Using existing bundled Git at $gitPath"
-            $gitNeedsPersistence = $true
+            if (Test-Path $existingBundledBash) {
+                $gitPath = $existingBundledGit
+                $env:PATH = "$(Split-Path $gitPath -Parent);$env:PATH"
+                Write-Step "Using existing bundled Git at $gitPath"
+                $gitNeedsPersistence = $true
+            } else {
+                Write-Step "Existing bundled MinGit has no bash (busybox build) - re-provisioning full MinGit"
+                Remove-Item (Join-Path $InstallDir "data\mingit") -Recurse -Force -ErrorAction SilentlyContinue
+            }
         } else {
             if ($gitPath) {
                 Write-Warn "Git found at $gitPath but no bash beside it - Glitch needs bash, provisioning MinGit..."
@@ -505,16 +515,27 @@ if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
             $gitStagedDir = Join-Path $env:TEMP "glitch-mingit"
             $gitBin = Join-Path $gitStagedDir "cmd\git.exe"
 
-            # Try to get latest release URL from GitHub API
+            # Try to get latest release URL from GitHub API. NOTE: the glob
+            # 'MinGit-*-64-bit.zip' also matches the busybox variant
+            # ('MinGit-<ver>-busybox-64-bit.zip'), which ships git.exe but NO
+            # usr\bin\bash.exe. Exclude busybox deterministically and fall
+            # back to the hardcoded full build if no non-busybox asset is
+            # available rather than throwing "No MinGit asset found".
             try {
                 $apiUrl = "https://api.github.com/repos/git-for-windows/git/releases/latest"
                 $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10
-                $minGitAsset = $release.assets | Where-Object { $_.name -like "MinGit-*-64-bit.zip" } | Select-Object -First 1
+                $minGitAsset = $release.assets | Where-Object { $_.name -like "MinGit-*-64-bit.zip" -and $_.name -notlike "*busybox*" } | Select-Object -First 1
                 if ($minGitAsset) {
                     $downloadUrl = $minGitAsset.browser_download_url
                     Write-Step "  Found: $($minGitAsset.name)"
                 } else {
-                    throw "No MinGit asset found in latest release"
+                    # No non-busybox asset in the latest release (or the API
+                    # response was empty). Fall through to the known-good full
+                    # MinGit URL below; do NOT throw "No MinGit asset found"
+                    # because that would mask a busybox-only release with a
+                    # generic message.
+                    $downloadUrl = "https://github.com/git-for-windows/git/releases/download/v2.47.0.windows.2/MinGit-2.47.0.2-64-bit.zip"
+                    Write-Step "  No non-busybox MinGit asset in latest release; using fixed MinGit 2.47.0.2"
                 }
             } catch {
                 # Fallback to known good version
@@ -536,6 +557,15 @@ if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
 
                 if (-not (Test-Path $gitBin)) {
                     throw "MinGit binary not found after extraction at $gitBin"
+                }
+                # Also require usr\bin\bash.exe: the busybox MinGit variant ships
+                # git.exe but no bash, and Glitch's tools require bash. Fail loud
+                # with an actionable message instead of silently staging a
+                # bashless git that will break every downstream bash invocation.
+                $gitBash = Join-Path $gitStagedDir "usr\bin\bash.exe"
+                if (-not (Test-Path $gitBash)) {
+                    Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
+                    throw "Downloaded MinGit build has no bash (busybox variant). Delete the staged folder and install Git for Windows from https://git-scm.com/download/win - Glitch's tools require bash."
                 }
                 $env:PATH = "$gitStagedDir\cmd;$gitStagedDir\usr\bin;$env:PATH"
                 $gitPath = $gitBin
@@ -685,6 +715,13 @@ if (-not (Test-Path "$InstallDir\.git")) {
         Copy-Item "$gitStagedDir\*" $finalGitDir -Recurse -Force
         if (-not (Test-Path (Join-Path $finalGitDir "cmd\git.exe"))) {
             throw "MinGit copy failed: $finalGitDir\cmd\git.exe missing after copy"
+        }
+        # Mirror the extraction check at the final location: a busybox build
+        # would copy fine but leave us with a bashless bundled git at the
+        # canonical data\mingit path, breaking every future launch.
+        if (-not (Test-Path (Join-Path $finalGitDir "usr\bin\bash.exe"))) {
+            Remove-Item $finalGitDir -Recurse -Force -ErrorAction SilentlyContinue
+            throw "Installed MinGit build has no bash (busybox variant). Delete $finalGitDir and install Git for Windows from https://git-scm.com/download/win - Glitch's tools require bash."
         }
         Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $env:TEMP "glitch-mingit.zip") -Force -ErrorAction SilentlyContinue

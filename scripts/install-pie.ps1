@@ -152,6 +152,29 @@ function Test-GitInPersistedPath {
 function Test-BashBesideGit {
     param([string]$GitExe)
     if (-not $GitExe) { return $false }
+    # Strategy 1 (NEW): ask git itself via --exec-path. A shim / scoop /
+    # portable git on PATH can have a real root no ancestor walk resolves;
+    # git --exec-path is the authoritative answer and we strip the trailing
+    # \mingw64\libexec\git-core / \mingw64\libexec / \libexec\git-core to
+    # get the git ROOT, then probe usr\bin and bin under it.
+    $execPath = $null
+    try { $execPath = (& $GitExe --exec-path 2>$null | Select-Object -First 1) } catch { $execPath = $null }
+    if ($execPath) {
+        $root = $execPath.Trim().Trim('"')
+        # git on Windows emits POSIX-style paths from --exec-path; normalize to backslashes.
+        $rootBack = $root -replace '/', '\\'
+        $matched = $false
+        foreach ($suffix in @('\mingw64\libexec\git-core', '\mingw64\libexec', '\libexec\git-core')) {
+            if ($rootBack.ToLower().EndsWith($suffix)) {
+                $root = $rootBack.Substring(0, $rootBack.Length - $suffix.Length)
+                $matched = $true
+                break
+            }
+        }
+        if (-not $matched -and ($root -ne $rootBack)) { $root = $rootBack }
+        if ($root -and (Test-Path (Join-Path $root 'usr\bin\bash.exe'))) { return $true }
+        if ($root -and (Test-Path (Join-Path $root 'bin\bash.exe'))) { return $true }
+    }
     # Walk up to 4 ancestors: <git>/cmd -> ... -> <gitroot>. Probe usr\bin then
     # bin at each level. Mirrors bashBesideGitExe in check-install.mjs.
     $dir = Split-Path $GitExe -Parent
@@ -447,6 +470,16 @@ $gitStagedDir = $null
 $gitNeedsPersistence = $false
 $gitPath = (Get-Command git -ErrorAction SilentlyContinue).Source
 if (-not $gitPath) { $gitPath = Get-PersistedGitPath }
+
+# Bash is resolved via `git --exec-path` FIRST (see Test-BashBesideGit) so a
+# shim / scoop / portable git on PATH whose real root the ancestor walk
+# cannot reach is still recognised. The ancestor walk + bare-bash-on-PATH
+# pass remain as fallbacks.
+if (Test-BashBesideGit -GitExe $gitPath) {
+    Write-Step "  bash available for Glitch's scripts"
+} else {
+    Write-Step "  no bash beside git - MinGit (which includes bash) will be provisioned"
+}
 
 if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
     # Git + bash already on the global (persisted) PATH -- nothing to do.
@@ -1114,8 +1147,29 @@ if (Test-Path $cuaBin) {
     $dcCfg = Join-Path $dcCfgDir "desktop-control.json"
     $dcEnabled = (Test-Path $cuaBin) -and ($cuaPresent -or ($cuaAnswer -match '^[Yy]'))
     if (-not (Test-Path $dcCfg)) {
+        # Missing-file write: first run -- write the initial state.
         New-Item -ItemType Directory -Path $dcCfgDir -Force | Out-Null
         "{ `"enabled`": $($dcEnabled.ToString().ToLower()) }" | Set-Content -Path $dcCfg -Encoding UTF8
+    } elseif (($cuaAnswer -match '^[Yy]') -and (Test-Path $cuaBin)) {
+        # Repair an existing enabled:false. An earlier run whose cua install
+        # failed (e.g. execution policy) wrote enabled:false here and the
+        # file was never repaired, so launch-unified.mjs skipped the daemon
+        # forever. When the driver is now present and the user opted in
+        # THIS run, flip a stale false to true; never downgrade.
+        try {
+            $dcExisting = Get-Content -LiteralPath $dcCfg -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($dcExisting.enabled -eq $false) {
+                # Match the original missing-file write style (no -Compress,
+                # single-line space-separated) so a re-read sees the same
+                # shape it had before. ConvertTo-Json's default 4-space indent
+                # would change file formatting on every repair.
+                '{ "enabled": true }' | Set-Content -LiteralPath $dcCfg -Encoding UTF8
+            }
+        } catch {
+            # Parse failure (truncated file, hand-edit, etc.) -- warn and
+            # leave the file alone so we never silently corrupt it.
+            Write-Warn "  Could not parse $dcCfg -- leaving it untouched: $($_.Exception.Message)"
+        }
     }
 }
 

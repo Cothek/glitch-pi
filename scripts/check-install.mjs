@@ -11,7 +11,7 @@
  */
 
 import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -335,20 +335,68 @@ function findBashViaSystemGit() {
     const t = d.trim().replace(/^"|"$/g, '');
     if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); pathDirs.push(t); }
   }
-  // Pass 1: every PATH dir with git.exe; resolve bash by walking up from git.exe.
+  // Collect git.exe candidates (every PATH dir that contains git.exe). We
+  // reuse this list for the FAILURE note so the user can see what was probed.
+  const gitCandidates = [];
   for (const dir of pathDirs) {
     const gitExe = join(dir, 'git.exe');
-    if (!existsSync(gitExe)) continue;
+    if (existsSync(gitExe)) gitCandidates.push(gitExe);
+  }
+  // Helper: derive the git ROOT from `git --exec-path` output by stripping
+  // the trailing \mingw64\libexec\git-core / \mingw64\libexec / \libexec\git-core.
+  // Returns null when the exec fails or the result does not look like a path.
+  function rootFromExecPath(gitExe) {
+    let out;
+    try {
+      out = spawnSync(gitExe, ['--exec-path'], { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch { return null; }
+    if (!out || out.status !== 0 || !out.stdout) return null;
+    let root = String(out.stdout).split(/\r?\n/)[0].trim().replace(/^"|"$/g, '');
+    if (!root) return null;
+    // Normalize forward slashes (git on Windows emits POSIX-style paths).
+    const rootLower = root.replace(/\//g, '\\').toLowerCase();
+    for (const suffix of ['\\mingw64\\libexec\\git-core', '\\mingw64\\libexec', '\\libexec\\git-core']) {
+      const idx = rootLower.lastIndexOf(suffix);
+      if (idx >= 0 && idx + suffix.length === rootLower.length) {
+        root = root.slice(0, idx);
+        break;
+      }
+    }
+    return root || null;
+  }
+  // Pass 1 (NEW): ask git itself via --exec-path. git on PATH can be a
+  // chocolatey shim, scoop or portable install whose real root no
+  // dirname(dirname()) walk resolves; --exec-path gives the layout-proof
+  // root and we probe usr\bin/bash.exe + bin/bash.exe under it.
+  for (const gitExe of gitCandidates) {
+    const root = rootFromExecPath(gitExe);
+    if (!root) continue;
+    for (const rel of [['usr', 'bin', 'bash.exe'], ['bin', 'bash.exe']]) {
+      const candidate = join(root, ...rel);
+      if (existsSync(candidate)) return candidate;
+    }
+    // Also try the cmd/git.exe convention even when --exec-path yielded a
+    // non-empty root (covers layouts where git.exe is in cmd\ and bash is
+    // under cmd\..\usr\bin, which the ancestor walk already covers -- kept
+    // as a safety net).
+    const cmdGit = join(root, 'cmd', 'git.exe');
+    if (existsSync(cmdGit)) {
+      const bash = bashBesideGitExe(cmdGit);
+      if (bash) return bash;
+    }
+  }
+  // Pass 2: every PATH dir with git.exe; resolve bash by walking up from git.exe.
+  for (const gitExe of gitCandidates) {
     const bash = bashBesideGitExe(gitExe);
     if (bash) return bash;
   }
-  // Pass 2: bare bash.exe sitting directly in a PATH dir (scoop/chocolatey
+  // Pass 3: bare bash.exe sitting directly in a PATH dir (scoop/chocolatey
   // shims, standalone MinGit, etc.) -- git on PATH not required.
   for (const dir of pathDirs) {
     const bashExe = join(dir, 'bash.exe');
     if (existsSync(bashExe)) return bashExe;
   }
-  // Pass 3: last-ditch known install roots. git.exe may live in cmd\ or bin\.
+  // Pass 4: last-ditch known install roots. git.exe may live in cmd\ or bin\.
   const roots = [
     process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs', 'Git') : null,
     'C:\\Program Files\\Git',
@@ -363,6 +411,11 @@ function findBashViaSystemGit() {
       if (bash) return bash;
     }
   }
+  // Attach diagnostic info so callers can produce a self-explaining note.
+  findBashViaSystemGit.lastDiagnostics = {
+    gitCandidates,
+    bareBashOnPath: pathDirs.some((d) => existsSync(join(d, 'bash.exe'))),
+  };
   return null;
 }
 
@@ -386,11 +439,16 @@ check('Bash (MinGit)', 'Tools', () => {
         note: 'system git bash',
       };
     }
+    const diag = findBashViaSystemGit.lastDiagnostics || { gitCandidates: [], bareBashOnPath: false };
+    const candList = diag.gitCandidates.length
+      ? diag.gitCandidates.join(', ')
+      : '(none on PATH)';
+    const bareOnPath = diag.bareBashOnPath ? 'yes' : 'no';
     return {
       ok: false,
       version: null,
       path: null,
-      note: 'Bash not found: git is present but no bash sits beside it. Re-run the installer to provision the bundled MinGit (which includes bash), or install Git for Windows.',
+      note: `Bash not found. git.exe candidates: ${candList}; bare bash.exe on PATH: ${bareOnPath}. Re-run the installer to provision the bundled MinGit (includes bash), or install Git for Windows.`,
     };
   }
   const v = safeExec('bash', ['--version']);

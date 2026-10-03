@@ -2,7 +2,7 @@
 name: vision
 description: "Image and visual content analysis. Analyzes screenshots, UI mockups, diagrams, and other visual content. <example> User: Why does this UI look off? [screenshot] Agent: Using vision to analyze the screenshot. </example> <example> User: What bug is visible in this error screen? Agent: Using ..."
 tools: read, find, ls, webfetch
-model: commandcode/Qwen/Qwen3.7-Flash
+model: nvidia/z-ai/glm-5.3-flash
 ---
 
 

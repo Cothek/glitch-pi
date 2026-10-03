@@ -62,23 +62,43 @@ import {
 } from "../lib/plan-paths.mjs";
 
 // --- Paths (resolve repo root by walking up from cwd to the nearest .git/.pi) ---
-function resolveRepoRoot(): string {
-  let dir = process.cwd();
+function resolveRepoRoot(startDir: string): string {
+  let dir = startDir;
   while (true) {
     if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".pi"))) return dir;
     const parent = dirname(dir);
-    if (parent === dir) return process.cwd();
+    if (parent === dir) return startDir;
     dir = parent;
   }
 }
-const REPO_ROOT = resolveRepoRoot();
-const REVIEW_PASS_SCRIPT = join(REPO_ROOT, "scripts", "write-review-pass.mjs");
-const MARKER_PATH = join(REPO_ROOT, "data", ".review-pass.json");
+// SEEDING CONTRACT (2026-10-03 incident):
+// This root MUST resolve exactly like agent-switcher.ts's root, or the gate reads
+// a different user/agent-mode.json than the prompt was built from.
+// agent-switcher.ts seeds from ctx.cwd. Seeding from process.cwd() instead made
+// the pi server resolve E:/Glitch AI/glitch-pi (it owns .git AND .pi) while the
+// session resolved E:/Glitch AI (owns .pi only) — two roots, two markers, and the
+// gate read a 5-day-stale "glitch-omni". Consequences: the primary in glitch mode
+// was HARD BLOCKED from dispatching (no-dispatch gate) yet only WARNED when
+// editing code, and non-destructive bash went ungated entirely.
+// process.cwd() is kept only as the pre-session fallback; session_start re-seeds
+// from ctx.cwd before any gated call can happen.
+let REPO_ROOT = resolveRepoRoot(process.cwd());
+let REVIEW_PASS_SCRIPT = join(REPO_ROOT, "scripts", "write-review-pass.mjs");
+let MARKER_PATH = join(REPO_ROOT, "data", ".review-pass.json");
 // Plan files are SESSION-SCOPED: data/plans/sessions/<sessionID>/current-plan.md
 // (built by planMarkerPath() below, canonical form in ../lib/plan-paths.mjs).
 // The old shared data/plans/current-plan.md let concurrent sessions overwrite
 // and archive each other's live plans — incident logged in user/current-session.md.
-const AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
+let AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
+
+/** Re-seed the root and every path derived from it. Called once on session_start
+ *  with the session cwd, so the root and its four dependants stay consistent. */
+function setRepoRoot(root: string): void {
+  REPO_ROOT = root;
+  REVIEW_PASS_SCRIPT = join(REPO_ROOT, "scripts", "write-review-pass.mjs");
+  MARKER_PATH = join(REPO_ROOT, "data", ".review-pass.json");
+  AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
+}
 
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const DISPATCH_WINDOW_MS = 120_000; // 120s
@@ -474,8 +494,25 @@ export default function (pi: ExtensionAPI) {
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
   let currentSessionID: string | null = null;
+  // Host-subagent detection (2026-10-03). See the SUBAGENT EXEMPTION note at
+  // the tool_call early-return below. Only ever true under pi-web-ui, where an
+  // in-memory session with no transcript file is the signature of a delegated
+  // sub-agent conversation.
+  let isHostSubagent = false;
 
   pi.on("session_start", async (_event, ctx) => {
+    // Identify host sub-agents (pi-web-ui delegated conversations) BEFORE any
+    // gate runs. They are in-process conversations with an in-memory session:
+    // no transcript file, no session_info. The rename enforcer below already
+    // relies on exactly this distinction, so it is a proven detector.
+    try {
+      const f = (ctx as any)?.sessionManager?.getSessionFile?.();
+      const underWebUi = Boolean(process.env.PI_WEB_PORT || process.env.PI_WEB_TOKEN);
+      isHostSubagent = underWebUi && !(typeof f === "string" && f);
+    } catch {
+      isHostSubagent = false;
+    }
+
     const sid =
       (ctx as any).sessionID ||
       (ctx as any).sessionId ||
@@ -610,7 +647,21 @@ export default function (pi: ExtensionAPI) {
         // Sub-agent sessions (dispatcher-spawned, GLITCH_SUBAGENT=1) run without
         // the primary's workflow gates — matches the OpenCode design where
         // sub-agents were plugin-free.
+        // SUBAGENT EXEMPTION (2026-10-03). Dispatching to a sub-agent is the
+        // whole point of the gate, so the delegate must be able to do the work.
+        // Two spawn paths exist and BOTH must skip the primary's gates:
+        //   - legacy dispatcher.ts `task()` → separate `pi -p` process, flagged
+        //     GLITCH_SUBAGENT=1. Always worked.
+        //   - R6 host sub-agents (delegate_task / subagent_spawn) → in-process
+        //     conversations under pi-web-ui, env flag NOT set. These were gated
+        //     like a primary, so a delegated coder got Plan-First + Dispatch-First
+        //     blocks on its own writes and deadlocked: the only bypass phrase
+        //     (`self-execute`) is defined by the very gate that was blocking it.
+        // Exempting them restores the OpenCode design this file was ported from
+        // ("sub-agents ran plugin-free"). `underWebUi` is required so a TUI
+        // primary that somehow lacks a transcript file is never exempted.
         if (process.env.GLITCH_SUBAGENT === "1") return undefined;
+        if (isHostSubagent) return undefined;
 
         const agentName = extractAgentName((event as any).input);
         const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimaryMode();

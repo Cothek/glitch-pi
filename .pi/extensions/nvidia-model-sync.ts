@@ -29,6 +29,7 @@ import { spawn, execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { safeUi } from "../../.pi/lib/ctx-guard.mjs";
 
 /** Walk up from cwd to the repo root (same pattern as routing.ts). */
 function resolveRepoRoot(): string {
@@ -115,7 +116,7 @@ export default function (pi: ExtensionAPI) {
         );
       });
       const isError = /failed|fatal|no API key/i.test(resultLine);
-      ctx.ui.notify(resultLine, isError ? "warning" : "info");
+      safeUi(ctx).notify(resultLine, isError ? "warning" : "info");
     },
   });
 }

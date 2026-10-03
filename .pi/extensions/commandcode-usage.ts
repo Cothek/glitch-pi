@@ -31,6 +31,7 @@ import {
 	renderStatusText,
 	type UsageSnapshot,
 } from "../../scripts/lib/commandcode-usage.mjs";
+import { safeUi } from "../../.pi/lib/ctx-guard.mjs";
 
 const WIDGET_KEY = "commandcode-usage";
 const STATUS_KEY = "cc-usage";
@@ -120,7 +121,7 @@ export default function commandcodeUsageExtension(pi: ExtensionAPI) {
 			ctx = (c as unknown) as AnyCtx;
 			const ok = await refresh();
 			paint();
-			c.ui.notify(
+			safeUi(c).notify(
 				ok && snap
 					? renderDetailText(snap, new Date())
 					: "Command Code usage unavailable — check API key / network",

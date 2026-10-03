@@ -56,6 +56,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Key } from "@earendil-works/pi-tui";
+import { guard, safeUi } from "../../.pi/lib/ctx-guard.mjs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -194,8 +195,9 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 	}
 
 	function setStatus(ctx: ExtensionContext) {
-		if (activeModeId) ctx.ui.setStatus("agent", `agent:${activeModeId}`);
-		else ctx.ui.setStatus("agent", undefined);
+		const ui = safeUi(ctx);
+		if (activeModeId) ui.setStatus("agent", `agent:${activeModeId}`);
+		else ui.setStatus("agent", undefined);
 	}
 
 	/** Apply model / thinking / tools pinned by a profile (explicit switches only). */
@@ -210,9 +212,9 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 				: undefined;
 			if (model) {
 				const ok = await pi.setModel(model);
-				if (!ok) ctx.ui.notify(`agent: no API key for ${c.model}`, "warning");
+				if (!ok) safeUi(ctx).notify(`agent: no API key for ${c.model}`, "warning");
 			} else {
-				ctx.ui.notify(`agent: model "${c.model}" not found in registry (skipped)`, "warning");
+				safeUi(ctx).notify(`agent: model "${c.model}" not found in registry (skipped)`, "warning");
 			}
 		}
 		if (c.thinking) {
@@ -222,7 +224,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 			const known = new Set(pi.getAllTools().map((t) => t.name));
 			const valid = c.tools.filter((t) => known.has(t));
 			const invalid = c.tools.filter((t) => !known.has(t));
-			if (invalid.length > 0) ctx.ui.notify(`agent: unknown tools skipped: ${invalid.join(", ")}`, "warning");
+			if (invalid.length > 0) safeUi(ctx).notify(`agent: unknown tools skipped: ${invalid.join(", ")}`, "warning");
 			if (valid.length > 0) pi.setActiveTools(valid);
 		}
 	}
@@ -232,7 +234,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 		const profile = profileById(modeId);
 		if (!profile) {
 			const available = profiles.map((p) => p.id).join(", ") || "(none found in .pi/agent-profiles)";
-			ctx.ui.notify(`agent: unknown mode "${modeId}". Available: ${available}`, "error");
+			safeUi(ctx).notify(`agent: unknown mode "${modeId}". Available: ${available}`, "error");
 			return;
 		}
 
@@ -274,8 +276,8 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 			);
 		}
 
+		safeUi(ctx).notify(`Agent switched to ${modeId}`, "info");
 		setStatus(ctx);
-		ctx.ui.notify(`Agent switched to ${modeId}`, "info");
 	}
 
 	// ---- /agent command -----------------------------------------------------
@@ -299,7 +301,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 			}
 
 			if (profiles.length === 0) {
-				ctx.ui.notify("agent: no profiles in .pi/agent-profiles/", "warning");
+				safeUi(ctx).notify("agent: no profiles in .pi/agent-profiles/", "warning");
 				return;
 			}
 
@@ -309,8 +311,8 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 				const desc = p.config.description ? ` — ${p.config.description}` : "";
 				return `${active}${p.id}${desc}`;
 			});
-			const choice = await ctx.ui.select("Switch agent mode (enter to select, esc to cancel):", options);
-			if (choice === undefined) return;
+			const choice = await safeUi(ctx).select("Switch agent mode (enter to select, esc to cancel):", options);
+			if (!choice) return;
 			const modeId = choice.replace(/^\*\s*/, "").split(" — ")[0].trim();
 			if (modeId) await switchTo(modeId, ctx);
 		},
@@ -323,7 +325,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 		handler: async (ctx) => {
 			const order = profiles;
 			if (order.length === 0) {
-				ctx.ui.notify("agent: no profiles in .pi/agent-profiles/", "warning");
+				safeUi(ctx).notify("agent: no profiles in .pi/agent-profiles/", "warning");
 				return;
 			}
 			const currentIdx = order.findIndex((p) => p.id === activeModeId);
@@ -355,7 +357,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 				activeModeId = marker;
 				announcedMode = marker; // the UI already notified; keep the transcript clean
 				try {
-					ctx.ui.setStatus("agent", `agent:${marker}`);
+					safeUi(ctx).setStatus("agent", `agent:${marker}`);
 				} catch {
 					/* status is cosmetic */
 				}
@@ -425,31 +427,33 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 	// ---- Session lifecycle -----------------------------------------------------
 
 	pi.on("session_start", async (_event, ctx) => {
-		repoRoot = resolveRepoRoot(ctx.cwd);
-		profiles = loadProfiles(repoRoot);
+		await guard("agent-switcher", async () => {
+			repoRoot = resolveRepoRoot(ctx.cwd);
+			profiles = loadProfiles(repoRoot);
 
-		// Restore from session entries first (mode switched mid-session before)
-		let restored: string | null = null;
-		for (const entry of ctx.sessionManager.getEntries()) {
-			if (entry.type === "custom" && entry.customType === "agent-mode-state") {
-				const mode = (entry.data as { mode?: string } | undefined)?.mode;
-				if (typeof mode === "string") restored = mode;
+			// Restore from session entries first (mode switched mid-session before)
+			let restored: string | null = null;
+			for (const entry of ctx.sessionManager.getEntries()) {
+				if (entry.type === "custom" && entry.customType === "agent-mode-state") {
+					const mode = (entry.data as { mode?: string } | undefined)?.mode;
+					if (typeof mode === "string") restored = mode;
+				}
 			}
-		}
 
-		// Fresh session → repo-global marker decides (consistent with restart flow)
-		const fromFile = readModeFile(join(repoRoot, "user", "agent-mode.json"));
+			// Fresh session → repo-global marker decides (consistent with restart flow)
+			const fromFile = readModeFile(join(repoRoot, "user", "agent-mode.json"));
 
-		const mode = restored && profileById(restored)
-			? restored
-			: fromFile && profileById(fromFile)
-				? fromFile
-				: null;
-		if (mode) {
-			activeModeId = mode;
-			announcedMode = mode; // don't announce on restore — prompt patch is enough
-		}
-		setStatus(ctx);
-		registerSwitchTool();
+			const mode = restored && profileById(restored)
+				? restored
+				: fromFile && profileById(fromFile)
+					? fromFile
+					: null;
+			if (mode) {
+				activeModeId = mode;
+				announcedMode = mode; // don't announce on restore — prompt patch is enough
+			}
+			setStatus(ctx);
+			registerSwitchTool();
+		});
 	});
 }

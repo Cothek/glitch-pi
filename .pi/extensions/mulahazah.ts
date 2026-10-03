@@ -47,6 +47,7 @@ import { promises as fs, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, AgentMessage, TextContent } from "@earendil-works/pi-coding-agent";
 import { burstThresholdFromEnv, computeTurnTokens, formatTokenCount, shouldFireBurst } from "../lib/mulahazah-burst.mjs";
+import { guard, safeUi } from "../../.pi/lib/ctx-guard.mjs";
 
 // --- Constants (mirrors scripts/lib/mulahazah-helpers.mjs) ---
 const HEARTBEAT_INTERVAL_MS = 45 * 60 * 1000; // 45 min (was 15 min, Troy 2026-08-19; raised 2026-09-30, over-firing fix)
@@ -401,21 +402,23 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     // Prefer ctx session id if available; fallback to stable "default".
-    const sid =
-      (ctx as any).sessionID ||
-      (ctx as any).sessionId ||
-      (ctx.sessionManager as any)?.sessionId ||
-      (ctx.sessionManager as any)?.id ||
-      "default";
-    currentSessionID = String(sid);
-    getSessionState(currentSessionID);
+    await guard("mulahazah", async () => {
+      const sid =
+        (ctx as any).sessionID ||
+        (ctx as any).sessionId ||
+        (ctx.sessionManager as any)?.sessionId ||
+        (ctx.sessionManager as any)?.id ||
+        "default";
+      currentSessionID = String(sid);
+      getSessionState(currentSessionID);
 
-    await loadState();
-    startHeartbeatTimer();
+      await loadState();
+      startHeartbeatTimer();
 
-    if (process.env.MULAHAZAH_DEBUG && ctx.hasUI) {
-      ctx.ui.notify(`[mulahazah] active session=${currentSessionID}`, "info");
-    }
+      if (process.env.MULAHAZAH_DEBUG && ctx.hasUI) {
+        safeUi(ctx).notify(`[mulahazah] active session=${currentSessionID}`, "info");
+      }
+    });
   });
 
   pi.on("tool_execution_start", async (event: any) => {

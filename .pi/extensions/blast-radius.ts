@@ -42,6 +42,7 @@ import { promises as fs } from "node:fs";
 import { join, relative, isAbsolute } from "node:path";
 import { spawn } from "node:child_process";
 import type { ExtensionAPI, AgentMessage, TextContent } from "@earendil-works/pi-coding-agent";
+import { guard } from "../../.pi/lib/ctx-guard.mjs";
 
 const SIGNAL_TTL_MS = 5 * 60 * 1000; // 5 min
 const COOLDOWN_MS = 30 * 1000; // per-file cooldown
@@ -192,13 +193,15 @@ export default function (pi: ExtensionAPI) {
   // --- Event wiring ---
 
   pi.on("session_start", async (_event, ctx) => {
-    const sid =
-      (ctx as any).sessionID ||
-      (ctx as any).sessionId ||
-      (ctx.sessionManager as any)?.sessionId ||
-      (ctx.sessionManager as any)?.id ||
-      "default";
-    currentSessionID = String(sid);
+    await guard("blast-radius", async () => {
+      const sid =
+        (ctx as any).sessionID ||
+        (ctx as any).sessionId ||
+        (ctx.sessionManager as any)?.sessionId ||
+        (ctx.sessionManager as any)?.id ||
+        "default";
+      currentSessionID = String(sid);
+    });
   });
 
   // Pre-tool: capture blast radius for edit/write (fire-and-forget, non-blocking).

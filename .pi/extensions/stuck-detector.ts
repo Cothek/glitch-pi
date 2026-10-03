@@ -49,6 +49,7 @@ import {
   type HistoryEntry,
   type StuckSignal,
 } from "./stuck-detector-logic.mts";
+import { guard } from "../../.pi/lib/ctx-guard.mjs";
 
 const SIGNAL_TTL_MS = 15 * 60 * 1000;
 const SIGNAL_COOLDOWN_MS = 10 * 60 * 1000;
@@ -184,14 +185,16 @@ export default function (pi: ExtensionAPI) {
   // --- Event wiring ---
 
   pi.on("session_start", async (_event, ctx) => {
-    const sid =
-      (ctx as any).sessionID ||
-      (ctx as any).sessionId ||
-      (ctx.sessionManager as any)?.sessionId ||
-      (ctx.sessionManager as any)?.id ||
-      "default";
-    currentSessionID = String(sid);
-    getHistory(currentSessionID);
+    await guard("stuck-detector", async () => {
+      const sid =
+        (ctx as any).sessionID ||
+        (ctx as any).sessionId ||
+        (ctx.sessionManager as any)?.sessionId ||
+        (ctx.sessionManager as any)?.id ||
+        "default";
+      currentSessionID = String(sid);
+      getHistory(currentSessionID);
+    });
   });
 
   // Capture args at execution start (tool_execution_end does not carry them).

@@ -326,12 +326,21 @@ try {
 
 # Banner
 $BannerVersionContent = if ($InstallerCommit) { "v$InstallerVersion - commit $InstallerCommit ($Branch)" } else { "v$InstallerVersion" }
-$BannerPad = [Math]::Max(0, [Math]::Floor((77 - $BannerVersionContent.Length) / 2))
-$BannerVersionLine = "|" + (" " * $BannerPad) + $BannerVersionContent + (" " * [Math]::Max(0, 77 - $BannerPad - $BannerVersionContent.Length)) + "|"
+# Center every banner line programmatically. The hand-counted literal lines
+# used to be 80-81 chars wide against a 79-char border, so the right | landed
+# past the border's + and wrapped on 80-column consoles.
+function Format-BannerLine([string]$text) {
+    $padTotal = [Math]::Max(0, 77 - $text.Length)
+    $left = [Math]::Floor($padTotal / 2)
+    return "|" + (" " * $left) + $text + (" " * ($padTotal - $left)) + "|"
+}
+$BannerLine1 = Format-BannerLine "GLITCH PIE INSTALLER (Windows)"
+$BannerLine2 = Format-BannerLine "Personal AI Companion - Persistent Memory"
+$BannerVersionLine = Format-BannerLine $BannerVersionContent
 Write-Host @"
 +=============================================================================+
-|                         GLITCH PIE INSTALLER (Windows)                        |
-|                    Personal AI Companion - Persistent Memory                 |
+$BannerLine1
+$BannerLine2
 $BannerVersionLine
 +=============================================================================+
 "@ -ForegroundColor Magenta

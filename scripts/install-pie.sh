@@ -253,12 +253,23 @@ fi
 BANNER_PAD=$(( (77 - ${#BANNER_VERSION_CONTENT}) / 2 ))
 if [ "$BANNER_PAD" -lt 0 ]; then BANNER_PAD=0; fi
 BANNER_VERSION_LINE="║$(printf '%*s' "$BANNER_PAD" '')${BANNER_VERSION_CONTENT}$(printf '%*s' $((77 - BANNER_PAD - ${#BANNER_VERSION_CONTENT})) '')║"
+# Center every banner line at the same 77-char inner width as the borders.
+# The hand-counted literal lines used to render at four different widths
+# (81/81/80/80/79), so the right ║ never lined up with the border corners.
+banner_line() {
+    local text="$1"
+    local pad=$(( (77 - ${#text}) / 2 ))
+    if [ "$pad" -lt 0 ]; then pad=0; fi
+    local right=$((77 - pad - ${#text}))
+    if [ "$right" -lt 0 ]; then right=0; fi
+    printf '║%*s%s%*s║' "$pad" '' "$text" "$right" ''
+}
 cat <<EOF
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                         GLITCH PIE INSTALLER (macOS/Linux)                    ║
-║                    Personal AI Companion - Persistent Memory                 ║
+╔$(printf '═%.0s' {1..77})╗
+$(banner_line "GLITCH PIE INSTALLER (macOS/Linux)")
+$(banner_line "Personal AI Companion - Persistent Memory")
 $BANNER_VERSION_LINE
-╚══════════════════════════════════════════════════════════════════════════════╝
+╚$(printf '═%.0s' {1..77})╝
 EOF
 
 # 1. Check prerequisites

@@ -868,3 +868,134 @@ describe("plugin: config routes", () => {
 			assert.equal(p.error, "config not found: does-not-exist");
 		});
 });
+
+describe("plugin: POST /set-models (bulk write path)", () => {
+	let host;
+	let files;
+	let writes;
+	let route;
+
+	before(async () => {
+		const { readdirSync, readFileSync } = await import("node:fs");
+		const root = fixtureWorkspace();
+		const dir = join(root, ".pi", "agents");
+		files = new Map();
+		for (const name of readdirSync(dir)) files.set(name, readFileSync(join(dir, name), "utf-8"));
+		writes = [];
+
+		host = createMockHost({
+			cwd: root,
+			fs: {
+				list: async () => [...files.keys()].sort().map((name) => ({ name, type: "file" })),
+				readText: async (rel) => {
+					const name = rel.split("/").pop();
+					if (!files.has(name)) throw new Error(`ENOENT ${rel}`);
+					return files.get(name);
+				},
+				write: async (rel, data) => {
+					writes.push({ rel, data: String(data) });
+					if (rel.startsWith(".pi/agents/")) files.set(rel.split("/").pop(), String(data));
+				},
+				mkdir: async () => {},
+			},
+			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
+		});
+		await plugin.activate(host);
+		route = host.mock.routes.find((r) => r.method === "POST" && r.path === "/set-models");
+	});
+
+	function post(body) {
+		return new Promise((resolve) => {
+			const res = {
+				writeHead() {},
+				end(b) {
+					try {
+						resolve(JSON.parse(b));
+					} catch (err) {
+						resolve({ parseError: String(err), raw: b });
+					}
+				},
+			};
+			route.handler({ url: "/set-models", headers: {}, body }, res);
+		});
+	}
+
+	it("registers POST /set-models", () => {
+		assert.ok(route, "POST /set-models should be registered");
+	});
+
+	it("applies ONE model to MANY agents and backs each one up", async () => {
+		const model = [...CATALOG].find((id) => !id.startsWith("opencode/"));
+		writes.length = 0;
+		const p = await post({ agents: ["coder", "reviewer", "testing"], model });
+		assert.equal(p.ok, true, p.error ?? "");
+		assert.equal(p.model, model);
+		assert.equal(p.summary.requested, 3);
+		assert.equal(p.summary.failed, 0);
+		assert.ok(p.summary.applied >= 1, "at least one agent changed");
+		assert.equal(p.results.length, 3);
+		for (const r of p.results) {
+			assert.equal(r.ok, true, r.reason ?? "");
+			if (r.changed) {
+				assert.equal(r.model, model);
+				assert.ok(r.backup, "a changed file must carry a backup path");
+			}
+		}
+		// Every changed agent file carries the pin on disk.
+		const onDisk = [...files.entries()].filter(([, body]) => body.includes(`model: ${model}`)).map(([n]) => n);
+		assert.ok(onDisk.length >= 1, "at least one agent file now pins the model");
+		// A backup was written for each changed agent (same stamp = one group).
+		const backups = writes.filter((w) => w.rel.includes("/backups/"));
+		assert.equal(backups.length, p.summary.applied, "one backup per changed agent");
+	});
+
+	it("dedupes repeated agent names instead of double-writing", async () => {
+		const model = [...CATALOG].find((id) => !id.startsWith("opencode/"));
+		const p = await post({ agents: ["vision", "vision", " vision "], model });
+		assert.equal(p.ok, true, p.error ?? "");
+		assert.equal(p.summary.requested, 1, "duplicates collapse to one agent");
+		assert.equal(p.results.length, 1);
+	});
+
+	it("treats an empty model as inherit for every selected agent", async () => {
+		const p = await post({ agents: ["coder"], model: null });
+		assert.equal(p.ok, true, p.error ?? "");
+		assert.equal(p.model, null);
+		const r = p.results[0];
+		assert.equal(r.ok, true, r.reason ?? "");
+		if (r.changed) assert.ok(!files.get("coder.md").includes("model:"), "inherit removes the pin line");
+	});
+
+	it("returns 400 when no agent is selected", async () => {
+		const p = await post({ agents: [], model: CATALOG[0] });
+		assert.equal(p.ok, false);
+		assert.equal(p.error, "no agents selected");
+	});
+
+	it("rejects a path-traversal agent name before touching the filesystem", async () => {
+		writes.length = 0;
+		const p = await post({ agents: ["../../secrets"], model: CATALOG[0] });
+		assert.equal(p.ok, false);
+		assert.match(p.error, /invalid agent name/);
+		assert.equal(writes.length, 0, "nothing is written on a rejected name");
+	});
+
+	it("returns 404 for an agent with no file", async () => {
+		const p = await post({ agents: ["coder", "nope"], model: CATALOG[0] });
+		assert.equal(p.ok, false);
+		assert.match(p.error, /unknown agent\(s\): nope/);
+	});
+
+	it("rejects a model that is not in the live catalog", async () => {
+		const p = await post({ agents: ["coder"], model: "nobody/no-such-model" });
+		assert.equal(p.ok, false);
+		assert.match(p.error, /not an available model/);
+	});
+
+	it("rejects a batch over the 100-agent cap", async () => {
+		const many = Array.from({ length: 101 }, (_, i) => `a${i}`);
+		const p = await post({ agents: many, model: CATALOG[0] });
+		assert.equal(p.ok, false);
+		assert.match(p.error, /too many agents/);
+	});
+});

@@ -28,7 +28,7 @@ const POLL_MS = 15000;
 const STYLE_ID = "agent-models-style";
 const MOUNT_LABEL = "agent-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.4.0";
+const PLUGIN_VERSION = "0.6.1";
 /**
  * Render cap. Deliberately above any realistic catalog size: the catalog is ~500
  * entries and these are plain DOM rows, not a virtual list.
@@ -102,23 +102,31 @@ const STYLE_CSS = `
  * items keep their natural height and the container does what overflow-y:auto is
  * there for: scroll.
  */
-.am-row{border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2);display:flex;flex-direction:column;overflow:hidden;flex:none}
+.am-row{border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2);display:flex;flex-direction:column;overflow:hidden;flex:none;transition:background-color .08s ease-out,border-color .08s ease-out}
+.am-row.am-selected{border-color:var(--accent);background:var(--accent-soft)}
+.am-select-box{flex:none;margin:0;width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
+.am-row-line{display:flex;align-items:center;gap:8px;padding:0 8px;min-height:28px}
+.am-bulk-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2)}
+.am-bulk-count{color:var(--text-dim);font-size:13px;font-family:inherit}
+.am-bulk-note{flex:1 0 100%;padding:0;margin:0;align-self:center;font-family:var(--mono, monospace);font-size:11px;line-height:1.4;color:var(--green);text-align:center;word-break:break-word}
+.am-bulk-picker{flex:1 0 100%;margin-top:4px}
 .am-row.am-open{border-color:var(--accent)}
-.am-row-toggle{display:flex;flex-direction:column;gap:3px;text-align:left;width:100%;padding:8px 10px;margin:0;box-sizing:border-box;background:0 0;border:none;color:var(--text);font:inherit;cursor:pointer}
+.am-row-toggle{display:flex;flex-direction:row;align-items:center;gap:8px;text-align:left;flex:1;min-width:0;padding:4px 0;margin:0;box-sizing:border-box;background:0 0;border:none;color:var(--text);font:inherit;cursor:pointer}
 .am-row-toggle:hover{background:var(--bg-elev)}
 .am-row-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-.am-row-top{display:flex;align-items:center;gap:8px}
-.am-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.am-badge{font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;border:1px solid currentColor;border-radius:5px;padding:1px 5px;flex:none}
-.am-caret{color:var(--text-faint);margin-left:auto;font-size:10px;line-height:1;flex:none;transition:transform .15s}
+.am-name{font-family:var(--mono, monospace);font-size:12px;font-weight:500;flex:0 0 auto;max-width:22%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.am-badge{font-size:11px;font-weight:500;letter-spacing:normal;border:1px solid currentColor;border-radius:4px;padding:0 4px;flex:none;white-space:nowrap}
+.am-caret{color:var(--text-faint);font-size:10px;line-height:1;flex:none;transition:transform .15s}
 .am-row.am-open .am-caret{transform:rotate(180deg)}
-.am-models{font-family:var(--mono, monospace);font-size:11px;color:var(--text-dim);display:flex;align-items:baseline;gap:6px;min-width:0}
+.am-models{font-family:var(--mono, monospace);font-size:11.5px;color:var(--text-dim);display:flex;align-items:center;gap:8px;flex:1;min-width:0;overflow:hidden}
 .am-arrow{color:var(--text-faint);flex:none}
 .am-model{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .am-model.am-pin{color:var(--text-faint)}
+.am-model.am-effective{color:var(--text)}
+.am-issues{font-size:11px;flex:0 1 auto;max-width:28%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help}
 .am-note{font-size:11px;color:var(--text-faint)}
 .am-note.am-warn{color:var(--amber)}
-.am-saved{padding:0 10px 8px;font-size:11px;color:var(--green);font-family:var(--mono, monospace);word-break:break-all}
+.am-saved{padding:0 8px 8px;font-size:11px;color:var(--green);font-family:var(--mono, monospace);word-break:break-all}
 .am-picker{border-top:1px solid var(--border-soft);padding:8px 10px;display:flex;flex-direction:column;gap:6px}
 .am-picker-input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;outline:none;padding:6px 9px;font-size:12px;font-family:var(--mono, monospace)}
 .am-picker-input:focus{border-color:var(--accent)}
@@ -138,7 +146,7 @@ const STYLE_CSS = `
 .am-option-cap{flex:none;color:var(--text-faint);font-size:10px;margin-left:6px}
 .am-rollback{margin-top:2px}
 .am-option.am-current .am-option-cost{color:var(--accent)}
-.am-cost{font-family:var(--mono, monospace);font-size:10.5px;color:var(--text-faint);border:1px solid var(--border-soft);border-radius:5px;padding:0 5px;flex:none;margin-left:6px}
+.am-cost{font-family:var(--mono, monospace);font-size:10.5px;font-variant-numeric:tabular-nums;color:var(--text-faint);border:1px solid var(--border-soft);border-radius:4px;padding:0 4px;flex:none;white-space:nowrap}
 .am-cost.am-free{color:var(--green);border-color:var(--green)}
 .am-cost.am-paid{color:var(--amber);border-color:var(--amber)}
 .am-cost-note{color:var(--text-faint);font-size:10.5px}
@@ -225,6 +233,20 @@ function errorText(err) {
 	return String(err ?? "unknown error");
 }
 
+/**
+ * Error for a response whose body is not JSON (the SPA fallback page). A 404 here
+ * almost always means the RUNNING server predates this route - server routes
+ * register at plugin activation and a page reload alone never re-activates them.
+ */
+function httpError(res) {
+	const status = res?.status ?? 0;
+	const why =
+		status === 404 ? " — route missing on the running server: reload plugins in Settings (or restart pi-web-ui)"
+		: status >= 500 ? " — server error, check the pi-web-ui log"
+		: status === 401 || status === 403 ? " — not authorized"
+		: "";
+	return { ok: false, error: `HTTP ${status}${why}` };
+}
 /** Fetch the report. Never throws: returns {ok:false, error} so the UI can say why. */
 async function fetchState(force) {
 	try {
@@ -245,7 +267,7 @@ async function postSetModel(agent, model) {
 			body: JSON.stringify({ agent, model: model || null }),
 		});
 		const payload = await res.json().catch(() => null);
-		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		if (!payload) return httpError(res);
 		return payload;
 	} catch (err) {
 		return { ok: false, error: errorText(err) };
@@ -267,7 +289,7 @@ async function postRestore(agent) {
 			body: JSON.stringify({ agent }),
 		});
 		const payload = await res.json().catch(() => null);
-		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		if (!payload) return httpError(res);
 		return payload;
 	} catch (err) {
 		return { ok: false, error: errorText(err) };
@@ -283,7 +305,23 @@ async function postSaveConfig(name, description, editId) {
 			body: JSON.stringify({ name, description, editId }),
 		});
 		const payload = await res.json().catch(() => null);
-		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		if (!payload) return httpError(res);
+		return payload;
+	} catch (err) {
+		return { ok: false, error: errorText(err) };
+	}
+}
+
+/** Apply ONE model to MANY agents in one round trip (bulk apply). Never throws. */
+async function postSetModels(agents, model) {
+	try {
+		const res = await fetch(`${API_BASE}/set-models`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agents, model }),
+		});
+		const payload = await res.json().catch(() => null);
+		if (!payload) return httpError(res);
 		return payload;
 	} catch (err) {
 		return { ok: false, error: errorText(err) };
@@ -299,7 +337,7 @@ async function postApplyConfig(id) {
 			body: JSON.stringify({ id }),
 		});
 		const payload = await res.json().catch(() => null);
-		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		if (!payload) return httpError(res);
 		return payload;
 	} catch (err) {
 		return { ok: false, error: errorText(err) };
@@ -315,7 +353,7 @@ async function postDeleteConfig(id) {
 			body: JSON.stringify({ id }),
 		});
 		const payload = await res.json().catch(() => null);
-		if (!payload) return { ok: false, error: `HTTP ${res.status} (unparsable body)` };
+		if (!payload) return httpError(res);
 		return payload;
 	} catch (err) {
 		return { ok: false, error: errorText(err) };
@@ -360,6 +398,15 @@ function createInstance(container, ctx) {
 		configDesc: "",
 		configError: null,
 		savingConfig: false,
+		selected: new Set(),
+		bulkOpen: false,
+		bulkQuery: "",
+		bulkProvider: "all",
+		bulkTier: "all",
+		bulkCapability: "all",
+		bulkError: null,
+		savingBulk: false,
+		bulkNote: null,
 		diag: {
 			mounts: 1,
 			lastAction: "mount",
@@ -372,6 +419,9 @@ function createInstance(container, ctx) {
 
 	/** Live option-area nodes of the open picker, so filtering can update in place. */
 	let pickerRefs = null;
+
+	/** Same idea for the bulk picker's filter chips. */
+	let bulkChipRefs = null;
 
 	const root = el("div", "am-wrap");
 	container.appendChild(root);
@@ -389,6 +439,7 @@ function createInstance(container, ctx) {
 	});
 	head.append(title, sub, el("div", "am-spacer"), refresh);
 
+	const bulkBar = el("div", "am-bulk-bar");
 	const filters = el("div", "am-filters");
 	const filterButtons = new Map();
 	for (const f of FILTERS) {
@@ -407,7 +458,7 @@ function createInstance(container, ctx) {
 	const list = el("div", "am-list");
 	const configBar = el("div", "am-configs-bar");
 	const diagLine = el("div", "am-diag");
-	root.append(head, configBar, filters, list, diagLine);
+	root.append(head, configBar, bulkBar, filters, list, diagLine);
 
 	document.addEventListener?.("keydown", onKeydown);
 		document.addEventListener?.("click", onDocumentClick);
@@ -510,6 +561,32 @@ function createInstance(container, ctx) {
 		render();
 	}
 
+	/**
+	 * Facet counts for the quick-filter chips, shared by both pickers.
+	 * Server facets are the source of truth; providers fall back to counting the
+	 * catalog when an older payload has none.
+	 */
+	function modelFacets() {
+		const facets = state.report?.facets ?? {};
+		const total = Array.isArray(state.report?.catalog) ? state.report.catalog.length : 0;
+		let providers = Array.isArray(facets.providers) ? facets.providers : [];
+		if (!providers.length && total) {
+			const counts = new Map();
+			for (const id of state.report.catalog) {
+				const slash = id.indexOf("/");
+				const name = slash > 0 ? id.slice(0, slash) : "(none)";
+				counts.set(name, (counts.get(name) ?? 0) + 1);
+			}
+			providers = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id, count]) => ({ id, count }));
+		}
+		return {
+			providers,
+			tiers: Array.isArray(facets.tiers) ? facets.tiers : [],
+			capabilities: Array.isArray(facets.capabilities) ? facets.capabilities : [],
+			total,
+		};
+	}
+
 	/** The inline model picker for one row. */
 	function pickerNode(row) {
 		const wrap = el("div", "am-picker");
@@ -534,20 +611,10 @@ function createInstance(container, ctx) {
 		if (state.pickerError) wrap.appendChild(el("div", "am-picker-err", state.pickerError));
 
 		// Filter chips: provider, tier, capability. Counts come from the server's facets so
-		// every surface agrees; providers fall back to counting the catalog if an older
-		// payload has no facets.
-		const facets = state.report?.facets ?? {};
-		const total = Array.isArray(state.report?.catalog) ? state.report.catalog.length : 0;
-		let providerFacet = Array.isArray(facets.providers) ? facets.providers : [];
-		if (!providerFacet.length && total) {
-			const counts = new Map();
-			for (const id of state.report.catalog) {
-				const slash = id.indexOf("/");
-				const name = slash > 0 ? id.slice(0, slash) : "(none)";
-				counts.set(name, (counts.get(name) ?? 0) + 1);
-			}
-			providerFacet = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id, count]) => ({ id, count }));
-		}
+	// every surface agrees; providers fall back to counting the catalog if an older
+		// payload has no facets. Shared by the row picker and the bulk picker so the two
+	// can never report different numbers.
+	const { providers: providerFacet, tiers: tierFacet, capabilities: capabilityFacet, total } = modelFacets();
 		const chips = [];
 		const chipRow = (attr, allLabel, items, isActive, pick) => {
 			const rowEl = el("div", "am-providers");
@@ -572,9 +639,9 @@ function createInstance(container, ctx) {
 		wrap.appendChild(
 			chipRow("data-am-provider", "All providers", providerFacet, (id) => state.provider === id, (id) => { state.provider = id; }),
 		);
-		wrap.appendChild(chipRow("data-am-tier", "All tiers", facets.tiers ?? [], (id) => state.tier === id, (id) => { state.tier = id; }));
+		wrap.appendChild(chipRow("data-am-tier", "All tiers", tierFacet, (id) => state.tier === id, (id) => { state.tier = id; }));
 		wrap.appendChild(
-			chipRow("data-am-capability", "Any capability", facets.capabilities ?? [], (id) => state.capability === id, (id) => { state.capability = id; }),
+			chipRow("data-am-capability", "Any capability", capabilityFacet, (id) => state.capability === id, (id) => { state.capability = id; }),
 		);
 
 		const options = el("div", "am-options");
@@ -703,7 +770,7 @@ function createInstance(container, ctx) {
 
 	function rowNode(row) {
 		const open = state.openFor === row.name;
-		const wrap = el("div", open ? "am-row am-open" : "am-row");
+		const wrap = el("div", `${open ? "am-row am-open" : "am-row"}${state.selected.has(row.name) ? " am-selected" : ""}`);
 		// Stable hooks: let a human (or a browser-driving agent) address one row
 		// without guessing at DOM order.
 		wrap.setAttribute("data-am-agent", row.name);
@@ -719,32 +786,41 @@ function createInstance(container, ctx) {
 		toggle.setAttribute("aria-expanded", String(open));
 		toggle.title = open ? `Close the model picker for ${row.name}` : `Change the model for ${row.name}`;
 
-		const top = el("div", "am-row-top");
-		top.appendChild(el("div", "am-name", row.name));
+		// ONE dense line: everything sits on a single vertically centered row
+		// (name, status, pin -> effective, cost/tier, issues, caret). Anything that used
+		// to push the row taller is now a truncating inline marker with a title tooltip.
+		toggle.appendChild(el("span", "am-name", row.name));
 		const badge = el("span", "am-badge", row.statusLabel);
 		badge.style.color = STATUS_COLOR[row.status] ?? "var(--text-dim)";
-		top.appendChild(badge);
-		top.appendChild(el("span", "am-caret", "▾"));
-		toggle.appendChild(top);
+		badge.title = row.why ?? "";
+		toggle.appendChild(badge);
 
 		const models = el("div", "am-models");
 		const pin = el("span", "am-model am-pin", row.pin ?? "(no pin)");
 		pin.title = row.pin ?? "no model: in frontmatter";
 		models.appendChild(pin);
-		models.appendChild(el("span", "am-arrow", "->"));
-		const eff = el("span", "am-model", row.effective ?? row.effectiveLabel);
+		models.appendChild(el("span", "am-arrow", "→"));
+		const eff = el("span", "am-model am-effective", row.effective ?? row.effectiveLabel);
 		eff.title = row.effective ?? row.why;
 		models.appendChild(eff);
 		if (row.costShort) models.appendChild(costChipNode(row.costShort, row.costTitle));
 		if (row.tier && row.tier !== "unknown") models.appendChild(el("span", "am-cost", row.tier));
-		if (row.thinkingLevel) models.appendChild(el("span", "am-cost", `think:${row.thinkingLevel}`));
+		if (row.thinkingLevel) models.appendChild(el("span", "am-cost", `think ${row.thinkingLevel}`));
 		toggle.appendChild(models);
 
-		if (row.warnings.length) {
-			for (const warning of row.warnings) toggle.appendChild(el("div", "am-note am-warn", `warning: ${warning}`));
-		} else if (row.status !== "ok") {
-			toggle.appendChild(el("div", "am-note", row.why));
+		// Issues never get their own line: a count (or the reason) truncates in place,
+		// with the full text in the title tooltip.
+		const issues = [];
+		if (row.warnings.length) issues.push(...row.warnings.map((w) => `warning: ${w}`));
+		if (row.status !== "ok" && row.why) issues.push(row.why);
+		if (issues.length) {
+			const mark = el("span", "am-issues", row.warnings.length ? `${row.warnings.length} issue${row.warnings.length === 1 ? "" : "s"}` : row.why);
+			mark.title = issues.join("\n");
+			mark.style.color = row.warnings.length ? "var(--amber)" : "var(--text-faint)";
+			toggle.appendChild(mark);
 		}
+
+		toggle.appendChild(el("span", "am-caret", "▾"));
 
 		toggle.addEventListener("click", () => {
 			state.openFor = open ? null : row.name;
@@ -757,12 +833,244 @@ function createInstance(container, ctx) {
 			if (!open) reopenFocus(row.name);
 		});
 
-		wrap.appendChild(toggle);
+		// Selection checkbox: a SIBLING of the row toggle button (never a child - nesting
+		// an input inside a button is invalid HTML). Both sit in one horizontal line so
+		// the checkbox costs NO extra row height; the picker/note stack below it.
+		const line = el("div", "am-row-line");
+		const box = el("input", "am-select-box");
+		box.type = "checkbox";
+		box.checked = state.selected.has(row.name);
+		box.setAttribute("data-am-select", row.name);
+		box.setAttribute("aria-label", `Select ${row.name} for a bulk model change`);
+		box.addEventListener("click", (event) => event.stopPropagation());
+		box.addEventListener("change", () => {
+			if (box.checked) state.selected.add(row.name);
+			else state.selected.delete(row.name);
+			state.diag.lastAction = `${box.checked ? "select" : "deselect"}:${row.name}`;
+			state.diag.lastAt = new Date().toLocaleTimeString();
+			render();
+		});
+		line.appendChild(box);
+		line.appendChild(toggle);
+		wrap.appendChild(line);
 		if (state.savedNote?.agent === row.name) wrap.appendChild(el("div", "am-saved", state.savedNote.text));
 		if (open) wrap.appendChild(pickerNode(row));
 		return wrap;
 	}
 
+
+	/**
+	 * Bulk toolbar: tick agents on the rows, then apply ONE model to all of them.
+	 * Renders its own inline picker (same option markup as a single row's) so the
+	 * multi-agent path is one POST /set-models instead of N posts.
+	 */
+	function renderBulkBar() {
+		bulkBar.textContent = "";
+		bulkBar.setAttribute("data-am-bulk", "1");
+		const visible = (state.report?.rows ?? []).filter((r) => matchesFilter(r, state.filter));
+		const count = state.selected.size;
+
+		const allBtn = el("button", "am-btn", "Select all");
+		allBtn.type = "button";
+		allBtn.setAttribute("data-am-bulk-all", "1");
+		allBtn.disabled = !visible.length || state.savingBulk;
+		allBtn.addEventListener("click", () => {
+			for (const r of visible) state.selected.add(r.name);
+			state.diag.lastAction = `bulk select-all (${visible.length})`;
+			state.diag.lastAt = new Date().toLocaleTimeString();
+			render();
+		});
+
+		const clearBtn = el("button", "am-btn", "Clear");
+		clearBtn.type = "button";
+		clearBtn.setAttribute("data-am-bulk-clear", "1");
+		clearBtn.disabled = !count || state.savingBulk;
+		clearBtn.addEventListener("click", () => {
+			state.selected.clear();
+			state.bulkOpen = false;
+			state.bulkError = null;
+			state.bulkNote = null;
+			render();
+		});
+
+		const label = el("span", "am-bulk-count", count ? `${count} selected` : "no agents selected");
+		label.setAttribute("data-am-bulk-count", String(count));
+		bulkBar.append(allBtn, clearBtn, label);
+
+		if (state.bulkNote) bulkBar.appendChild(el("div", "am-bulk-note", state.bulkNote));
+		if (state.bulkError) bulkBar.appendChild(el("div", "am-config-err", state.bulkError));
+
+		const openBtn = el("button", "am-btn am-primary", "Set model on selected…");
+		openBtn.type = "button";
+		openBtn.disabled = !count || state.savingBulk;
+		openBtn.setAttribute("data-am-bulk-open", "1");
+		openBtn.addEventListener("click", () => {
+			state.bulkOpen = !state.bulkOpen;
+			// Reset the filters on every open/close: a stale provider/tier narrowing must
+			// never silently shape the next bulk apply.
+			state.bulkQuery = "";
+			state.bulkProvider = "all";
+			state.bulkTier = "all";
+			state.bulkCapability = "all";
+			bulkChipRefs = null;
+			state.bulkError = null;
+			// Never leave the single-row picker and the bulk picker open at once.
+			if (state.bulkOpen) state.openFor = null;
+			render();
+		});
+		bulkBar.appendChild(openBtn);
+
+		if (!state.bulkOpen || !count) {
+			bulkChipRefs = null;
+			return;
+		}
+
+		const wrap = el("div", "am-picker am-bulk-picker");
+		const headRow = el("div", "am-picker-head");
+		const input = el("input", "am-picker-input");
+		input.type = "search";
+		input.placeholder = `Search all providers — applies to ${count} selected agent${count === 1 ? "" : "s"}`;
+		input.value = state.bulkQuery;
+		input.setAttribute("data-am-bulk-search", "1");
+		input.setAttribute("aria-label", `Model for ${count} selected agents`);
+		input.addEventListener("input", () => {
+			// Update options IN PLACE: a full render() would steal the caret.
+			state.bulkQuery = input.value;
+			renderBulkOptions();
+		});
+		const countEl = el("div", "am-picker-count");
+		headRow.append(input, countEl);
+		wrap.appendChild(headRow);
+
+		// Quick-filter chips, identical to the single-agent picker: provider, tier,
+		// capability. A chip click calls renderBulkOptions() (in place) rather than
+		// render(), so the open picker and the search caret both survive.
+		const facets = modelFacets();
+		const bulkChips = [];
+		const bulkChipRow = (attr, allLabel, items, getActive, setActive) => {
+			const rowEl = el("div", "am-providers");
+			const mk = (id, label, n) => {
+				const chip = el("button", "am-provider");
+				chip.type = "button";
+				chip.setAttribute("aria-pressed", String(getActive(id)));
+				chip.setAttribute(attr, id);
+				chip.appendChild(el("span", undefined, label));
+				if (typeof n === "number") chip.appendChild(el("span", "am-provider-count", String(n)));
+				chip.addEventListener("click", () => {
+					setActive(id);
+					state.diag.lastAction = `bulk filter ${attr.replace("data-am-", "")}:${id}`;
+					state.diag.lastAt = new Date().toLocaleTimeString();
+					renderBulkOptions();
+				});
+				bulkChips.push({ attr, id, el: chip });
+				rowEl.appendChild(chip);
+			};
+			mk("all", allLabel, facets.total);
+			for (const it of items) mk(it.id, it.label ?? it.id, it.count);
+			return rowEl;
+		};
+		wrap.appendChild(bulkChipRow("data-am-bulk-provider", "All providers", facets.providers, (id) => state.bulkProvider === id, (id) => { state.bulkProvider = id; }));
+		wrap.appendChild(bulkChipRow("data-am-bulk-tier", "All tiers", facets.tiers, (id) => state.bulkTier === id, (id) => { state.bulkTier = id; }));
+		wrap.appendChild(bulkChipRow("data-am-bulk-capability", "Any capability", facets.capabilities, (id) => state.bulkCapability === id, (id) => { state.bulkCapability = id; }));
+		bulkChipRefs = bulkChips;
+
+		const options = el("div", "am-options");
+		wrap.appendChild(options);
+
+		const cancel = el("button", "am-btn am-rollback", "Cancel bulk change");
+		cancel.type = "button";
+		cancel.setAttribute("data-am-bulk-cancel", "1");
+		cancel.addEventListener("click", () => { state.bulkOpen = false; state.bulkProvider = "all"; state.bulkTier = "all"; state.bulkCapability = "all"; render(); });
+		wrap.appendChild(cancel);
+		wrap.appendChild(el("div", "am-note", "Click a model to apply it to every selected agent. Each file is backed up first."));
+
+		bulkBar.appendChild(wrap);
+		renderBulkOptions();
+	}
+
+	/** Fill the bulk picker's option area (typing re-enters here). */
+	function renderBulkOptions() {
+		if (!bulkBar.querySelector("[data-am-bulk-search]")) return;
+		const options = bulkBar.querySelector(".am-bulk-picker .am-options");
+		if (!options) return;
+		const catalog = Array.isArray(state.report?.catalog) ? state.report.catalog : [];
+		const info = (id) => state.report?.models?.[id] ?? null;
+		const q = state.bulkQuery.trim().toLowerCase();
+		let matches = catalog;
+		// Quick filters and the search box compose, exactly like the single-agent picker.
+		if (state.bulkProvider !== "all") matches = matches.filter((m) => m.startsWith(`${state.bulkProvider}/`));
+		if (state.bulkTier !== "all") matches = matches.filter((m) => info(m)?.tier === state.bulkTier);
+		if (state.bulkCapability === "vision") matches = matches.filter((m) => info(m)?.vision === true);
+		else if (state.bulkCapability === "largeContext") matches = matches.filter((m) => info(m)?.largeContext === true);
+		if (q) matches = matches.filter((m) => m.toLowerCase().includes(q));
+		// Chips stay in sync with the state that filtered them.
+		for (const chip of bulkChipRefs ?? []) {
+			const active =
+				chip.attr === "data-am-bulk-provider" ? state.bulkProvider : chip.attr === "data-am-bulk-tier" ? state.bulkTier : state.bulkCapability;
+			chip.el.setAttribute("aria-pressed", String(chip.id === active));
+		}
+		const countEl = bulkBar.querySelector(".am-bulk-picker .am-picker-count");
+		if (countEl) countEl.textContent = `${matches.length}${matches.length > PICKER_LIMIT ? ` (showing ${PICKER_LIMIT})` : ""}`;
+
+		options.textContent = "";
+		const inheritBtn = el("button", "am-option am-inherit");
+		inheritBtn.type = "button";
+		inheritBtn.disabled = state.savingBulk;
+		inheritBtn.setAttribute("data-am-bulk-option", "__inherit__");
+		inheritBtn.appendChild(el("span", "am-config-option-label", "Inherit (no pin) - all selected follow the main conversation model"));
+		inheritBtn.addEventListener("click", () => void applyBulk(""));
+		options.appendChild(inheritBtn);
+		if (!matches.length) {
+			const what = matches.length === catalog.length ? `"${state.bulkQuery}"` : "the current filters";
+			options.appendChild(el("div", "am-empty-opt", `No model matches ${what}.`));
+			return;
+		}
+		for (const model of matches.slice(0, PICKER_LIMIT)) {
+			const btn = el("button", "am-option");
+			btn.type = "button";
+			btn.disabled = state.savingBulk;
+			btn.setAttribute("data-am-bulk-option", model);
+			btn.appendChild(el("span", "am-config-option-label", model));
+			const meta = info(model);
+			if (meta?.tier && meta.tier !== "unknown") btn.appendChild(el("span", `am-option-tier am-tier-${meta.tier}`, meta.tier));
+			if (meta?.vision) btn.appendChild(el("span", "am-option-cap", "vision"));
+			if (meta?.largeContext) btn.appendChild(el("span", "am-option-cap", "200K+"));
+			const costChip = el("span", "am-option-cost", meta?.short ?? "n/a");
+			costChip.setAttribute("data-am-cost", meta?.short ?? "n/a");
+			if (meta?.title) costChip.title = meta.title;
+			btn.appendChild(costChip);
+			btn.addEventListener("click", () => void applyBulk(model));
+			options.appendChild(btn);
+		}
+	}
+
+	/** POST /set-models for every ticked agent, then refresh from the returned report. */
+	async function applyBulk(model) {
+		const agents = [...state.selected];
+		if (!agents.length) return;
+		state.savingBulk = true;
+		state.bulkError = null;
+		state.diag.lastAction = `bulk set-model (${agents.length} agents)`;
+		state.diag.lastAt = new Date().toLocaleTimeString();
+		render();
+		const payload = await postSetModels(agents, model);
+		if (state.destroyed) return;
+		state.savingBulk = false;
+		if (payload?.ok) {
+			if (payload.report) state.report = payload.report;
+			const s = payload.summary ?? {};
+			state.bulkNote = `bulk: ${model || "(inherit)"} -> ${s.applied ?? 0} updated, ${s.unchanged ?? 0} unchanged, ${s.failed ?? 0} failed (${s.requested ?? agents.length} agents)`;
+			state.bulkError = null;
+			state.bulkOpen = false;
+			state.bulkQuery = "";
+			state.selected.clear();
+			state.diag.lastWrite = `bulk set-model @ ${new Date().toLocaleTimeString()}`;
+		} else {
+			state.bulkError = payload?.error ?? "unknown error";
+			state.diag.lastWrite = "bulk set-model FAILED";
+		}
+		render();
+	}
 
 	/**
 	 * Render the configuration bar: preset dropdown + save/apply/delete buttons.
@@ -789,7 +1097,7 @@ function createInstance(container, ctx) {
 			nameInput.setAttribute("maxlength", "80");
 			nameInput.setAttribute("data-am-config-name", "1");
 			nameInput.value = state.configName;
-			nameInput.addEventListener("input", () => { state.configName = nameInput.value.trim(); });
+			nameInput.addEventListener("input", () => { state.configName = nameInput.value.trim(); const b = nameInput.parentNode && nameInput.parentNode.querySelector('[data-am-config-save-submit]'); if (b) b.disabled = !state.configName || state.savingConfig; });
 			nameInput.addEventListener("keydown", (e) => {
 				if (e.key === "Enter") { e.preventDefault(); void saveConfig(); }
 				if (e.key === "Escape") { state.configFormOpen = false; state.configName = ""; state.configDesc = ""; render(); }
@@ -800,7 +1108,7 @@ function createInstance(container, ctx) {
 			descInput.setAttribute("rows", "2");
 			descInput.setAttribute("data-am-config-desc", "1");
 			descInput.value = state.configDesc;
-			descInput.addEventListener("input", () => { state.configDesc = descInput.value.trim(); renderConfigBar(); });
+			descInput.addEventListener("input", () => { state.configDesc = descInput.value.trim(); });
 			const saveBtn = el("button", "am-btn am-primary");
 			saveBtn.type = "button";
 			saveBtn.textContent = "Save";
@@ -936,6 +1244,10 @@ function createInstance(container, ctx) {
 			state.configName = "";
 			state.configDesc = "";
 			state.configError = null;
+			if (payload.report) {
+				state.report = payload.report;
+				state.diag.agentCount = payload.report.counts?.total ?? state.diag.agentCount;
+			}
 			if (payload.report && payload.report.configs) state.configs = payload.report.configs;
 			state.selectedConfig = (payload.config && payload.config.id) || null;
 			state.diag.lastWrite = "save-config:" + (state.selectedConfig || "?") + " @ " + new Date().toLocaleTimeString();
@@ -959,6 +1271,13 @@ function createInstance(container, ctx) {
 		if (state.destroyed) return;
 		state.savingConfig = false;
 		if (payload && payload.ok) {
+			// Adopt the roster the server just rebuilt for this response. Without this the
+			// rows keep rendering the PREVIOUS report until the next 15s poll, which is
+			// what made a preset apply look like it hung after the writes finished.
+			if (payload.report) {
+				state.report = payload.report;
+				state.diag.agentCount = payload.report.counts?.total ?? state.diag.agentCount;
+			}
 			if (payload.report && payload.report.configs) state.configs = payload.report.configs;
 			state.diag.lastWrite = "apply:" + id + " @ " + new Date().toLocaleTimeString();
 			state.diag.lastAction = "apply:" + cfgName;
@@ -1046,6 +1365,7 @@ function createInstance(container, ctx) {
 				.filter(Boolean)
 				.join(" | ");
 			renderConfigBar();
+			renderBulkBar();
 
 			const rows = (state.report.rows ?? []).filter((r) => matchesFilter(r, state.filter));
 			if (!rows.length) {

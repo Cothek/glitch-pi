@@ -23,33 +23,52 @@
  *
  * USAGE
  *   node scripts/agent-models.mjs [--json] [--strict] [--agent-dir <path>] [--repo <path>]
+ *   node scripts/agent-models.mjs --save-config "<name>" [--config-desc "<desc>"] [--repo <path>]
+ *   node scripts/agent-models.mjs --apply-config <id> [--repo <path>]
+ *   node scripts/agent-models.mjs --list-configs [--json]
+ *   node scripts/agent-models.mjs --delete-config <id> [--json]
+ *   node scripts/agent-models.mjs --edit-config <id> --save-config "<new name>" [--config-desc "<desc>"] [--json]
  *
- *   --json        machine-readable report instead of the table
- *   --strict      exit 1 when any agent needs attention (dead pin, unresolved
- *                 pin, or a lint warning) - usable as a pre-commit / CI gate
- *   --agent-dir   override the Pi agent directory (default: $PI_CODING_AGENT_DIR
- *                 or ~/.pi/agent)
- *   --repo        override the repository root (default: the parent of this file)
+ *   --json            machine-readable report instead of the table
+ *   --strict          exit 1 when any agent needs attention (dead pin, unresolved
+ *                     pin, or a lint warning) - usable as a pre-commit / CI gate
+ *   --agent-dir       override the Pi agent directory (default: $PI_CODING_AGENT_DIR
+ *                     or ~/.pi/agent)
+ *   --repo            override the repository root (default: the parent of this file)
+ *   --save-config     snapshot current agent pins into a named configuration (use with
+ *                     --edit-config to rename an existing config instead, keeping its pins)
+ *   --config-desc     description for a saved config (used with --save-config)
+ *   --apply-config    batch-set every agent pin from a saved configuration
+ *   --list-configs    print saved configurations
+ *   --delete-config   remove a saved configuration by id
+ *   --edit-config     rename an existing config (by id); requires --save-config for the new name
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildReport, formatCostShort, formatReportTable, parseAgentFile } from "../.pi/web-plugins/agent-models/resolver.mjs";
+import { buildReport, formatCostShort, formatReportTable, parseAgentFile, setModelInFrontmatter } from "../.pi/web-plugins/agent-models/resolver.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT_AGENTS_DIR = ".pi/agents";
+const CONFIGS_PATH = join(HERE, "..", ".pi", "agent-models", "configs.json");
 
 function parseArgs(argv) {
-	const opts = { json: false, strict: false, agentDir: null, repo: null, help: false };
+	const opts = { json: false, strict: false, agentDir: null, repo: null, help: false, saveConfig: null, configDesc: null, applyConfig: null, listConfigs: false, deleteConfig: null, editConfig: null };
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--json") opts.json = true;
 		else if (arg === "--strict") opts.strict = true;
 		else if (arg === "--agent-dir") opts.agentDir = argv[++i] ?? null;
 		else if (arg === "--repo") opts.repo = argv[++i] ?? null;
+		else if (arg === "--save-config") opts.saveConfig = argv[++i] ?? null;
+		else if (arg === "--config-desc") opts.configDesc = argv[++i] ?? null;
+		else if (arg === "--apply-config") opts.applyConfig = argv[++i] ?? null;
+		else if (arg === "--list-configs") opts.listConfigs = true;
+		else if (arg === "--delete-config") opts.deleteConfig = argv[++i] ?? null;
+		else if (arg === "--edit-config") opts.editConfig = argv[++i] ?? null;
 		else if (arg === "--help" || arg === "-h") opts.help = true;
 		else if (arg.startsWith("--")) throw new Error(`unknown flag: ${arg}`);
 	}
@@ -118,6 +137,29 @@ function readAgents(repoRoot) {
 	return { agents, dir };
 }
 
+function readConfigs(repoRoot) {
+	try {
+		const raw = readFileSync(join(repoRoot, ".pi", "agent-models", "configs.json"), "utf8");
+		const doc = JSON.parse(raw.replace(/^\uFEFF/, ""));
+		return Array.isArray(doc?.configs) ? doc.configs : [];
+	} catch {
+		return [];
+	}
+}
+
+function writeConfigs(repoRoot, configs) {
+	const dir = join(repoRoot, ".pi", "agent-models");
+	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "configs.json"), JSON.stringify({ configs }, null, 1), "utf8");
+}
+
+function slugifyConfigId(name) {
+	return String(name ?? "")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "") || "config";
+}
+
 function main() {
 	let opts;
 	try {
@@ -137,7 +179,99 @@ function main() {
 	const repoRoot = resolve(opts.repo ?? join(HERE, ".."));
 	const agentDir = resolve(opts.agentDir ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"));
 
+	// --- Config operations: save / apply / list / delete -----------------------
+	if (opts.listConfigs) {
+		const configs = readConfigs(repoRoot);
+		if (opts.json) {
+			console.log(JSON.stringify(configs.map((c) => ({ id: c.id, name: c.name, description: c.description, createdAt: c.createdAt, updatedAt: c.updatedAt, agentCount: Object.keys(c.pins || {}).length })), null, 2));
+		} else {
+			if (!configs.length) console.log("No saved configurations. Save one with: node scripts/agent-models.mjs --save-config \"name\"");
+			else { console.log(`${"ID".padEnd(20)} NAME  AGENTS  UPDATED`); for (const c of configs) console.log(`${c.id.padEnd(20)} ${c.name}  ${Object.keys(c.pins || {}).length}  ${c.updatedAt}`); }
+		}
+		return;
+	}
+
+	if (opts.deleteConfig) {
+		const configs = readConfigs(repoRoot);
+		const remaining = configs.filter((c) => c.id !== opts.deleteConfig);
+		if (remaining.length === configs.length) {
+			console.error(`config not found: ${opts.deleteConfig}`);
+			process.exitCode = 1;
+			return;
+		}
+		writeConfigs(repoRoot, remaining);
+		if (opts.json) console.log(JSON.stringify({ ok: true, deleted: opts.deleteConfig, count: remaining.length }, null, 2));
+		else console.log(`deleted config: ${opts.deleteConfig}`);
+		return;
+	}
+
+	if (opts.editConfig) {
+		// Rename an existing config (keep its pins, change name/description).
+		const existing = readConfigs(repoRoot);
+		const prev = existing.find((c) => c.id === opts.editConfig);
+		if (!prev) { console.error(`config not found: ${opts.editConfig}`); process.exitCode = 1; return; }
+		const newName = opts.saveConfig || prev.name;
+		if (!newName || newName.length > 80) { console.error("name is required (max 80 chars)"); process.exitCode = 2; return; }
+		const config = { ...prev, name: newName, description: opts.configDesc || null, updatedAt: new Date().toISOString() };
+		const updated = existing.filter((c) => c.id !== opts.editConfig);
+		updated.push(config);
+		updated.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+		writeConfigs(repoRoot, updated);
+		if (opts.json) console.log(JSON.stringify({ ok: true, config: { id: config.id, name: newName, description: config.description, createdAt: config.createdAt, updatedAt: config.updatedAt, agentCount: Object.keys(config.pins || {}).length } }, null, 2));
+		else console.log(`renamed config "${prev.name}" -> "${newName}" (${config.id})`);
+		return;
+	}
+
+	if (opts.saveConfig) {
+		const { agents, dir } = readAgents(repoRoot);
+		if (!agents.length) { console.error(`no agent files found in ${dir}`); process.exitCode = 2; return; }
+		const catalog = buildCatalog(agentDir);
+		const report = buildReport(agents, catalog.ids, catalog.source);
+		const pins = {};
+		for (const row of report.rows) pins[row.name] = row.pin;
+		const id = slugifyConfigId(opts.saveConfig);
+		const now = new Date().toISOString();
+		const existing = readConfigs(repoRoot);
+		const prev = existing.find((c) => c.id === id);
+		const config = { id, name: opts.saveConfig, description: opts.configDesc || null, createdAt: prev?.createdAt ?? now, updatedAt: now, pins };
+		const updated = existing.filter((c) => c.id !== id);
+		updated.push(config);
+		updated.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+		writeConfigs(repoRoot, updated);
+		if (opts.json) console.log(JSON.stringify({ ok: true, config: { id, name: opts.saveConfig, description: config.description, createdAt: config.createdAt, updatedAt: now, agentCount: Object.keys(pins).length } }, null, 2));
+		else console.log(`saved config "${opts.saveConfig}" (${id}) with ${Object.keys(pins).length} agent pins`);
+		return;
+	}
+
+	if (opts.applyConfig) {
+		const configs = readConfigs(repoRoot);
+		const config = configs.find((c) => c.id === opts.applyConfig);
+		if (!config) { console.error(`config not found: ${opts.applyConfig}`); process.exitCode = 1; return; }
+		const catalog = buildCatalog(agentDir);
+		const agentFiles = readAgents(repoRoot).agents.map((a) => a.file);
+		let applied = 0;
+		let skipped = 0;
+		const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+		const backupDir = join(repoRoot, ".pi", "agent-models", "backups");
+		if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
+		for (const [agent, model] of Object.entries(config.pins || {})) {
+			const file = join(PROJECT_AGENTS_DIR, `${agent}.md`);
+			if (!agentFiles.includes(`${agent}.md`)) { skipped++; continue; }
+			if (model && model !== "" && !catalog.ids.has(model)) { skipped++; continue; }
+			const before = readFileSync(join(repoRoot, file), "utf8");
+			const edit = setModelInFrontmatter(before, model || null);
+			if (!edit.ok || !edit.changed) continue;
+			writeFileSync(join(backupDir, `config-apply-${config.id}-${agent}-${stamp}.md`), before, "utf8");
+			writeFileSync(join(repoRoot, file), edit.text, "utf8");
+			applied++;
+		}
+		if (opts.json) console.log(JSON.stringify({ ok: true, id: opts.applyConfig, name: config.name, applied, skipped }, null, 2));
+		else console.log(`applied config "${config.name}": ${applied} agents updated, ${skipped} skipped`);
+		return;
+	}
+
 	const { agents, dir } = readAgents(repoRoot);
+
 	if (!agents.length) {
 		console.error(`no agent files found in ${dir}`);
 		process.exitCode = 2;

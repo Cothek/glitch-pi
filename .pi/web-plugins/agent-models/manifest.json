@@ -1,8 +1,8 @@
 {
   "id": "agent-models",
   "name": "Agent Models",
-  "version": "0.4.1",
-  "description": "Per-agent model assignments for .pi/agents/*.md: see the pinned model, the effective model, whether the pin actually resolves, and change it. Every write is validated against the live model catalog and backed up first. Adds a chat-bar button (right of the thinking chip) that opens this page.",
+  "version": "0.6.3",
+  "description": "Per-agent model assignments for .pi/agents/*.md: see the pinned model, the effective model, whether the pin actually resolves, and change it - one at a time, or select many agents and apply one model to all of them at once. Every write is validated against the live model catalog and backed up first. Adds a chat-bar button (right of the thinking chip) that opens this page.",
   "apiVersion": 2,
   "permissions": [
     "ui",

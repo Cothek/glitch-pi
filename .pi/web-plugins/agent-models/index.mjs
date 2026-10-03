@@ -21,7 +21,10 @@
  *      on click, so no client handler is involved.
  *   1. right-panel tab (manifest "view": true) -> client fetches GET /state
  *   2. GET  /plugins-api/agent-models/state     -> JSON report (catalog, models, facets, configs)
- *   3. POST /plugins-api/agent-models/set-model -> rewrite one agent's model pin
+ *   3. POST /plugins-api/agent-models/set-model  -> rewrite ONE agent's model pin
+ *   3b. POST /plugins-api/agent-models/set-models -> rewrite MANY agents' model pin
+ *       in one round trip (multi-select in the panel; same validation + per-agent
+ *       backup as /set-model, per-agent results so a partial failure is visible)
  *   4. POST /plugins-api/agent-models/restore   -> restore an agent's newest backup
  *   5. GET  /plugins-api/agent-models/configs    -> full saved-config list (with pins)
  *   6. POST /plugins-api/agent-models/configs/save   -> snapshot current pins under a name
@@ -381,6 +384,106 @@ export default definePlugin({
 						changed: edit.changed,
 						reason: edit.reason,
 						backup,
+						report: await state(true),
+					});
+				} catch (err) {
+					json(res, 500, { ok: false, error: err?.message ?? String(err) });
+				}
+			}),
+		);
+
+		/**
+		 * POST /set-models — apply ONE model to MANY agents in one round trip
+		 * (the panel's multi-select: tick agents, pick a model, apply once).
+		 *
+		 * Same validation as /set-model, evaluated ONCE for the whole batch: every
+		 * agent name must match the regex AND a file actually discovered in .pi/agents,
+		 * and the model must be in the live catalog or be an explicit inherit — so an
+		 * unknown pin can never be written. Each affected file is backed up BEFORE its
+		 * first byte changes (same stamp for the whole batch, so one apply is one
+		 * recognizable backup group). A per-agent failure (unreadable file, no
+		 * frontmatter) does not abort the batch: it is reported in `results` and
+		 * counted in `summary.failed`, matching the configs/apply behavior.
+		 *
+		 * The response carries the refreshed roster so the UI updates in one round trip,
+		 * exactly like the single-agent write.
+		 */
+		cleanup.push(
+			host.route("POST", "/set-models", async (req, res) => {
+				try {
+					const body = req && typeof req.body === "object" && req.body !== null ? req.body : {};
+					const agentsRaw = Array.isArray(body.agents) ? body.agents : [];
+					// Dedupe + trim: the same agent twice must not double-write.
+					const agents = [...new Set(agentsRaw.map((a) => String(a ?? "").trim()).filter(Boolean))];
+					const model = body.model === null || body.model === undefined ? "" : String(body.model).trim();
+
+					if (!agents.length) {
+						return json(res, 400, { ok: false, error: "no agents selected" });
+					}
+					if (agents.length > 100) {
+						return json(res, 400, { ok: false, error: `too many agents (${agents.length}); max 100` });
+					}
+					for (const agent of agents) {
+						if (!/^[A-Za-z0-9._-]+$/.test(agent)) {
+							return json(res, 400, { ok: false, error: `invalid agent name: ${JSON.stringify(agent)}` });
+						}
+					}
+					// Validate against the discovered files, never interpolate blindly.
+					const files = await listAgentFiles(host);
+					const unknown = agents.filter((agent) => !files.includes(`${agent}.md`));
+					if (unknown.length) {
+						return json(res, 404, { ok: false, error: `unknown agent(s): ${unknown.join(", ")}` });
+					}
+
+					const catalog = await readCatalog(host);
+					if (model && !catalog.ids.has(model)) {
+						return json(res, 400, {
+							ok: false,
+							error: `not an available model: ${model} (catalog has ${catalog.ids.size}; an unknown pin would silently fall back to the main model)`,
+						});
+					}
+
+					const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+					const results = [];
+					let applied = 0;
+					let unchanged = 0;
+					for (const agent of agents) {
+						const file = `${AGENTS_DIR}/${agent}.md`;
+						try {
+							const before = await host.fs.readText(file);
+							const edit = setModelInFrontmatter(before, model || null);
+							if (!edit.ok) {
+								results.push({ agent, ok: false, changed: false, reason: edit.reason });
+								continue;
+							}
+							let backup = null;
+							if (edit.changed) {
+								backup = `${BACKUP_DIR}/${agent}-${stamp}.md`;
+								try {
+									await host.fs.mkdir(BACKUP_DIR);
+								} catch {
+									/* already there */
+								}
+								await host.fs.write(backup, before);
+								await host.fs.write(file, edit.text);
+								host.log(`set ${agent} model -> ${model || "(inherit)"} (was ${edit.previous ?? "none"}); backup ${backup}`);
+							}
+							results.push({ agent, ok: true, model: model || null, previous: edit.previous, changed: edit.changed, reason: edit.reason, backup });
+							if (edit.changed) applied++;
+							else unchanged++;
+						} catch (err) {
+							results.push({ agent, ok: false, changed: false, reason: err?.message ?? String(err) });
+						}
+					}
+					const failed = results.filter((r) => !r.ok).length;
+					if (applied) {
+						host.log(`bulk set-model: ${applied} updated, ${unchanged} unchanged, ${failed} failed (${agents.length} requested)`);
+					}
+					json(res, 200, {
+						ok: true,
+						model: model || null,
+						summary: { requested: agents.length, applied, unchanged, failed },
+						results,
 						report: await state(true),
 					});
 				} catch (err) {

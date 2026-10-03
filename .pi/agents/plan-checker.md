@@ -2,7 +2,7 @@
 name: plan-checker
 description: "Pre-implementation plan reviewer. Finds gaps, ambiguity, unverifiable steps, hidden coupling, and missing acceptance criteria in a plan or task brief. Catches problems before any code is written. Read-only."
 tools: read, find, grep, ls, skill
-model: commandcode/deepseek/deepseek-v4.1-flash
+model: commandcode/poolside/laguna-s-2.1-free
 ---
 
 

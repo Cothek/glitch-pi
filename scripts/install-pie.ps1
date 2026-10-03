@@ -4,9 +4,11 @@
     Standalone installer - download and run directly from GitHub.
 
 .DESCRIPTION
-    This script installs Glitch Pie by cloning the repository, running the bootstrap
-    script to download dependencies (Node.js, OpenCode, Handy, etc.), optionally
-    setting up a user profile from GitHub, and launching Glitch.
+    This script installs Glitch Pie by cloning the repository and running the
+    bootstrap script, which downloads the dependencies the Pi engine needs:
+    Node.js, the pi CLI + pi-web-ui stack, engine skills, and the Cloudflare
+    tunnel binary. Optionally sets up a user profile from GitHub, and launches
+    Glitch. Handy (optional voice input) is not provisioned by this installer.
 
 .PARAMETER InstallDir
     Custom installation directory (default: $HOME\glitch-pi)
@@ -137,6 +139,24 @@ function Get-PersistedGitPath {
 
 function Test-GitInPersistedPath {
     return $null -ne (Get-PersistedGitPath)
+}
+
+# Git alone is not enough: Glitch's scripts (bash tool, tunnel helpers,
+# page-picker unzip) need bash.exe from the same Git tree. A MinGit-only or
+# otherwise bash-less git passes the git.exe gate and then leaves the
+# install without bash (reproduced: fresh install reported 'Bash not
+# found'). Require bash beside git (usr\bin or bin, both standard) or on
+# the session PATH.
+function Test-BashBesideGit {
+    param([string]$GitExe)
+    if (-not $GitExe) { return $false }
+    $cmdDir = Split-Path $GitExe -Parent
+    $root = Split-Path $cmdDir -Parent
+    foreach ($rel in @("usr\bin\bash.exe", "bin\bash.exe")) {
+        if (Test-Path (Join-Path $root $rel)) { return $true }
+    }
+    if (Get-Command bash -ErrorAction SilentlyContinue) { return $true }
+    return $false
 }
 
 # Find node.exe via the PERSISTED (global) PATH -- same philosophy as the git
@@ -400,18 +420,14 @@ $gitProvisioned = $false
 $gitStagedDir = $null
 $gitNeedsPersistence = $false
 $gitPath = (Get-Command git -ErrorAction SilentlyContinue).Source
+if (-not $gitPath) { $gitPath = Get-PersistedGitPath }
 
-if (Test-GitInPersistedPath) {
-    # Git already on the global (persisted) PATH -- nothing to do, don't ask.
-    if (-not $gitPath) {
-        # Session doesn't see it yet (PATH changed after this terminal opened).
-        # Resolve the actual git.exe from the persisted PATH.
-        $gitPath = Get-PersistedGitPath
-    }
+if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
+    # Git + bash already on the global (persisted) PATH -- nothing to do.
     Write-Success "Git found in system PATH: $gitPath"
 } else {
-    # Git NOT on the global PATH. Provision if needed, then ask to persist.
-    if (-not $gitPath) {
+    # Git NOT on the global PATH (or no bash beside it). Provision if needed, then ask to persist.
+    if ((-not $gitPath) -or -not (Test-BashBesideGit -GitExe $gitPath)) {
         # Check if MinGit was already downloaded to the install dir (partial re-run)
         $existingBundledGit = Join-Path $InstallDir "data\mingit\cmd\git.exe"
         if (Test-Path $existingBundledGit) {
@@ -420,7 +436,11 @@ if (Test-GitInPersistedPath) {
             Write-Step "Using existing bundled Git at $gitPath"
             $gitNeedsPersistence = $true
         } else {
-            Write-Warn "Git not found in PATH."
+            if ($gitPath) {
+                Write-Warn "Git found at $gitPath but no bash beside it - Glitch needs bash, provisioning MinGit..."
+            } else {
+                Write-Warn "Git not found in PATH."
+            }
             Write-Step "Downloading MinGit (portable Git for Windows, ~40 MB)..."
 
             $gitStagedDir = Join-Path $env:TEMP "glitch-mingit"

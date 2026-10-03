@@ -862,46 +862,88 @@ if (Test-Path (Join-Path $bundledNodeBin "gitnexus.cmd")) {
 }
 
 if ($gitnexusCmd) {
-    # Find Git's mingw64\bin (ships OpenSSL 3 DLLs the FTS extension needs)
+    # Find Git's OpenSSL 3 DLLs (libssl-3*.dll) across multiple roots, both
+    # mingw64\bin and usr\bin. Git for Windows ships these DLLs in either bin,
+    # so probe both. Dedupe roots case-insensitively so the same git install
+    # (e.g. resolved via Get-PersistedGitPath AND Get-Command git) is only
+    # scanned once.
     $gitMingw64Bin = $null
-    $gitExe = Get-Command git -ErrorAction SilentlyContinue
-    if ($gitExe) {
-        $gitPath = $gitExe.Source
-        $idx = $gitPath.ToLower().IndexOf('\cmd\git')
-        if ($idx -ge 0) {
-            $candidate = Join-Path (Join-Path $gitPath.Substring(0, $idx) 'mingw64') 'bin'
-            if (Test-Path (Join-Path $candidate 'libssl-3-x64.dll')) {
-                $gitMingw64Bin = $candidate
-            }
+    $gitRootForLog = ''
+
+    # Build the candidate root list.
+    $gitRootCandidates = @()
+    $persistedGit = Get-PersistedGitPath
+    if ($persistedGit) {
+        $idx = $persistedGit.ToLower().IndexOf('\cmd\git')
+        if ($idx -ge 0) { $gitRootCandidates += $persistedGit.Substring(0, $idx) }
+        else { $gitRootCandidates += Split-Path -Parent $persistedGit }
+    }
+    $cmdGit = Get-Command git -ErrorAction SilentlyContinue
+    if ($cmdGit) {
+        $idx2 = $cmdGit.Source.ToLower().IndexOf('\cmd\git')
+        if ($idx2 -ge 0) { $gitRootCandidates += $cmdGit.Source.Substring(0, $idx2) }
+    }
+    if ($InstallDir) { $gitRootCandidates += Join-Path $InstallDir 'data\mingit' }
+    if ($env:LOCALAPPDATA) { $gitRootCandidates += Join-Path $env:LOCALAPPDATA 'Programs\Git' }
+    $gitRootCandidates += @(
+        'C:\Program Files\Git',
+        'C:\Program Files (x86)\Git',
+        'D:\Program Files\Git'
+    )
+
+    # Deduplicate case-insensitively (Windows paths).
+    $seen = @{}
+    $dedupedRoots = @()
+    foreach ($r in $gitRootCandidates) {
+        if ([string]::IsNullOrEmpty($r)) { continue }
+        $key = $r.ToLower().TrimEnd('\')
+        if (-not $seen.ContainsKey($key)) {
+            $seen[$key] = $true
+            $dedupedRoots += $r
         }
     }
-    if (-not $gitMingw64Bin) {
-        # Fallback: scan common Git install roots
-        $roots = @('C:\Program Files\Git', 'D:\Program Files\Git', 'E:\Program Files\Git', 'C:\Program Files (x86)\Git')
-        foreach ($root in $roots) {
-            $candidate = Join-Path (Join-Path $root 'mingw64') 'bin'
-            if (Test-Path (Join-Path $candidate 'libssl-3-x64.dll')) {
+
+    foreach ($root in $dedupedRoots) {
+        foreach ($sub in @('mingw64\bin', 'usr\bin')) {
+            $candidate = Join-Path $root $sub
+            if (-not (Test-Path $candidate)) { continue }
+            $hit = Get-ChildItem -Path $candidate -Filter 'libssl-3*.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) {
                 $gitMingw64Bin = $candidate
+                $gitRootForLog = $root
                 break
             }
         }
+        if ($gitMingw64Bin) { break }
     }
 
     if ($gitMingw64Bin) {
-        Write-Step "Found Git mingw64 bin at $gitMingw64Bin - prepending to PATH for FTS/OpenSSL"
+        Write-Step "Found OpenSSL 3 DLL at $gitMingw64Bin (root $gitRootForLog) - prepending to PATH for FTS"
         $env:PATH = $gitMingw64Bin + ';' + $env:PATH
     } else {
-        Write-Warn "Git mingw64 bin not found - FTS extension may fail to load (OpenSSL 3 DLLs missing). Semantic search will degrade."
+        Write-Warn "Git mingw64\bin / usr\bin not found in any candidate root - FTS extension may fail to load (OpenSSL 3 DLLs missing). Semantic search will degrade."
     }
 
-    # Repair FTS indexes (one-time; subsequent analyzes maintain them incrementally)
+    # Repair FTS indexes (one-time; subsequent analyzes maintain them incrementally).
+    # Capture the full output so the catch block can surface the real error
+    # instead of just the exception type ($_ in PowerShell renders as
+    # "System.Management.Automation.RemoteException" for native failures).
     Write-Step "Repairing GitNexus FTS indexes..."
     $env:GITNEXUS_LBUG_BUFFER_POOL_SIZE = '4294967296'  # 4 GiB - required when FTS is enabled
+    $repairOut = ''
+    $repairExit = 0
     try {
-        & $gitnexusCmd analyze --repair-fts 2>&1 | ForEach-Object { Write-Host "  $_" }
-        Write-Success "GitNexus FTS indexes repaired successfully"
+        $repairOut = & $gitnexusCmd analyze --repair-fts 2>&1 | ForEach-Object { Write-Host "  $_"; $_ }
+        $repairExit = $LASTEXITCODE
     } catch {
-        Write-Warn "FTS repair failed (non-fatal): $_"
+        $repairExit = -1
+    }
+    if ($repairExit -eq 0) {
+        Write-Success "GitNexus FTS indexes repaired successfully"
+    } else {
+        $lastLine = ($repairOut -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace($lastLine)) { $lastLine = "gitnexus exited with code $repairExit" }
+        Write-Warn "FTS repair failed (non-fatal): $lastLine"
         Write-Host "  You can run manually later: gitnexus analyze --repair-fts"
     }
 } else {
@@ -1479,6 +1521,7 @@ Next steps:
   * Local mode:    cd $InstallDir && .\launch-glitch.bat (select Local at prompt)
   * Safe mode:     cd $InstallDir && .\launch-glitch.bat (select Safe at prompt)
   * Update:        Re-run this installer (it will pull latest)
+  * Set up models:  set OPENROUTER_API_KEY (or another provider key), then restart Glitch - or run /login inside the TUI
   * User sync:     .\scripts\sync-user.ps1 -Push  (after making changes)
 
 Documentation: https://github.com/Cothek/glitch-pi

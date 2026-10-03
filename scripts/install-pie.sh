@@ -18,7 +18,7 @@ USER_REPO=""
 BRANCH=""
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-INSTALLER_VERSION="1.1.0-pie.2"
+INSTALLER_VERSION="1.1.0-pie.3"
 
 # Set up logging - captures all output to a file for diagnosis.
 # Logs to /tmp first (the install dir may not exist yet and must not be
@@ -545,6 +545,13 @@ if [ -f "$BOOTSTRAP_PATH" ]; then
 else
     warn "bootstrap-pi.ps1 not found — launch-glitch.sh will still fetch Node.js."
 fi
+
+# Handy (optional voice input): the download recipe in config/tools.json has a
+# win32 platform entry only, so macOS/Linux cannot install Handy automatically.
+header "Handy (optional voice input)"
+step "Not provisioned on macOS/Linux (Windows-only download recipe)."
+warn "  Want voice input? Install Handy manually and drop Handy.app into:"
+warn "    $INSTALL_DIR/handy-voice/"
 
 
 # 4.5. Install GitNexus (MCP code graph)

@@ -8,7 +8,8 @@
     bootstrap script, which downloads the dependencies the Pi engine needs:
     Node.js, the pi CLI + pi-web-ui stack, engine skills, and the Cloudflare
     tunnel binary. Optionally sets up a user profile from GitHub, and launches
-    Glitch. Handy (optional voice input) is not provisioned by this installer.
+    Glitch. Handy (optional voice input) is offered as a prompt and installed
+    only if you say yes (Windows; the download recipe is Windows-only).
 
 .PARAMETER InstallDir
     Custom installation directory (default: $HOME\glitch-pi)
@@ -60,7 +61,7 @@ param(
 )
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-$InstallerVersion = "1.1.0-pie.2"
+$InstallerVersion = "1.1.0-pie.3"
 
 # Set up logging - captures all output to a file for diagnosis
 # Log starts in TEMP (always exists) and is relocated into the install directory
@@ -1048,6 +1049,42 @@ if (Test-Path $cuaBin) {
     if (-not (Test-Path $dcCfg)) {
         New-Item -ItemType Directory -Path $dcCfgDir -Force | Out-Null
         "{ `"enabled`": $($dcEnabled.ToString().ToLower()) }" | Set-Content -Path $dcCfg -Encoding UTF8
+    }
+}
+
+# 4.85 Handy (optional voice input) - ask, never assume. The manifest recipe
+# (config/tools.json handy-voice) knows how to fetch and extract the MSI, so
+# this step reuses it instead of duplicating download/extract logic. The recipe
+# has a win32 platform entry only: on macOS/Linux nothing here can install it.
+$handyTarget = Join-Path $InstallDir "handy-voice\Handy\handy.exe"
+Write-Header "Handy (optional voice input)"
+if (Test-Path $handyTarget) {
+    Write-Success "Handy already installed"
+} else {
+    Write-Host "  Handy gives Glitch local voice input (~35 MB download)." -ForegroundColor White
+    Write-Host "  It runs only when you talk to Glitch. Skipping is fine - add it" -ForegroundColor White
+    Write-Host "  later with: node scripts\check-updates.mjs --apply --filter handy-voice"
+    Write-Prompt "  Install Handy now? [y/N] "
+    $handyAnswer = Read-Host
+    if ($handyAnswer -match '^[Yy]') {
+        $handyNode = Join-Path $InstallDir "data\node\node.exe"
+        if (-not (Test-Path $handyNode)) { $handyNode = "node" }
+        Push-Location $InstallDir
+        try {
+            & $handyNode "scripts\check-updates.mjs" --apply --filter handy-voice
+        } catch {
+            Write-Warn "  Handy install failed (non-fatal): $_"
+        } finally {
+            Pop-Location
+        }
+        if (Test-Path $handyTarget) {
+            Write-Success "Handy installed at handy-voice\Handy\handy.exe"
+        } else {
+            Write-Warn "  Handy was not installed. Retry later with:"
+            Write-Host "    cd $InstallDir; node scripts\check-updates.mjs --apply --filter handy-voice" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Step "  Skipped. Add later with: node scripts\check-updates.mjs --apply --filter handy-voice"
     }
 }
 

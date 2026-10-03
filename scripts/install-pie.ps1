@@ -146,17 +146,42 @@ function Test-GitInPersistedPath {
 # page-picker unzip) need bash.exe from the same Git tree. A MinGit-only or
 # otherwise bash-less git passes the git.exe gate and then leaves the
 # install without bash (reproduced: fresh install reported 'Bash not
-# found'). Require bash beside git (usr\bin or bin, both standard) or on
-# the session PATH.
+# found'). Mirror the checker's resolver: walk up to 4 ancestors from
+# git.exe probing usr\bin then bin, AND accept a bare bash.exe sitting
+# directly in any persisted-or-session PATH entry.
 function Test-BashBesideGit {
     param([string]$GitExe)
     if (-not $GitExe) { return $false }
-    $cmdDir = Split-Path $GitExe -Parent
-    $root = Split-Path $cmdDir -Parent
-    foreach ($rel in @("usr\bin\bash.exe", "bin\bash.exe")) {
-        if (Test-Path (Join-Path $root $rel)) { return $true }
+    # Walk up to 4 ancestors: <git>/cmd -> ... -> <gitroot>. Probe usr\bin then
+    # bin at each level. Mirrors bashBesideGitExe in check-install.mjs.
+    $dir = Split-Path $GitExe -Parent
+    for ($i = 0; $i -lt 4; $i++) {
+        foreach ($rel in @("usr\bin\bash.exe", "bin\bash.exe")) {
+            if (Test-Path (Join-Path $dir $rel)) { return $true }
+        }
+        $parent = Split-Path $dir -Parent
+        if ([string]::IsNullOrEmpty($parent) -or ($parent -eq $dir)) { break }
+        $dir = $parent
     }
-    if (Get-Command bash -ErrorAction SilentlyContinue) { return $true }
+    # Accept a bare bash.exe in any PATH entry -- session AND persisted. The
+    # installer's gate uses the persisted PATH because launch-glitch prepends
+    # bundled MinGit at every launch without persisting it; but bash from a
+    # scoop/chocolatey shim dir or a standalone MinGit only needs to be on
+    # PATH to satisfy Glitch's bash tool.
+    foreach ($scope in @('Session', 'User', 'Machine')) {
+        $pathValue = $null
+        if ($scope -eq 'Session') {
+            $pathValue = $env:PATH
+        } else {
+            $pathValue = [Environment]::GetEnvironmentVariable('Path', $scope)
+        }
+        if ([string]::IsNullOrEmpty($pathValue)) { continue }
+        foreach ($entry in $pathValue.Split(';')) {
+            $trimmed = $entry.Trim().Trim('"').TrimEnd('\')
+            if ([string]::IsNullOrEmpty($trimmed)) { continue }
+            if (Test-Path (Join-Path $trimmed 'bash.exe')) { return $true }
+        }
+    }
     return $false
 }
 

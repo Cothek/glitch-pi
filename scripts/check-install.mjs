@@ -308,11 +308,21 @@ function persistedPathDirs() {
   }
   return dirs;
 }
-
-function bashBesideGit(gitRoot) {
-  for (const rel of [['usr', 'bin', 'bash.exe'], ['bin', 'bash.exe']]) {
-    const candidate = join(gitRoot, ...rel);
-    if (existsSync(candidate)) return candidate;
+// Walk up to 4 ancestors from git.exe probing usr\bin\bash.exe then
+// bin\bash.exe at each level. Mirrors Test-BashBesideGit in install-pie.ps1
+// so the installer and the checker agree on every git layout (cmd\,
+// mingw64\bin, bin\, scoop, chocolatey shim, portable git).
+function bashBesideGitExe(gitExe) {
+  if (!gitExe) return null;
+  let dir = dirname(gitExe);
+  for (let i = 0; i < 4; i++) {
+    for (const rel of [['usr', 'bin', 'bash.exe'], ['bin', 'bash.exe']]) {
+      const candidate = join(dir, ...rel);
+      if (existsSync(candidate)) return candidate;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
   return null;
 }
@@ -325,12 +335,20 @@ function findBashViaSystemGit() {
     const t = d.trim().replace(/^"|"$/g, '');
     if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); pathDirs.push(t); }
   }
+  // Pass 1: every PATH dir with git.exe; resolve bash by walking up from git.exe.
   for (const dir of pathDirs) {
-    if (!existsSync(join(dir, 'git.exe'))) continue;
-    const bash = bashBesideGit(dirname(dir));
+    const gitExe = join(dir, 'git.exe');
+    if (!existsSync(gitExe)) continue;
+    const bash = bashBesideGitExe(gitExe);
     if (bash) return bash;
   }
-  // Last resort: common install roots (git.exe may sit in cmd/ or bin/).
+  // Pass 2: bare bash.exe sitting directly in a PATH dir (scoop/chocolatey
+  // shims, standalone MinGit, etc.) -- git on PATH not required.
+  for (const dir of pathDirs) {
+    const bashExe = join(dir, 'bash.exe');
+    if (existsSync(bashExe)) return bashExe;
+  }
+  // Pass 3: last-ditch known install roots. git.exe may live in cmd\ or bin\.
   const roots = [
     process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs', 'Git') : null,
     'C:\\Program Files\\Git',
@@ -339,8 +357,9 @@ function findBashViaSystemGit() {
   ].filter(Boolean);
   for (const root of roots) {
     for (const sub of ['cmd', 'bin']) {
-      if (!existsSync(join(root, sub, 'git.exe'))) continue;
-      const bash = bashBesideGit(root);
+      const gitExe = join(root, sub, 'git.exe');
+      if (!existsSync(gitExe)) continue;
+      const bash = bashBesideGitExe(gitExe);
       if (bash) return bash;
     }
   }

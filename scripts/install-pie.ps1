@@ -91,6 +91,23 @@ trap {
     return
 }
 
+# Resolve a helper script that ships inside the cloned repository. WHY NOT
+# $PSScriptRoot: it is EMPTY when the installer runs via `irm ... | iex`
+# (no backing file -> "Join-Path ... empty string" fatal, reproduced on a
+# fresh install answering Y to the virtual-monitor prompt), and the
+# -OutFile/-File flow points it at the TEMP download where the helpers do
+# not exist. The clone at $InstallDir\scripts is the reliable source.
+function Resolve-RepoScript([string]$relative) {
+    $dirs = @()
+    if ($InstallDir) { $dirs += (Join-Path $InstallDir "scripts") }
+    if ($PSScriptRoot) { $dirs += $PSScriptRoot }
+    foreach ($dir in $dirs) {
+        $p = Join-Path $dir $relative
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    return ''
+}
+
 # Color output helpers
 function Write-Header { param([string]$msg) Write-Host "`n$msg" -ForegroundColor Magenta }
 function Write-Step   { param([string]$msg) Write-Host "  $msg" -ForegroundColor Cyan }
@@ -958,6 +975,13 @@ if ($cuaPresent) {
         $cuaOk = $false
         try {
             Invoke-WithSpinner -Label "Installing cua-driver" -DoneMessage "cua-driver" -ScriptBlock {
+                # Start-Job spawns a child PowerShell that does NOT inherit the
+                # parent's -ExecutionPolicy Bypass. On machines that default to
+                # Restricted, that child then refuses to load the official
+                # installer's downloaded .psm1 ("running scripts is disabled on
+                # this system"). Process scope needs no admin, so relax it for
+                # this job before invoking the downloaded installer.
+                try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction SilentlyContinue } catch {}
                 # irm | iex cannot pass switches, so invoke as a scriptblock instead.
                 # Default AutoStart=true registers the logon serve task (admin once).
                 & ([scriptblock]::Create((Invoke-RestMethod -Uri "https://cua.ai/driver/install.ps1")))
@@ -984,12 +1008,12 @@ if ($cuaPresent) {
 # Wire the MCP server whenever the driver is present (also on re-install: keeps the
 # wiring in sync). The junction path is stable across driver upgrades.
 if (Test-Path $cuaBin) {
-    $wireMcp = Join-Path $PSScriptRoot "lib\wire-mcp.mjs"
+    $wireMcp = Resolve-RepoScript "lib\wire-mcp.mjs"
     $bundledNode = Join-Path $InstallDir "data\node\node.exe"
     $nodeCmd = $null
     if (Test-Path $bundledNode) { $nodeCmd = $bundledNode }
     elseif (Get-Command node -ErrorAction SilentlyContinue) { $nodeCmd = "node" }
-    if ($nodeCmd -and (Test-Path $wireMcp)) {
+    if ($nodeCmd -and $wireMcp -and (Test-Path $wireMcp)) {
         & $nodeCmd $wireMcp --id cua-driver --command $cuaBin --args mcp
     } else {
         Write-Warn "Could not wire the cua-driver MCP server (no node or helper missing)."
@@ -1039,11 +1063,11 @@ if ($vddOk) {
     Write-Prompt "  Install headless display driver now? [y/N] "
     $vddAnswer = Read-Host
     if ($vddAnswer -match '^[Yy]') {
-        $vddScript = Join-Path $PSScriptRoot "install-headless-display.ps1"
-        if (Test-Path $vddScript) {
+        $vddScript = Resolve-RepoScript "install-headless-display.ps1"
+        if ($vddScript -and (Test-Path $vddScript)) {
             & $vddScript
         } else {
-            Write-Warn "install-headless-display.ps1 not found at $vddScript"
+            Write-Warn "install-headless-display.ps1 not found in the install dir's scripts folder."
         }
     } else {
         Write-Warn "Skipped. Run later: scripts\install-headless-display.ps1"

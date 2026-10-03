@@ -728,6 +728,26 @@ if (-not (Test-Path "$InstallDir\.git")) {
         $env:PATH = "$finalGitDir\cmd;$finalGitDir\usr\bin;$env:PATH"
         $gitPath = Join-Path $finalGitDir "cmd\git.exe"
         Write-Success "MinGit installed to $finalGitDir"
+
+        # Execution self-test: the bashless-busybox guard above proves bash.exe
+        # EXISTS, but Glitch's tools actually INVOKE bash. A copy that extracted
+        # fine can still be unusable (e.g. a busybox-bash shim that exits
+        # immediately, or a DLL-search-path mismatch). Run --version; if it
+        # works, log the version; if not, warn loudly but keep going so the
+        # installer still finishes (the existing extractor and persistence
+        # logic remain intact - this is purely a visibility upgrade).
+        $bundledBash = Join-Path $finalGitDir "usr\bin\bash.exe"
+        try {
+            $bashVersionOut = & $bundledBash --version 2>&1
+            $bashVersionLine = ($bashVersionOut | Select-Object -First 1) -as [string]
+            if ($LASTEXITCODE -eq 0 -and $bashVersionLine) {
+                Write-Success "Bundled bash works: $bashVersionLine"
+            } else {
+                Write-Warn "Bundled bash at $bundledBash did not report a version (exit $LASTEXITCODE). Glitch's bash tool may not work; consider installing Git for Windows."
+            }
+        } catch {
+            Write-Warn "Bundled bash at $bundledBash failed to execute ($($_.Exception.Message)). Glitch's bash tool may not work; consider installing Git for Windows."
+        }
     }
 
     # Persist the FINAL git location for the staged (just-downloaded) case.

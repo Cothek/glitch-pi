@@ -419,24 +419,70 @@ function findBashViaSystemGit() {
   return null;
 }
 
+// Execution probe: bash.exe being on disk is necessary, not sufficient.
+// Mirrors the install-pie.ps1 self-test that runs `bash --version` after
+// MinGit is finalized: a file that exists may still fail to launch (busybox
+// shim that exits immediately, DLL search-path mismatch, blocked by AV, etc.).
+// Returns { ok, shortVersion, error }. shortVersion is X.Y[.Z]; error is a
+// short human-readable reason on failure.
+function probeBashExecutable(bashExe) {
+  let out;
+  try {
+    out = execFileSync(bashExe, ['--version'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    const msg = (e && (e.message || String(e))) || 'unknown error';
+    const short = msg.split('\n')[0].slice(0, 200);
+    return { ok: false, shortVersion: null, error: short };
+  }
+  const text = String(out || '').trim();
+  if (!text) {
+    return { ok: false, shortVersion: null, error: 'no output' };
+  }
+  const m = text.match(/version\s+(\d+\.\d+(?:\.\d+)?)/i);
+  const shortVersion = m ? m[1] : text.split('\n')[0].slice(0, 40);
+  return { ok: true, shortVersion, error: null };
+}
+
 check('Bash (MinGit)', 'Tools', () => {
   if (isWin) {
     const bashExe = join(ROOT_DIR, 'data', 'mingit', 'usr', 'bin', 'bash.exe');
     if (existsSync(bashExe)) {
+      const probe = probeBashExecutable(bashExe);
+      if (probe.ok) {
+        return {
+          ok: true,
+          version: null,
+          path: 'data/mingit/usr/bin/bash.exe',
+          note: `bundled MinGit (bash ${probe.shortVersion})`,
+        };
+      }
       return {
-        ok: true,
+        ok: false,
         version: null,
         path: 'data/mingit/usr/bin/bash.exe',
-        note: 'bundled MinGit',
+        note: `bundled MinGit bash.exe is present at data\\mingit\\usr\\bin\\bash.exe but failed to execute (${probe.error}). Glitch's bash tool will not work. Re-run the installer to re-extract MinGit, or delete data\\mingit and let it re-provision.`,
       };
     }
     const sysBash = findBashViaSystemGit();
     if (sysBash) {
+      const probe = probeBashExecutable(sysBash);
+      if (probe.ok) {
+        return {
+          ok: true,
+          version: null,
+          path: sysBash,
+          note: `system git bash (bash ${probe.shortVersion})`,
+        };
+      }
       return {
-        ok: true,
+        ok: false,
         version: null,
         path: sysBash,
-        note: 'system git bash',
+        note: `system git bash at ${sysBash} exists but failed to execute (${probe.error}). Glitch's bash tool will not work.`,
       };
     }
     const diag = findBashViaSystemGit.lastDiagnostics || { gitCandidates: [], bareBashOnPath: false };

@@ -61,7 +61,7 @@ param(
 )
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-$InstallerVersion = "1.1.0-pie.3"
+$InstallerVersion = "1.1.0-pie.4"
 
 # Set up logging - captures all output to a file for diagnosis
 # Log starts in TEMP (always exists) and is relocated into the install directory
@@ -389,7 +389,7 @@ Parameters:
   -UserRepo <url>      GitHub user repo URL for profile sync (e.g. https://github.com/user/repo.git)
 
 Prerequisites:
-  - Git (auto-downloaded if missing -- portable MinGit ~40 MB)
+  - Git with bash (auto-downloaded automatically - no system Git needed)
   - Internet connection
   - PowerShell 5.1+ (built into Windows 10/11)
 
@@ -510,75 +510,295 @@ if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
             } else {
                 Write-Warn "Git not found in PATH."
             }
-            Write-Step "Downloading MinGit (portable Git for Windows, ~40 MB)..."
+            Write-Step "Provisioning Git (ordered tier list: ZIP -> 7-Zip SFX -> NSIS -> MinGit)..."
 
             $gitStagedDir = Join-Path $env:TEMP "glitch-mingit"
             $gitBin = Join-Path $gitStagedDir "cmd\git.exe"
+            $gitBash = Join-Path $gitStagedDir "usr\bin\bash.exe"
 
-            # Try to get latest release URL from GitHub API. NOTE: the glob
-            # 'MinGit-*-64-bit.zip' also matches the busybox variant
-            # ('MinGit-<ver>-busybox-64-bit.zip'), which ships git.exe but NO
-            # usr\bin\bash.exe. Exclude busybox deterministically and fall
-            # back to the hardcoded full build if no non-busybox asset is
-            # available rather than throwing "No MinGit asset found".
+            # Probe the staging dir: bash-capable tiers require BOTH cmd\git.exe
+            # AND usr\bin\bash.exe; tier 4 (MinGit) accepts git.exe alone.
+            function Test-GitStagedTree {
+                    param([string]$StagedDir)
+                    $probeGit  = Join-Path $StagedDir "cmd\git.exe"
+                    $probeBash = Join-Path $StagedDir "usr\bin\bash.exe"
+                    return [pscustomobject]@{
+                        Git  = (Test-Path $probeGit)
+                        Bash = (Test-Path $probeBash)
+                        GitExePath  = if (Test-Path $probeGit)  { $probeGit }  else { $null }
+                        BashExePath = if (Test-Path $probeBash) { $probeBash } else { $null }
+                    }
+                }
+
+            # Resolve the latest release once. Asset NAMES use the 3-part
+            # version (e.g. "2.56.0") while the tag uses 4-part
+            # (v2.56.0.windows.1). The download URLs embed the tag, but the
+            # asset filenames we pattern-match embed the 3-part form.
             try {
                 $apiUrl = "https://api.github.com/repos/git-for-windows/git/releases/latest"
                 $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10
-                $minGitAsset = $release.assets | Where-Object { $_.name -like "MinGit-*-64-bit.zip" -and $_.name -notlike "*busybox*" } | Select-Object -First 1
-                if ($minGitAsset) {
-                    $downloadUrl = $minGitAsset.browser_download_url
-                    Write-Step "  Found: $($minGitAsset.name)"
-                } else {
-                    # No non-busybox asset in the latest release (or the API
-                    # response was empty). Fall through to the known-good full
-                    # MinGit URL below; do NOT throw "No MinGit asset found"
-                    # because that would mask a busybox-only release with a
-                    # generic message.
-                    $downloadUrl = "https://github.com/git-for-windows/git/releases/download/v2.47.0.windows.2/MinGit-2.47.0.2-64-bit.zip"
-                    Write-Step "  No non-busybox MinGit asset in latest release; using fixed MinGit 2.47.0.2"
-                }
+                $tagName = $release.tag_name
+                $assets  = $release.assets
             } catch {
-                # Fallback to known good version
-                $downloadUrl = "https://github.com/git-for-windows/git/releases/download/v2.47.0.windows.2/MinGit-2.47.0.2-64-bit.zip"
-                Write-Step "  Using fixed MinGit 2.47.0.2 (API failed: $($_.Exception.Message))"
+                $tagName = $null
+                $assets  = @()
+            }
+            $ver3 = if ($tagName) { ($tagName -replace '^v','') -replace '\.windows\.','.' } else { '2.56.0' }
+            $fallbackTag = 'v2.47.0.windows.2'
+            $fallbackVer3 = '2.47.0'
+
+            # Helper: emit a fresh staging dir per tier; wipe any leftovers from
+            # a prior tier so a half-extracted archive does not fool the probe.
+            $tierAttempt = 0
+            function Reset-StagingDir {
+                    param([string]$Dir)
+                    if (Test-Path $Dir) { Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue }
+                    New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+                }
+
+            # TIER 1: a plain bash-capable ZIP (rare today, kept for future
+            # PortableGit-*-64-bit.zip releases). Expand-Archive only.
+            $tier1Asset = $assets | Where-Object {
+                $_.name -like "PortableGit-*-64-bit.zip" -or
+                $_.name -like "Git-*-64-bit.zip"
+            } | Where-Object { $_.name -notlike "*busybox*" -and $_.name -notlike "*arm64*" } | Select-Object -First 1
+            $tierAccepted = $false
+            $tierAcceptedName = $null
+            $tierIsGitOnly = $false
+
+            if ($tier1Asset) {
+                $tierAttempt++
+                Write-Step "Trying tier 1 (bash-capable ZIP): $($tier1Asset.name)"
+                $tempZip = Join-Path $env:TEMP "glitch-git-tier1.zip"
+                $dlOk = $false
+                try {
+                    Invoke-WithSpinner -Label "Downloading $($tier1Asset.name)" -DoneMessage "Download" -ScriptBlock {
+                        Invoke-WebRequest -Uri $using:tier1Asset.browser_download_url -OutFile $using:tempZip -UseBasicParsing -TimeoutSec 120
+                    }
+                    $dlOk = $true
+                } catch {
+                    Write-Step "Tier 1 failed: download error - $($_.Exception.Message) - trying next option"
+                }
+                if ($dlOk) {
+                    try {
+                        Reset-StagingDir $gitStagedDir
+                        Invoke-WithSpinner -Label "Extracting $($tier1Asset.name)" -DoneMessage "Extract" -ScriptBlock {
+                            Expand-Archive -Path $using:tempZip -DestinationPath $using:gitStagedDir -Force
+                        }
+                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
+                        if ($probe.Git -and $probe.Bash) {
+                            $tierAccepted = $true
+                            $tierAcceptedName = $tier1Asset.name
+                        } else {
+                            Write-Step "Tier 1 failed: extracted archive missing cmd\git.exe or usr\bin\bash.exe - trying next option"
+                        }
+                    } catch {
+                        Write-Step "Tier 1 failed: $($_.Exception.Message) - trying next option"
+                    } finally {
+                        Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+                    }
+                }
             }
 
-            $tempZip = Join-Path $env:TEMP "glitch-mingit.zip"
-            try {
-                Invoke-WithSpinner -Label "Downloading MinGit (40MB)" -DoneMessage "MinGit" -ScriptBlock {
-                  Invoke-WebRequest -Uri $using:downloadUrl -OutFile $using:tempZip -UseBasicParsing -TimeoutSec 120
+            # TIER 2: PortableGit-<ver>-64-bit.7z.exe (7-Zip SFX). 7z.sfx honours
+            # `-y` (auto-confirm overwrite) and `-o<dir>` (output). Run via the
+            # call operator with an argument array so quoting is safe.
+            if (-not $tierAccepted) {
+                $tier2Asset = $assets | Where-Object {
+                    $_.name -like "PortableGit-*-64-bit.7z.exe" -and $_.name -notlike "*arm64*"
+                } | Select-Object -First 1
+                if (-not $tier2Asset) {
+                    # Synthesize the URL from the tag if the API list was empty
+                    $tier2Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/PortableGit-$fallbackVer3-64-bit.7z.exe"
+                    $tier2Name = "PortableGit-$fallbackVer3-64-bit.7z.exe (fallback)"
+                } else {
+                    $tier2Url  = $tier2Asset.browser_download_url
+                    $tier2Name = $tier2Asset.name
                 }
+                $tierAttempt++
+                Write-Step "Trying tier 2 (7-Zip SFX): $tier2Name"
+                $tempSfx = Join-Path $env:TEMP "glitch-git-tier2.7z.exe"
+                $dlOk = $false
+                try {
+                    Invoke-WithSpinner -Label "Downloading $tier2Name" -DoneMessage "Download" -ScriptBlock {
+                        Invoke-WebRequest -Uri $tier2Url -OutFile $using:tempSfx -UseBasicParsing -TimeoutSec 120
+                    }
+                    $dlOk = $true
+                } catch {
+                    Write-Step "Tier 2 failed: download error - $($_.Exception.Message) - trying next option"
+                }
+                if ($dlOk) {
+                    try {
+                        Reset-StagingDir $gitStagedDir
+                        # 7-Zip SFX supports -y and -o<dir>. Wait for completion
+                        # so the probe below sees the extracted tree.
+                        $sfxProc = Start-Process -FilePath $tempSfx -ArgumentList @('-y', "-o$gitStagedDir") -Wait -PassThru -NoNewWindow
+                        if ($sfxProc.ExitCode -ne 0) {
+                            throw "7-Zip SFX exited with code $($sfxProc.ExitCode)"
+                        }
+                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
+                        if ($probe.Git -and $probe.Bash) {
+                            $tierAccepted = $true
+                            $tierAcceptedName = $tier2Name
+                        } else {
+                            Write-Step "Tier 2 failed: extracted SFX missing cmd\git.exe or usr\bin\bash.exe - trying next option"
+                        }
+                    } catch {
+                        Write-Step "Tier 2 failed: $($_.Exception.Message) - trying next option"
+                    } finally {
+                        Remove-Item $tempSfx -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
 
-                New-Item -ItemType Directory -Path $gitStagedDir -Force | Out-Null
-                Invoke-WithSpinner -Label "Extracting MinGit" -DoneMessage "MinGit" -ScriptBlock {
-                  Expand-Archive -Path $using:tempZip -DestinationPath $using:gitStagedDir -Force
+            # TIER 3: Git-<ver>-64-bit.exe (silent NSIS). /VERYSILENT suppresses
+            # most dialogs; /NORESTART prevents reboot prompts; /NOCANCEL
+            # prevents the abort button; /SP- skips the "welcome" page so no
+            # UAC pre-prompt beyond the elevation the installer always
+            # requires. /DIR installs into our bundled mingit dir.
+            if (-not $tierAccepted) {
+                $tier3Asset = $assets | Where-Object {
+                    $_.name -like "Git-*-64-bit.exe" -and $_.name -notlike "*arm64*"
+                } | Select-Object -First 1
+                if (-not $tier3Asset) {
+                    $tier3Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/Git-$fallbackVer3-64-bit.exe"
+                    $tier3Name = "Git-$fallbackVer3-64-bit.exe (fallback)"
+                } else {
+                    $tier3Url  = $tier3Asset.browser_download_url
+                    $tier3Name = $tier3Asset.name
                 }
-                Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+                $tierAttempt++
+                Write-Step "Trying tier 3 (NSIS silent): $tier3Name"
+                $tempNsis = Join-Path $env:TEMP "glitch-git-tier3.exe"
+                $nsisTargetDir = Join-Path $env:TEMP "glitch-git-nsis-install"
+                if (Test-Path $nsisTargetDir) { Remove-Item $nsisTargetDir -Recurse -Force -ErrorAction SilentlyContinue }
+                New-Item -ItemType Directory -Path $nsisTargetDir -Force | Out-Null
+                $dlOk = $false
+                try {
+                    Invoke-WithSpinner -Label "Downloading $tier3Name" -DoneMessage "Download" -ScriptBlock {
+                        Invoke-WebRequest -Uri $tier3Url -OutFile $using:tempNsis -UseBasicParsing -TimeoutSec 120
+                    }
+                    $dlOk = $true
+                } catch {
+                    Write-Step "Tier 3 failed: download error - $($_.Exception.Message) - trying next option"
+                }
+                if ($dlOk) {
+                    try {
+                        Reset-StagingDir $gitStagedDir
+                        # NSIS will raise ONE UAC dialog (Elevation) which we
+                        # cannot suppress without UAC disabled. The installer's
+                        # own elevation elsewhere makes this acceptable.
+                        $nsisArgs = @(
+                            '/VERYSILENT',
+                            '/SUPPRESSMSGBOXES',
+                            '/NORESTART',
+                            '/NOCANCEL',
+                            '/SP-',
+                            "/DIR=`"$nsisTargetDir`""
+                        )
+                        Write-Step "  Note: the installer may raise ONE UAC prompt to elevate."
+                        $nsisProc = Start-Process -FilePath $tempNsis -ArgumentList $nsisArgs -Wait -PassThru
+                        if ($nsisProc.ExitCode -ne 0) {
+                            throw "Git NSIS returned exit code $($nsisProc.ExitCode)"
+                        }
+                        # NSIS installs into $nsisTargetDir\cmd\git.exe (and a
+                        # usr\bin/bash.exe beside it). Copy the whole tree into
+                        # the staging dir for a uniform downstream probe.
+                        if (Test-Path $nsisTargetDir) {
+                            Copy-Item "$nsisTargetDir\*" $gitStagedDir -Recurse -Force
+                        }
+                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
+                        if ($probe.Git -and $probe.Bash) {
+                            $tierAccepted = $true
+                            $tierAcceptedName = $tier3Name
+                        } else {
+                            Write-Step "Tier 3 failed: installed Git missing cmd\git.exe or usr\bin\bash.exe - trying next option"
+                        }
+                    } catch {
+                        Write-Step "Tier 3 failed: $($_.Exception.Message) - trying next option"
+                    } finally {
+                        Remove-Item $tempNsis -Force -ErrorAction SilentlyContinue
+                        Remove-Item $nsisTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
 
-                if (-not (Test-Path $gitBin)) {
-                    throw "MinGit binary not found after extraction at $gitBin"
+            # TIER 4 (last resort, git-ONLY): the non-busybox MinGit zip.
+            # MinGit ships git.exe but NO usr\bin\bash.exe -- so this tier
+            # accepts git.exe alone and warns loudly that bash is absent.
+            # The install MUST CONTINUE (Glitch works for git operations; only
+            # bash-dependent features like shell tools and some skills will
+            # not run).
+            if (-not $tierAccepted) {
+                $tier4Asset = $assets | Where-Object {
+                    $_.name -like "MinGit-*-64-bit.zip" -and $_.name -notlike "*busybox*"
+                } | Select-Object -First 1
+                if (-not $tier4Asset) {
+                    $tier4Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/MinGit-$fallbackVer3.2-64-bit.zip"
+                    $tier4Name = "MinGit-$fallbackVer3.2-64-bit.zip (fallback)"
+                } else {
+                    $tier4Url  = $tier4Asset.browser_download_url
+                    $tier4Name = $tier4Asset.name
                 }
-                # Also require usr\bin\bash.exe: the busybox MinGit variant ships
-                # git.exe but no bash, and Glitch's tools require bash. Fail loud
-                # with an actionable message instead of silently staging a
-                # bashless git that will break every downstream bash invocation.
-                $gitBash = Join-Path $gitStagedDir "usr\bin\bash.exe"
+                $tierAttempt++
+                Write-Step "Trying tier 4 (MinGit git-only last resort): $tier4Name"
+                $tempZip4 = Join-Path $env:TEMP "glitch-git-tier4.zip"
+                $dlOk = $false
+                try {
+                    Invoke-WithSpinner -Label "Downloading $tier4Name" -DoneMessage "Download" -ScriptBlock {
+                        Invoke-WebRequest -Uri $tier4Url -OutFile $using:tempZip4 -UseBasicParsing -TimeoutSec 120
+                    }
+                    $dlOk = $true
+                } catch {
+                    Write-Step "Tier 4 failed: download error - $($_.Exception.Message)"
+                }
+                if ($dlOk) {
+                    try {
+                        Reset-StagingDir $gitStagedDir
+                        Invoke-WithSpinner -Label "Extracting $tier4Name" -DoneMessage "Extract" -ScriptBlock {
+                            Expand-Archive -Path $using:tempZip4 -DestinationPath $using:gitStagedDir -Force
+                        }
+                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
+                        if ($probe.Git) {
+                            $tierAccepted = $true
+                            $tierAcceptedName = $tier4Name
+                            $tierIsGitOnly = $true
+                        } else {
+                            Write-Step "Tier 4 failed: extracted archive missing cmd\git.exe"
+                        }
+                    } catch {
+                        Write-Step "Tier 4 failed: $($_.Exception.Message)"
+                    } finally {
+                        Remove-Item $tempZip4 -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+
+            # No tier yielded even git.exe -- give the user an actionable path
+            # instead of silently continuing with no git at all.
+            if (-not $tierAccepted) {
+                throw "Could not provision Git at all. Install Git for Windows from https://git-scm.com/download/win and re-run this installer."
+            }
+
+            if (-not $tierIsGitOnly) {
+                # Bashful tiers: require bash at staging (probe above already
+                # enforced this for tier 1-3). Belt-and-braces check.
                 if (-not (Test-Path $gitBash)) {
                     Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
-                    throw "Downloaded MinGit build has no bash (busybox variant). Delete the staged folder and install Git for Windows from https://git-scm.com/download/win - Glitch's tools require bash."
+                    throw "Provisioned Git tier ($tierAcceptedName) unexpectedly lacks bash. Install Git for Windows from https://git-scm.com/download/win"
                 }
-                $env:PATH = "$gitStagedDir\cmd;$gitStagedDir\usr\bin;$env:PATH"
-                $gitPath = $gitBin
-                $gitProvisioned = $true
-                $gitNeedsPersistence = $true
-                Write-Success "MinGit staged to $gitStagedDir (will be moved after clone)"
-            } catch {
-                Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Error "Failed to download MinGit: $_"
-                Write-Error "Install Git manually from https://git-scm.com/download/win"
-                Write-Error "After installing, restart your terminal and re-run the installer."
-                throw "Installation failed"
+            } else {
+                # Tier 4 (MinGit) is git-only by design. Warn loudly and let
+                # the install continue -- Glitch's git operations work; only
+                # bash-dependent features (skills, shell tools) will not run.
+                Write-Warn "Installed git-only MinGit (no bash). Glitch works, but shell features and skills that call bash will not run. Re-run the installer or install Git for Windows to enable bash."
             }
+
+            $env:PATH = "$gitStagedDir\cmd;$gitStagedDir\usr\bin;$env:PATH"
+            $gitPath = $gitBin
+            $gitProvisioned = $true
+            $gitNeedsPersistence = $true
+            Write-Success "Git staged from $tierAcceptedName to $gitStagedDir (will be moved after clone)"
         }
     } else {
         # gitPath was found via session PATH
@@ -714,14 +934,16 @@ if (-not (Test-Path "$InstallDir\.git")) {
         if (-not (Test-Path $finalGitDir)) { New-Item -ItemType Directory -Path $finalGitDir -Force | Out-Null }
         Copy-Item "$gitStagedDir\*" $finalGitDir -Recurse -Force
         if (-not (Test-Path (Join-Path $finalGitDir "cmd\git.exe"))) {
-            throw "MinGit copy failed: $finalGitDir\cmd\git.exe missing after copy"
+            throw "Git copy failed: $finalGitDir\cmd\git.exe missing after copy"
         }
-        # Mirror the extraction check at the final location: a busybox build
-        # would copy fine but leave us with a bashless bundled git at the
-        # canonical data\mingit path, breaking every future launch.
+        # Mirror the tier 1-3 bash check at the final location: a successful
+        # copy can still leave us with a bashless bundled git when tier 4
+        # (MinGit, git-only) was accepted. In that case we still proceed --
+        # Glitch's git operations work; only bash-dependent features
+        # (skills, shell tools) will not run -- but we re-warn so the user
+        # sees the state at install time, not just on a later launch.
         if (-not (Test-Path (Join-Path $finalGitDir "usr\bin\bash.exe"))) {
-            Remove-Item $finalGitDir -Recurse -Force -ErrorAction SilentlyContinue
-            throw "Installed MinGit build has no bash (busybox variant). Delete $finalGitDir and install Git for Windows from https://git-scm.com/download/win - Glitch's tools require bash."
+            Write-Warn "Bundled Git at $finalGitDir has no bash. Glitch works, but shell features and skills that call bash will not run. Re-run the installer or install Git for Windows to enable bash."
         }
         Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $env:TEMP "glitch-mingit.zip") -Force -ErrorAction SilentlyContinue

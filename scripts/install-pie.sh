@@ -18,7 +18,7 @@ USER_REPO=""
 BRANCH=""
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-INSTALLER_VERSION="1.1.0-pie.3"
+INSTALLER_VERSION="1.1.0-pie.4"
 
 # Set up logging - captures all output to a file for diagnosis.
 # Logs to /tmp first (the install dir may not exist yet and must not be

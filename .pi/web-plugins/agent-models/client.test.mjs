@@ -899,8 +899,145 @@ describe("agent-models client: config bar", () => {
 		assert.match(newBtn.textContent, /No saved presets/);
 	});
 
+	it("Save current clears a stale edit session (regression: after Edit->Cancel, save-current silently RENAMED the old config - pins never re-captured - instead of creating the new one)", async () => {
+		globalThis.fetch = async (url, init = {}) => {
+			const method = init.method ?? "GET";
+			const body = init.body ? JSON.parse(init.body) : null;
+			fetchCalls.push({ url: String(url), method, body });
+			if (String(url).includes("/state")) return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+			if (String(url).includes("/configs/save")) return { ok: true, status: 200, json: async () => ({ ok: true, config: { id: "my-setup", name: body.name, description: body.description, agentCount: 3 }, report: { ...STATE_WITH_CONFIG, configs: [{ id: "my-setup", name: body.name, description: body.description, createdAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z", agentCount: 3 }] } }) };
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		// select a preset, open Edit, then CANCEL - the poison state
+		bar.querySelector('[data-am-config-btn]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-option="free-tier"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-edit]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		const cancel = Array.from(bar.querySelectorAll('.am-config-form-btns button')).find((b) => b.textContent === "Cancel");
+		cancel.click();
+		await new Promise((r) => setTimeout(r, 5));
+		// now "Save current" a NEW config - the stale editId must NOT ride along
+		bar.querySelector('[data-am-config-save]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		const nameInput = bar.querySelector('[data-am-config-name]');
+		nameInput.value = "My Setup";
+		nameInput.dispatchEvent("input");
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-save-submit]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		const saveCall = fetchCalls.find((c) => c.url.includes("/configs/save"));
+		assert.ok(saveCall, "POST /configs/save was made");
+		assert.equal(saveCall.body.editId ?? null, null, "editId must be null for a save-current after a cancelled edit");
+	});
 
-it("bulk: ticking checkboxes selects agents and the bulk bar counts them", async () => {
+	it("deleting the edited config clears its edit session (regression: delete then save-new sent a STALE editId and 404'd with 'config not found')", async () => {
+		globalThis.fetch = async (url, init = {}) => {
+			const method = init.method ?? "GET";
+			const body = init.body ? JSON.parse(init.body) : null;
+			fetchCalls.push({ url: String(url), method, body });
+			if (String(url).includes("/state")) return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+			if (String(url).includes("/configs/delete")) return { ok: true, status: 200, json: async () => ({ ok: true, deleted: body.id, configs: [] }) };
+			if (String(url).includes("/configs/save")) return { ok: true, status: 200, json: async () => ({ ok: true, config: { id: "my-setup", name: body.name, description: body.description, agentCount: 3 }, report: { ...STATE_WITH_CONFIG, configs: [{ id: "my-setup", name: body.name, description: body.description, createdAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z", agentCount: 3 }] } }) };
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		// select, Edit, CANCEL, then DELETE the edited config - the exact Troy flow
+		bar.querySelector('[data-am-config-btn]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-option="free-tier"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-edit]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		const cancel = Array.from(bar.querySelectorAll('.am-config-form-btns button')).find((b) => b.textContent === "Cancel");
+		cancel.click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-delete]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		// now save a NEW config - must go out as a fresh capture, no editId
+		bar.querySelector('[data-am-config-save]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		const nameInput = bar.querySelector('[data-am-config-name]');
+		nameInput.value = "My Setup";
+		nameInput.dispatchEvent("input");
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-save-submit]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		const saveCall = fetchCalls.find((c) => c.url.includes("/configs/save"));
+		assert.ok(saveCall, "POST /configs/save was made after delete");
+		assert.equal(saveCall.body.editId ?? null, null, "editId must be null after the edited config was deleted");
+		assert.equal(saveCall.body.name, "My Setup");
+	});
+
+	it("the form Save button says Update while an edit session is active", async () => {
+		globalThis.fetch = async (url, init = {}) => {
+			fetchCalls.push({ url: String(url), method: init.method ?? "GET" });
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		bar.querySelector('[data-am-config-btn]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-option="free-tier"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-edit]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		assert.equal(bar.querySelector('[data-am-config-save-submit]').textContent, "Update");
+	});
+
+	it("a failed save drops the edit session (retry honors the visible name instead of re-404ing the stale editId)", async () => {
+		let saveCount = 0;
+		globalThis.fetch = async (url, init = {}) => {
+			const method = init.method ?? "GET";
+			const body = init.body ? JSON.parse(init.body) : null;
+			fetchCalls.push({ url: String(url), method, body });
+			if (String(url).includes("/state")) return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+			if (String(url).includes("/configs/save")) {
+				saveCount++;
+				if (saveCount === 1) return { ok: true, status: 404, json: async () => ({ ok: false, error: "config not found: free-tier" }) };
+				return { ok: true, status: 200, json: async () => ({ ok: true, config: { id: "my-setup", name: body.name, description: body.description, agentCount: 3 }, report: STATE_WITH_CONFIG }) };
+			}
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		bar.querySelector('[data-am-config-btn]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-option="free-tier"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-edit]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		const cancel = Array.from(bar.querySelectorAll('.am-config-form-btns button')).find((b) => b.textContent === "Cancel");
+		cancel.click();
+		await new Promise((r) => setTimeout(r, 5));
+		// poison the session manually is not needed - simulate: save current + a failing server
+		bar.querySelector('[data-am-config-save]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		const nameInput = bar.querySelector('[data-am-config-name]');
+		nameInput.value = "My Setup";
+		nameInput.dispatchEvent("input");
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-save-submit]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		assert.ok(container.querySelector(".am-config-err"), "error shown after the failed save");
+		// retry from the still-open form: the second POST must carry NO editId
+		bar.querySelector('[data-am-config-save-submit]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		const saveCalls2 = fetchCalls.filter((c) => c.url.includes("/configs/save"));
+		assert.equal(saveCalls2.length, 2, "retry POST was made");
+		assert.equal(saveCalls2[1].body.editId ?? null, null, "retry must not re-send the stale editId");
+	});
+
+
+	it("bulk: ticking checkboxes selects agents and the bulk bar counts them", async () => {
 		const { container } = mountFresh();
 		await new Promise((r) => setTimeout(r, 5));
 		const boxes = container.querySelectorAll('[data-am-select]');

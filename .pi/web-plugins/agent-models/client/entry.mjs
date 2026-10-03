@@ -1100,7 +1100,7 @@ function createInstance(container, ctx) {
 			nameInput.addEventListener("input", () => { state.configName = nameInput.value.trim(); const b = nameInput.parentNode && nameInput.parentNode.querySelector('[data-am-config-save-submit]'); if (b) b.disabled = !state.configName || state.savingConfig; });
 			nameInput.addEventListener("keydown", (e) => {
 				if (e.key === "Enter") { e.preventDefault(); void saveConfig(); }
-				if (e.key === "Escape") { state.configFormOpen = false; state.configName = ""; state.configDesc = ""; render(); }
+				if (e.key === "Escape") { state.configFormOpen = false; state.editingConfigId = null; state.configName = ""; state.configDesc = ""; render(); }
 			});
 			const descInput = el("textarea");
 			descInput.className = "am-config-input";
@@ -1111,14 +1111,14 @@ function createInstance(container, ctx) {
 			descInput.addEventListener("input", () => { state.configDesc = descInput.value.trim(); });
 			const saveBtn = el("button", "am-btn am-primary");
 			saveBtn.type = "button";
-			saveBtn.textContent = "Save";
+			saveBtn.textContent = state.editingConfigId ? "Update" : "Save";
 			saveBtn.setAttribute("data-am-config-save-submit", "1");
 			saveBtn.disabled = !state.configName || state.savingConfig;
 			saveBtn.addEventListener("click", () => void saveConfig());
 			const cancelBtn = el("button", "am-btn");
 			cancelBtn.type = "button";
 			cancelBtn.textContent = "Cancel";
-			cancelBtn.addEventListener("click", () => { state.configFormOpen = false; state.configName = ""; state.configDesc = ""; render(); });
+			cancelBtn.addEventListener("click", () => { state.configFormOpen = false; state.editingConfigId = null; state.configName = ""; state.configDesc = ""; render(); });
 			const btns = el("div", "am-config-form-btns");
 			btns.append(saveBtn, cancelBtn);
 			form.append(nameInput, descInput, btns);
@@ -1192,6 +1192,11 @@ function createInstance(container, ctx) {
 		saveBtn.title = "Snapshot all agent model pins into a named configuration";
 		saveBtn.addEventListener("click", () => {
 			state.configFormOpen = true;
+			// "Save current" ALWAYS captures a fresh snapshot - never a rename of the
+			// config an earlier Edit session left behind. A stale editingConfigId made a
+			// save-current-after-edit silently RENAME the old config (pins never
+			// re-captured) instead of creating the new one the name asked for.
+			state.editingConfigId = null;
 			state.configName = "";
 			state.configDesc = "";
 			state.configError = null;
@@ -1241,6 +1246,10 @@ function createInstance(container, ctx) {
 		state.savingConfig = false;
 		if (payload && payload.ok) {
 			state.configFormOpen = false;
+			// The edit session is done - a fresh save or a rename must never leak its
+			// editId into the NEXT "Save current", which would rename-or-404 instead of
+			// creating the new config.
+			state.editingConfigId = null;
 			state.configName = "";
 			state.configDesc = "";
 			state.configError = null;
@@ -1256,6 +1265,10 @@ function createInstance(container, ctx) {
 		} else {
 			state.configError = (payload && payload.error) || "unknown error";
 			state.diag.lastWrite = "save-config FAILED";
+			// Drop the edit session on failure too: a retry from the still-open form
+			// must honor the VISIBLE name (save as new / upsert), never re-send a stale
+			// editId that points at a config that may already be gone (perpetual 404).
+			state.editingConfigId = null;
 		}
 		render();
 	}
@@ -1307,6 +1320,10 @@ function createInstance(container, ctx) {
 		if (payload && payload.ok) {
 			state.configs = payload.configs || [];
 			state.selectedConfig = null;
+			// If the deleted config was the one being edited, the edit session is dead:
+			// keeping its id made the NEXT save POST a stale editId and 404 with
+			// "config not found" instead of saving the new config.
+			if (state.editingConfigId === id) state.editingConfigId = null;
 			state.diag.lastWrite = "delete:" + id + " @ " + new Date().toLocaleTimeString();
 			state.diag.lastAction = "delete-config";
 			state.diag.lastAt = new Date().toLocaleTimeString();

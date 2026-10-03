@@ -284,17 +284,64 @@ check('Cloudflared', 'Tools', () => {
   };
 });
 
+function persistedPathDirs() {
+  // The installer's own rule: session PATH is NOT authoritative (launch
+  // scripts prepend bundled paths per launch, and a fresh terminal can lack
+  // git entirely), so git discovery reads the persisted User/Machine PATH.
+  // The checker must agree, or a machine whose git lives only on the
+  // persisted PATH clones fine but reports "Bash not found".
+  const dirs = [];
+  const queries = [
+    ['reg.exe', ['query', 'HKCU\\Environment', '/v', 'Path']],
+    ['reg.exe', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', '/v', 'Path']]
+  ];
+  for (const [cmd, args] of queries) {
+    try {
+      const out = execFileSync(cmd, args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+      for (const m of String(out).matchAll(/REG_(?:EXPAND_)?SZ\s+Path\s+([^\r\n]+)/gi)) {
+        for (const p of m[1].split(';')) {
+          const t = p.trim().replace(/^"|"$/g, '');
+          if (t) dirs.push(t);
+        }
+      }
+    } catch { /* reg unavailable or key missing: session PATH + roots still apply */ }
+  }
+  return dirs;
+}
+
+function bashBesideGit(gitRoot) {
+  for (const rel of [['usr', 'bin', 'bash.exe'], ['bin', 'bash.exe']]) {
+    const candidate = join(gitRoot, ...rel);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 function findBashViaSystemGit() {
   if (process.platform !== 'win32') return null;
-  const pathDirs = (process.env.PATH || process.env.Path || '')
-    .split(';').map(p => p.trim().replace(/^"|"$/g, '')).filter(Boolean);
+  const seen = new Set();
+  const pathDirs = [];
+  for (const d of [...persistedPathDirs(), ...(process.env.PATH || process.env.Path || '').split(';')]) {
+    const t = d.trim().replace(/^"|"$/g, '');
+    if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); pathDirs.push(t); }
+  }
   for (const dir of pathDirs) {
-    const gitExe = join(dir, 'git.exe');
-    if (existsSync(gitExe)) {
-      const gitRoot = dirname(dir);
-      const usrBin = join(gitRoot, 'usr', 'bin');
-      const bashExe = join(usrBin, 'bash.exe');
-      if (existsSync(bashExe)) return bashExe;
+    if (!existsSync(join(dir, 'git.exe'))) continue;
+    const bash = bashBesideGit(dirname(dir));
+    if (bash) return bash;
+  }
+  // Last resort: common install roots (git.exe may sit in cmd/ or bin/).
+  const roots = [
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs', 'Git') : null,
+    'C:\\Program Files\\Git',
+    'C:\\Program Files (x86)\\Git',
+    'D:\\Program Files\\Git'
+  ].filter(Boolean);
+  for (const root of roots) {
+    for (const sub of ['cmd', 'bin']) {
+      if (!existsSync(join(root, sub, 'git.exe'))) continue;
+      const bash = bashBesideGit(root);
+      if (bash) return bash;
     }
   }
   return null;
@@ -324,7 +371,7 @@ check('Bash (MinGit)', 'Tools', () => {
       ok: false,
       version: null,
       path: null,
-      note: 'Bash not found (no bundled MinGit and no system git bash) -- run scripts/bootstrap.ps1',
+      note: 'Bash not found: git is present but no bash sits beside it. Re-run the installer to provision the bundled MinGit (which includes bash), or install Git for Windows.',
     };
   }
   const v = safeExec('bash', ['--version']);

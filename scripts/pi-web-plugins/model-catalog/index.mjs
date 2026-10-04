@@ -68,8 +68,11 @@ import { join } from "node:path";
  * GLITCH_PI_ROOT change made by tests (or by a launcher script) without
  * needing a module reload. The default matches the agent's repo path.
  */
+// Root resolution — single source of truth (honors GLITCH_PI_ROOT first).
+import { glitchRoot } from "../../../.pi/lib/root.mjs";
+
 function repoRoot() {
-  return process.env.GLITCH_PI_ROOT || "E:\\Glitch AI\\glitch-pi";
+  return glitchRoot();
 }
 function engineRelativePath() {
   // POSIX-style relative path; Windows accepts forward slashes in execFile.

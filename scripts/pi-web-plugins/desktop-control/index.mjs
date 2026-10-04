@@ -27,7 +27,10 @@ import { openSync, closeSync, existsSync, mkdirSync, readFileSync, writeFileSync
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const ROOT = process.env.GLITCH_PI_ROOT || "E:\\Glitch AI\\glitch-pi";
+// Root resolution — single source of truth (honors GLITCH_PI_ROOT first).
+import { glitchRoot } from "../../../.pi/lib/root.mjs";
+
+const ROOT = glitchRoot();
 const CONFIG_PATH = join(ROOT, "data", "config", "desktop-control.json");
 const CAPTURE_PS1 = join(ROOT, "scripts", "capture-desktop.ps1");
 const CUA_BIN = process.env.CUA_DRIVER_BIN ||

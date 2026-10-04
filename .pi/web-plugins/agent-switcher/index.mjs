@@ -30,16 +30,21 @@
  */
 
 import { definePlugin } from "./sdk/index.mjs";
-// Raw node:fs for the global fallback: host.fs is workspace-anchored by
-// design, and sibling plugins (model-catalog) already read config this way.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+// Raw node:fs on purpose. host.fs is WORKSPACE-anchored by design, and the
+// workspace is whatever cwd the conversation was opened with. That is exactly how
+// the mode marker forked into a second store outside the Glitch root on
+// 2026-10-03: the extension wrote <root>/user/agent-mode.json while this plugin
+// wrote <workspace>/user/agent-mode.json, so a switch made in the web UI never
+// reached the gate. Every path below is therefore anchored at glitchRoot().
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { glitchRoot } from "../../lib/root.mjs";
 
-const PROFILES_DIR = ".pi/agent-profiles";
-const MODE_FILE = "user/agent-mode.json";
-/** Global profiles dir — the fallback that makes modes folder-independent. */
-const globalDir = () => process.env.AGENT_SWITCHER_GLOBAL_DIR || join(homedir(), ".pi", "agent-profiles");
+/** Absolute, root-anchored. See the import note above. */
+const PROFILES_DIR = join(glitchRoot(), ".pi", "agent-profiles");
+const MODE_FILE = join(glitchRoot(), "user", "agent-mode.json");
+const SYSTEM_MD = join(glitchRoot(), ".pi", "SYSTEM.md");
+const globalDir = () => process.env.AGENT_SWITCHER_GLOBAL_DIR || PROFILES_DIR;
 const ITEM_ID = "agent-mode";
 /** Composer button action — the client opens a dd-menu clone styled like the thinking chip. */
 const ACTION_MENU = "agent-switcher:menu";
@@ -103,7 +108,7 @@ async function readModes(host) {
 	for (const m of readGlobalModes()) merged.set(m.id, m);
 	let entries = [];
 	try {
-		entries = await host.fs.list(PROFILES_DIR);
+		entries = readdirSync(PROFILES_DIR);
 	} catch {
 		if (!merged.size) return [];
 	}
@@ -113,7 +118,7 @@ async function readModes(host) {
 		let description;
 		let body;
 		try {
-			const parsed = parseProfile(await host.fs.readText(`${PROFILES_DIR}/${entry.name}`));
+			const parsed = parseProfile(readFileSync(join(PROFILES_DIR, entry.name), "utf-8"));
 			description = parsed.description;
 			body = parsed.body;
 		} catch {
@@ -126,7 +131,7 @@ async function readModes(host) {
 
 async function readCurrent(host) {
 	try {
-		const raw = JSON.parse(stripBom(await host.fs.readText(MODE_FILE, 512)));
+		const raw = JSON.parse(stripBom(readFileSync(MODE_FILE, "utf-8")));
 		return typeof raw?.mode === "string" && raw.mode ? raw.mode : null;
 	} catch {
 		return null;
@@ -226,7 +231,7 @@ export default definePlugin({
 			}
 			try {
 				const previous = current;
-				await host.fs.write(
+				writeFileSync(
 					MODE_FILE,
 					JSON.stringify(
 						{
@@ -243,7 +248,7 @@ export default definePlugin({
 				// Stage the profile so a restart lands in the same mode (body only).
 				const profile = profilesById.get(mode);
 				if (profile?.body) {
-					await host.fs.write(".pi/SYSTEM.md", profile.body);
+					writeFileSync(SYSTEM_MD, profile.body, "utf-8");
 				}
 				current = mode;
 				syncLabel(mode);

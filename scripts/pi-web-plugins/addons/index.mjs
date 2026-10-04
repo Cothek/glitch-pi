@@ -21,7 +21,10 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 
-const ROOT = process.env.GLITCH_PI_ROOT || "E:\\Glitch AI\\glitch-pi";
+// Root resolution — single source of truth (honors GLITCH_PI_ROOT first).
+import { glitchRoot } from "../../../.pi/lib/root.mjs";
+
+const ROOT = glitchRoot();
 const CONTROL = join(ROOT, "scripts", "addon-control.mjs");
 const POLL_MS = 15_000;
 const TASK_PREFIX = "addon-";

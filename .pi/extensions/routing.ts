@@ -28,9 +28,13 @@
  *   3. Review Gate: git commit when pendingReview && lastCode > lastReview.
  *      Bypass: --no-verify.
  *
- * GATE MODES (2026-09-23 fixes)
- *   - REPO_ROOT walks up from cwd to the nearest .git/.pi (sessions started
- *     in subdirectories like data/node resolved plan/marker paths wrong).
+ * GATE MODES (2026-09-23 fixes, root split 2026-10-03)
+ *   - ONE root, from ../lib/root.mjs: the folder holding .pi/extensions,
+ *     .pi/settings.json, scripts/, data/ and user/. It is derived from this
+ *     module's own location, so it is machine-independent and cannot drift with
+ *     either the server's cwd or the session's cwd. Nothing in Glitch resolves
+ *     state from ctx.cwd any more: doing so is what let user/agent-mode.json and
+ *     data/plans fork into a second store outside the root.
  *   - Dispatcher-spawned sub-agents (GLITCH_SUBAGENT=1) skip the primary's
  *     gates — matches the OpenCode design where sub-agents ran plugin-free.
  *   - Primary glitch-omni mode (user/agent-mode.json "mode": "glitch-omni")
@@ -60,25 +64,32 @@ import {
   isPlanPath,
   sessionPlanPath,
 } from "../lib/plan-paths.mjs";
+// Root resolution — single source of truth for WHERE the Glitch root is.
+import { glitchRoot } from "../lib/root.mjs";
 
-// --- Paths (resolve repo root by walking up from cwd to the nearest .git/.pi) ---
-function resolveRepoRoot(): string {
-  let dir = process.cwd();
-  while (true) {
-    if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".pi"))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return process.cwd();
-    dir = parent;
-  }
-}
-const REPO_ROOT = resolveRepoRoot();
-const REVIEW_PASS_SCRIPT = join(REPO_ROOT, "scripts", "write-review-pass.mjs");
-const MARKER_PATH = join(REPO_ROOT, "data", ".review-pass.json");
+// --- Paths (both roots resolved by ../lib/root.mjs) ---
+// The 2026-10-03 incident: this extension seeded its root from process.cwd()
+// while agent-switcher.ts seeded from ctx.cwd, so the two read DIFFERENT
+// user/agent-mode.json files. When the server's cwd was the code repo, the gate's
+// copy of the marker did not exist, readAgentMode() fell back to "glitch", and
+// every mode-dependent gate inverted: No-Dispatch went inert under glitch-omni
+// while Dispatch-First hard-blocked read-only work.
+//
+// ONE root now, from one resolver. It is derived from this module's own location,
+// which is inside the code repo, so it is correct on every machine and cannot
+// drift with the server's cwd or the session's cwd. The earlier two-root split
+// existed only to paper over the mis-rooting; with the resolver it is dead weight,
+// and keeping a session-tier root is exactly what let user/agent-mode.json and
+// data/plans fork into a second store outside the root.
+// Owns git, scripts/, data/node, data/plans, the review-pass marker, user/.
+const ENGINE_ROOT = glitchRoot();
+const REVIEW_PASS_SCRIPT = join(ENGINE_ROOT, "scripts", "write-review-pass.mjs");
+const MARKER_PATH = join(ENGINE_ROOT, "data", ".review-pass.json");
 // Plan files are SESSION-SCOPED: data/plans/sessions/<sessionID>/current-plan.md
 // (built by planMarkerPath() below, canonical form in ../lib/plan-paths.mjs).
 // The old shared data/plans/current-plan.md let concurrent sessions overwrite
 // and archive each other's live plans — incident logged in user/current-session.md.
-const AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
+const AGENT_MODE_PATH = join(ENGINE_ROOT, "user", "agent-mode.json");
 
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const DISPATCH_WINDOW_MS = 120_000; // 120s
@@ -116,7 +127,7 @@ function isDirectExecPrimaryMode(): boolean {
 function getStagedCodeFiles(): string[] {
   try {
     const out = execFileSync("git", ["diff", "--cached", "--name-only"], {
-      cwd: REPO_ROOT,
+      cwd: ENGINE_ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -289,9 +300,9 @@ function isComplexTask(prompt: string, filePath?: string): boolean {
 }
 
 function planMarkerPath(sessionId: string | null): string {
-  // Session-scoped: data/plans/sessions/<sid>/current-plan.md under REPO_ROOT.
+  // Session-scoped: data/plans/sessions/<sid>/current-plan.md under ENGINE_ROOT.
   // sessionPlanPath is the single canonical builder (it sanitizes the id too).
-  return join(REPO_ROOT, sessionPlanPath(sessionId));
+  return join(ENGINE_ROOT, sessionPlanPath(sessionId));
 }
 
 function hasValidPlanMarker(sessionId: string | null): boolean {
@@ -306,12 +317,11 @@ function hasValidPlanMarker(sessionId: string | null): boolean {
 }
 
 function getNodeExecutable(): string {
-  // glitch-pi may not ship its own portable node; fall back to glitch-ai's then PATH.
+  // Root-local node only. The old list also probed a sibling glitch-ai checkout,
+  // which pointed outside the root and would break on any other machine.
   const candidates = [
-    join(REPO_ROOT, "data", "node", "node.exe"),
-    join(REPO_ROOT, "data", "node", "bin", "node"),
-    "E:/Glitch AI/glitch-ai/data/node/node.exe",
-    "E:/Glitch AI/glitch-ai/data/node/bin/node",
+    join(ENGINE_ROOT, "data", "node", "node.exe"),
+    join(ENGINE_ROOT, "data", "node", "bin", "node"),
   ];
   for (const p of candidates) {
     try {
@@ -364,7 +374,7 @@ function writeReviewPassMarker(agentName: string): void {
     if (!existsSync(markerDir)) mkdirSync(markerDir, { recursive: true });
     const nodeBin = getNodeExecutable();
     execFileSync(nodeBin, [REVIEW_PASS_SCRIPT, "--verdict", "PASS", "--agent", agentName], {
-      cwd: REPO_ROOT,
+      cwd: ENGINE_ROOT,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,

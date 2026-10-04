@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync, renameSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -10,14 +9,14 @@ const AGENTS_DIR = join(REPO_ROOT, '.pi', 'agents');
 const PROFILES_DIR = join(REPO_ROOT, '.pi', 'agent-profiles');
 
 const VALID_THINKING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const DEFAULT_TARGET = pathToFileURL(join(homedir(), '.pi-web', 'subagent-templates.json')).pathname.replace(/^\//, '');
+const DEFAULT_TARGET = join(REPO_ROOT, 'data', 'config', 'subagent-templates.json');
 
 function printHelp() {
   process.stdout.write(
     `Usage: sync-subagent-templates.mjs [--dry-run] [--help]\n` +
     `\n` +
     `Regenerates the pi-web-ui subagent template list from .pi/agents/*.md.\n` +
-    `Writes JSON atomically to PI_WEB_TEMPLATES (default: %USERPROFILE%\\.pi-web\\subagent-templates.json).\n` +
+    `Writes JSON atomically to $PI_WEB_TEMPLATES when set; otherwise defaults to <repo>/data/config/subagent-templates.json.\n` +
     `\n` +
     `  --dry-run   Print the summary without writing anything.\n` +
     `  --help      Show this message and exit.\n`

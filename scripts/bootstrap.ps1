@@ -424,7 +424,7 @@ if ($needsInstall) {
         & $7z.Source x "$setupPath" -o"$extractDir" -y 2>&1 | Out-Null
       } else {
         Write-Host "  Installing silently..." -ForegroundColor Yellow
-        $extractDir = "$env:LOCALAPPDATA\Handy_tmp"
+        $extractDir = "$env:TEMP\Handy_tmp"
         $proc = Start-Process -FilePath $setupPath -ArgumentList "/S", "/D=$extractDir" -Wait -PassThru
         if ($proc.ExitCode -ne 0) {
           Write-Host "  Silent install failed. Trying MSI extraction..." -ForegroundColor DarkYellow

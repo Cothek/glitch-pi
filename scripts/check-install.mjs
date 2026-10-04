@@ -10,7 +10,7 @@
  *   1 = one or more critical components missing
  */
 
-import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, readdirSync, realpathSync, lstatSync } from 'node:fs';
 import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -770,6 +770,142 @@ check('User Profile', 'Config', () => {
     version: synced ? 'synced' : 'local-only',
     path: 'user/',
     note: synced ? null : 'no .git -- local only',
+  };
+});
+
+// The user memory repo lives at <root>/user and reaches the Pi engine through
+// a user-side link (%USERPROFILE%\.pi\agent\user on Windows, $HOME/.pi/agent/
+// user elsewhere). If the link is missing or points elsewhere, the engine
+// reads and writes a DIFFERENT memory directory and the two silently diverge.
+// Compare the physical (realpath) target of both sides.
+check('User Memory Link', 'Config', () => {
+  const home = isWin ? process.env.USERPROFILE : process.env.HOME;
+  if (!home) {
+    return {
+      ok: false,
+      version: null,
+      path: null,
+      note: 'no home dir (USERPROFILE/HOME unset) -- cannot verify the user memory link',
+    };
+  }
+  const userSide = join(home, '.pi', 'agent', 'user');
+  const repoSide = join(ROOT_DIR, 'user');
+  const makeParent = isWin
+    ? `md "${dirname(userSide)}"`
+    : `mkdir -p "${dirname(userSide)}"`;
+  const makeLink = isWin
+    ? `cmd /c mklink /J "${userSide}" "${repoSide}"`
+    : `ln -s "${repoSide}" "${userSide}"`;
+  let realUser = null;
+  try {
+    realUser = realpathSync(userSide);
+  } catch {
+    realUser = null;
+  }
+  if (!realUser) {
+    return {
+      ok: false,
+      version: null,
+      path: null,
+      note: `${userSide} is missing -- memory not linked. Repair: ${makeParent} then ${makeLink}`,
+    };
+  }
+  let realRepo = null;
+  try {
+    realRepo = realpathSync(repoSide);
+  } catch {
+    realRepo = null;
+  }
+  if (!realRepo) {
+    return {
+      ok: false,
+      version: null,
+      path: null,
+      note: `${repoSide} is missing -- user memory not initialized (see User Profile)`,
+    };
+  }
+  const sameDir = isWin
+    ? realUser.toLowerCase() === realRepo.toLowerCase()
+    : realUser === realRepo;
+  if (sameDir) {
+    return {
+      ok: true,
+      version: 'linked',
+      path: '.pi/agent/user -> user/',
+      note: null,
+    };
+  }
+  // User side exists but resolves elsewhere. A real directory (not a link)
+  // must be merged/moved BY HAND first -- warn, never suggest deleting it.
+  let isLink = false;
+  try {
+    isLink = lstatSync(userSide).isSymbolicLink();
+  } catch {
+    isLink = false;
+  }
+  if (isLink) {
+    const removeLink = isWin ? `rmdir "${userSide}"` : `rm "${userSide}"`;
+    return {
+      ok: false,
+      version: null,
+      path: userSide,
+      note: `link points to ${realUser}, not ${realRepo} -- repair: ${removeLink} then ${makeLink}`,
+    };
+  }
+  return {
+    ok: false,
+    version: null,
+    path: userSide,
+    note: `real directory exists at ${userSide} (not a link) -- merge/move its contents into ${repoSide} BY HAND, then repair: ${makeLink}`,
+  };
+});
+
+// Informational only (never a failure): the install-time root record written
+// by scripts/write-root-record.mjs (called from install-pie.ps1 near the end
+// of a successful install) so a Glitch install can be located from inside
+// itself. Reports whether the record exists and whether its recorded root
+// matches the actual root.
+check('Root Record', 'Config', () => {
+  const recordPath = join(ROOT_DIR, 'data', 'config', 'root.json');
+  const relPath = 'data/config/root.json';
+  if (!existsSync(recordPath)) {
+    return {
+      ok: true,
+      version: 'none',
+      path: relPath,
+      note: 'informational: not written yet -- run: node scripts/write-root-record.mjs',
+    };
+  }
+  let recordedRoot = null;
+  try {
+    recordedRoot = JSON.parse(readFileSync(recordPath, 'utf-8')).root;
+  } catch {
+    return {
+      ok: true,
+      version: 'unreadable',
+      path: relPath,
+      note: 'informational: exists but unreadable/invalid JSON',
+    };
+  }
+  if (typeof recordedRoot !== 'string' || !recordedRoot) {
+    return {
+      ok: true,
+      version: 'incomplete',
+      path: relPath,
+      note: 'informational: exists but has no root field',
+    };
+  }
+  const actualRoot = ROOT_DIR.replace(/\\/g, '/');
+  const matches = isWin
+    ? recordedRoot.toLowerCase() === actualRoot.toLowerCase()
+    : recordedRoot === actualRoot;
+  return {
+    ok: true,
+    version: matches ? 'ok' : 'mismatch',
+    path: relPath,
+    note: matches
+      ? null
+      : `informational: recorded root ${recordedRoot} != actual root ${actualRoot}`,
   };
 });
 

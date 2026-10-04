@@ -61,7 +61,7 @@ param(
 )
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-$InstallerVersion = "1.1.0-pie.4"
+$InstallerVersion = "1.1.0-pie.5"
 
 # Set up logging - captures all output to a file for diagnosis
 # Log starts in TEMP (always exists) and is relocated into the install directory
@@ -1803,6 +1803,26 @@ if ($cloneAttempted -and -not (Test-Path "$userDir\.git")) {
     Write-Host "  To sync with GitHub later, start Glitch and say:" -ForegroundColor Cyan
     Write-Host '    "Connect my user profile to GitHub"' -ForegroundColor Yellow
     Write-Host ""
+}
+
+# 5.5. Record the install root INSIDE the install (data\config\root.json) so
+# diagnostics and humans can locate this Glitch install from within it.
+# Runs BEFORE the verification step so check-install.mjs can report the fresh
+# record (informational). Non-fatal on failure.
+$rootRecordScript = Join-Path $InstallDir "scripts\write-root-record.mjs"
+if (Test-Path $rootRecordScript) {
+    $recordNode = if (Test-Path "$InstallDir\data\node\node.exe") { "$InstallDir\data\node\node.exe" } else { "node" }
+    Write-Step "Recording install root..."
+    Push-Location $InstallDir
+    & $recordNode "scripts\write-root-record.mjs" "$InstallDir"
+    $recordExit = $LASTEXITCODE
+    Pop-Location
+    if ($recordExit -ne 0) {
+        Write-Warn "Root record write failed (non-fatal, exit $recordExit)."
+        Write-Host "  Run later: cd $InstallDir; node scripts\write-root-record.mjs" -ForegroundColor DarkGray
+    }
+} else {
+    Write-Warn "scripts\write-root-record.mjs not found -- install root not recorded."
 }
 
 # 6. Verify installation

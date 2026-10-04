@@ -54,12 +54,13 @@ $NodeExe = Join-Path $RootDir "data\node\node.exe"
 if (-not (Test-Path $NodeExe)) { $NodeExe = "node" }
 $WebEntry = Join-Path $RootDir "data\node\node_modules\pi-web-ui\bin\pi-web-ui.mjs"
 $AuthProxy = Join-Path $RootDir "plugins\auth-proxy.mjs"
-$LauncherCmd = Join-Path $env:USERPROFILE "pi-web-ui-launcher.cmd"
+# The %USERPROFILE%\pi-web-ui-launcher.cmd fallback shim was removed: it was
+# machine-local state outside the repo and could silently change web UI startup.
 
 # pi-web-ui 403s browser WS upgrades whose Origin != Host (originAllowed()).
 # Behind the auth proxy / tunnel, Host reads localhost:<WebPort>, so the public
-# hostnames must be allow-listed. Kept in sync with start-pi-stack.ps1 and
-# %USERPROFILE%\pi-web-ui-launcher.cmd  -  change all three together.
+# hostnames must be allow-listed. Kept in sync with start-pi-stack.ps1 -
+# change both together.
 $env:PI_WEB_ALLOW_ORIGINS = "https://pi.cothekdesigns.com,https://glitch.cothekdesigns.com"
 
 # ---- PI_WEB_TOKEN (shared token gate on :8787) ------------------------------
@@ -146,18 +147,11 @@ if ($busy.Count -gt 0) {
 }
 
 # --- Resolve the pi-web-ui entry ------------------------------------------
-$useLauncher = $false
+# node is spawned directly from $WebEntry, exactly like every other start path.
 if (-not (Test-Path $WebEntry)) {
-    if (Test-Path $LauncherCmd) {
-        $useLauncher = $true
-        Write-Host "  NOTE: direct pi-web-ui entry not found, falling back to launcher:" -ForegroundColor Yellow
-        Write-Host "        $LauncherCmd" -ForegroundColor DarkGray
-    } else {
-        Write-Host "  ERROR: pi-web-ui not found." -ForegroundColor Red
-        Write-Host "    entry   : $WebEntry" -ForegroundColor DarkGray
-        Write-Host "    launcher: $LauncherCmd" -ForegroundColor DarkGray
-        return
-    }
+    Write-Host "  ERROR: pi-web-ui not found." -ForegroundColor Red
+    Write-Host "    entry   : $WebEntry" -ForegroundColor DarkGray
+    return
 }
 if (-not (Test-Path $AuthProxy)) {
     Write-Host "  ERROR: auth proxy not found: $AuthProxy" -ForegroundColor Red
@@ -192,15 +186,9 @@ try {
     # web UI first and waiting for its port closes that race. -NoNewWindow
     # keeps it attached to THIS console, so closing the window still stops it.
     Write-Host "  starting pi-web-ui on 0.0.0.0:$WebPort ..." -ForegroundColor Cyan
-    if ($useLauncher) {
-        $webui = Start-Process -FilePath "cmd.exe" `
-            -ArgumentList @("/c", "`"$LauncherCmd`"") `
-            -NoNewWindow -PassThru
-    } else {
-        $webArgs = @("`"$WebEntry`"", "--port", "$WebPort", "--host", "0.0.0.0", "--cwd", "`"$RootDir`"")
-        if ($NoBrowser) { $webArgs += "--no-browser" }
-        $webui = Start-Process -FilePath $NodeExe -ArgumentList $webArgs -NoNewWindow -PassThru
-    }
+    $webArgs = @("`"$WebEntry`"", "--port", "$WebPort", "--host", "0.0.0.0", "--cwd", "`"$RootDir`"")
+    if ($NoBrowser) { $webArgs += "--no-browser" }
+    $webui = Start-Process -FilePath $NodeExe -ArgumentList $webArgs -NoNewWindow -PassThru
     # Wait for the port (up to ~20s). Timeout is a warning, not a refusal:
     # slow first-time cold starts should still get the proxy + tunnel up.
     $ready = $false

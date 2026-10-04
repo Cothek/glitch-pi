@@ -21,6 +21,16 @@
 # problem is pinned here. Add further entries as real cases appear, never as a
 # blanket default.
 #
-# index stays LF, worktree is CRLF, which is what core.autocrlf=true produces
-# and what README.md already has.
-AGENTS.md text eol=crlf
+# WHY -text AND NOT eol=crlf
+# An earlier version of this file used `AGENTS.md text eol=crlf`, which silenced
+# the warning but did NOT hold. scripts/launch-unified.mjs auto-stashes local
+# changes before switching branches (line ~133, `git stash push`) and then
+# checks out main (line ~145). That stash/pop round-trip rewrites the worktree
+# file and restores it with MIXED line endings, so the file drifted back to
+# w/mixed on the next launch and the empty-but-present modification returned.
+#
+# `-text` disables git's end-of-line conversion for this path entirely, so the
+# bytes are stored and restored verbatim and the stash/pop cycle cannot mangle
+# them. Diffing still works as text; only the conversion is off. This is the
+# fix for the writer, not for the symptom.
+AGENTS.md -text

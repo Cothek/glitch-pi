@@ -66,6 +66,18 @@ import {
 } from "../lib/plan-paths.mjs";
 // Root resolution — single source of truth for WHERE the Glitch root is.
 import { glitchRoot } from "../lib/root.mjs";
+// Sub-agent session detection: a sub-agent session IS the delegate, so the
+// primary's workflow gates below must not apply to it. Extracted to a
+// fail-closed lib (unit-tested in .pi/lib/subagent-session.test.mjs, root.mjs
+// pattern) because the inline version read a missing getSessionFile as "no
+// transcript" and silently exempted the session. The lib distinguishes
+// "cannot determine" (primary) from "determined: no transcript" (sub-agent).
+// KNOWN GAP: a `persist: true` sub-agent does get a transcript file, so the
+// in-memory-session signal misses it and it stays subject to the gates.
+// Closing that needs a session-identity signal from the host, which is not
+// confirmed to exist; guessing risks exempting primary sessions, which is far
+// worse. Default sub-agents are ephemeral, so the common path is covered.
+import { isSubAgentSession } from "../lib/subagent-session.mjs";
 
 // --- Paths (both roots resolved by ../lib/root.mjs) ---
 // The 2026-10-03 incident: this extension seeded its root from process.cwd()
@@ -628,47 +640,6 @@ export default function (pi: ExtensionAPI) {
       console.error(`[routing] rename enforcer failed: ${e?.message || e}`);
     }
   });
-  // --- Sub-agent session detection -----------------------------------------
-  // A sub-agent session IS the delegate, so the primary's workflow gates
-  // (plan-first, dispatch-first, review) must not apply to it. Dispatch-first
-  // in particular used to regress infinitely: a dispatched sub-agent that took
-  // longer than DISPATCH_WINDOW_MS to reach its first edit was blocked, told
-  // to dispatch again to satisfy the gate, and its delegate aged out the window
-  // and was blocked identically. The window is a heuristic for quick dispatches
-  // and does not survive real work.
-  //
-  // Signal 1: the legacy task() path, a separate `pi -p` child process, flagged
-  // by dispatcher.ts.
-  // Signal 2: host sub-agents (subagent_spawn / delegate_task under pi-web-ui)
-  // run in-process with an in-memory session and no transcript file, while the
-  // primary always has one. Same detection the R17 rename enforcer uses below.
-  // The pi-web-ui guard is required: outside pi-web-ui a missing file must NOT
-  // be read as "sub-agent", or the gates would be silently off for TUI sessions.
-  //
-  // KNOWN GAP: a `persist: true` sub-agent does get a transcript file, so
-  // signal 2 misses it and it stays subject to the gates. Closing that needs a
-  // session-identity signal from the host, which is not confirmed to exist;
-  // guessing risks exempting primary sessions, which is far worse. Default
-  // sub-agents are ephemeral, so the common path is covered.
-  const isSubAgentSession = (ctx: any): boolean => {
-    // Fail closed. An undefined ctx must never read as "sub-agent": that would
-    // exempt the primary and silently disable every gate below.
-    if (!ctx) return false;
-    // Positive primary guard. The absence-of-a-transcript-file test below rests
-    // on the unverified invariant that a primary session always has one. If that
-    // ever fails, every gate would silently switch off for the primary, which is
-    // the worst possible outcome, so refuse to exempt this session explicitly.
-    const sid = (ctx as any).sessionID ?? (ctx.sessionManager as any)?.sessionId ?? (ctx.sessionManager as any)?.id;
-    if (process.env.PI_SESSION_ID && typeof sid === "string" && sid === process.env.PI_SESSION_ID) return false;
-    if (process.env.GLITCH_SUBAGENT === "1") return true;
-    if (!underPiWebUi()) return false;
-    try {
-      const file = ctx?.sessionManager?.getSessionFile?.();
-      return !(typeof file === "string" && file.trim());
-    } catch {
-      return false;
-    }
-  };
 
   // --- Pre-tool gates: plan-first + dispatch-first + review gate ---
   pi.on(
@@ -677,7 +648,7 @@ export default function (pi: ExtensionAPI) {
       try {
         // Sub-agent sessions run without the primary's workflow gates, matching
         // the OpenCode design where sub-agents were plugin-free.
-        if (isSubAgentSession(ctx)) return undefined;
+        if (isSubAgentSession({ ctx, env: process.env, underPiWebUi: underPiWebUi() })) return undefined;
 
         const agentName = extractAgentName((event as any).input);
         const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimaryMode();

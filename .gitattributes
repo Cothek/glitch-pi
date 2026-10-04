@@ -1,0 +1,26 @@
+# Line-ending policy
+#
+# WHY THIS FILE EXISTS
+# core.autocrlf is true on this machine, so git normalizes text files to LF in
+# the index and expects CRLF in the worktree. AGENTS.md had been written with
+# MIXED line endings (git ls-files --eol reported w/mixed while the index held
+# LF). Git then normalized on read, got a different byte sequence than the
+# index, and reported the file as modified forever with an EMPTY diff:
+# `git diff --numstat AGENTS.md` printed nothing while `git status` still showed
+# it as M. That is the worst kind of noise, because it looks like a real change
+# and is not one.
+#
+# The fix is to state the intent explicitly rather than rely on a per-machine
+# core.autocrlf. With an explicit eol= value git stops emitting the
+# "LF will be replaced by CRLF" warning, and the file behaves the same on a
+# machine with autocrlf off.
+#
+# SCOPE: deliberately narrow. A blanket "* text=auto" would renormalize every
+# tracked file in the repo on the next checkout and bury the real diff in
+# thousands of unrelated line changes. Only the file that actually exhibited the
+# problem is pinned here. Add further entries as real cases appear, never as a
+# blanket default.
+#
+# index stays LF, worktree is CRLF, which is what core.autocrlf=true produces
+# and what README.md already has.
+AGENTS.md text eol=crlf

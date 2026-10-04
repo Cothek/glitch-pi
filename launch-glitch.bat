@@ -42,6 +42,12 @@ if not exist "%~dp0data" mkdir "%~dp0data"
 echo [%date% %time%] Glitch starting... > "%LOG_FILE%"
 echo [%date% %time%] Args: %* >> "%LOG_FILE%"
 REM Run node script with live output
+set "GLITCH_PI_ROOT=%~dp0"
+if "%GLITCH_PI_ROOT:~-1%"=="\" set "GLITCH_PI_ROOT=%GLITCH_PI_ROOT:~0,-1%"
+REM Keep the pi-web-ui sub-agent template store in step with .pi\agents\*.md.
+REM The server reads ONLY %USERPROFILE%\.pi-web\subagent-templates.json, so this
+REM launcher-time sync is what stops the model pins drifting. Non-fatal by design.
+"%NODE_CMD%" "%~dp0scripts\sync-subagent-templates.mjs" >> "%LOG_FILE%" 2>&1
 "%NODE_CMD%" "%~dp0scripts\launch-unified.mjs" %*
 set "NODE_EXIT=%errorlevel%"
 if %NODE_EXIT% neq 0 (

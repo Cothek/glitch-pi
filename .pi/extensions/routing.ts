@@ -54,7 +54,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
-import type { ExtensionAPI, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 // Session-scoped plan ownership rules — dependency-free lib, unit-tested in
 // .pi/lib/plan-paths.test.mjs (dispatch-plan.mjs pattern).
 import {
@@ -93,6 +93,22 @@ const AGENT_MODE_PATH = join(ENGINE_ROOT, "user", "agent-mode.json");
 
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const DISPATCH_WINDOW_MS = 120_000; // 120s
+// Every tool name that counts as "the primary dispatched something". Kept as ONE
+// list on purpose: the two call sites drifted apart before, because the modern
+// batch tool is named `subagent` (it takes an action param such as spawn or
+// wait_all) and was missing here. Omitting it meant a legitimate dispatch never
+// refreshed the window, so the primary was blocked on its very next code edit
+// even seconds after delegating, with no way to satisfy the gate.
+const DISPATCH_TOOL_NAMES = new Set(["task", "dispatch", "subagent", "subagent_spawn", "delegate_task"]);
+// The batch `subagent` tool only counts as delegation when it actually spawns.
+// list, get_result, wait_all, templates and handoff are bookkeeping calls and
+// must not be able to satisfy dispatch-first on their own, or a single
+// status check would stand in for real delegation.
+function isDispatchToolCall(toolName: string, input: any): boolean {
+  if (!DISPATCH_TOOL_NAMES.has(toolName)) return false;
+  if (toolName === "subagent") return input?.action === "spawn";
+  return true;
+}
 const QUALITY_PASS_MAX_AGE_MS = 30 * 60 * 1000; // 30 min — review marker freshness for direct-exec commits
 
 // --- Primary agent mode (user/agent-mode.json, re-read per call so mid-session
@@ -612,21 +628,62 @@ export default function (pi: ExtensionAPI) {
       console.error(`[routing] rename enforcer failed: ${e?.message || e}`);
     }
   });
+  // --- Sub-agent session detection -----------------------------------------
+  // A sub-agent session IS the delegate, so the primary's workflow gates
+  // (plan-first, dispatch-first, review) must not apply to it. Dispatch-first
+  // in particular used to regress infinitely: a dispatched sub-agent that took
+  // longer than DISPATCH_WINDOW_MS to reach its first edit was blocked, told
+  // to dispatch again to satisfy the gate, and its delegate aged out the window
+  // and was blocked identically. The window is a heuristic for quick dispatches
+  // and does not survive real work.
+  //
+  // Signal 1: the legacy task() path, a separate `pi -p` child process, flagged
+  // by dispatcher.ts.
+  // Signal 2: host sub-agents (subagent_spawn / delegate_task under pi-web-ui)
+  // run in-process with an in-memory session and no transcript file, while the
+  // primary always has one. Same detection the R17 rename enforcer uses below.
+  // The pi-web-ui guard is required: outside pi-web-ui a missing file must NOT
+  // be read as "sub-agent", or the gates would be silently off for TUI sessions.
+  //
+  // KNOWN GAP: a `persist: true` sub-agent does get a transcript file, so
+  // signal 2 misses it and it stays subject to the gates. Closing that needs a
+  // session-identity signal from the host, which is not confirmed to exist;
+  // guessing risks exempting primary sessions, which is far worse. Default
+  // sub-agents are ephemeral, so the common path is covered.
+  const isSubAgentSession = (ctx: any): boolean => {
+    // Fail closed. An undefined ctx must never read as "sub-agent": that would
+    // exempt the primary and silently disable every gate below.
+    if (!ctx) return false;
+    // Positive primary guard. The absence-of-a-transcript-file test below rests
+    // on the unverified invariant that a primary session always has one. If that
+    // ever fails, every gate would silently switch off for the primary, which is
+    // the worst possible outcome, so refuse to exempt this session explicitly.
+    const sid = (ctx as any).sessionID ?? (ctx.sessionManager as any)?.sessionId ?? (ctx.sessionManager as any)?.id;
+    if (process.env.PI_SESSION_ID && typeof sid === "string" && sid === process.env.PI_SESSION_ID) return false;
+    if (process.env.GLITCH_SUBAGENT === "1") return true;
+    if (!underPiWebUi()) return false;
+    try {
+      const file = ctx?.sessionManager?.getSessionFile?.();
+      return !(typeof file === "string" && file.trim());
+    } catch {
+      return false;
+    }
+  };
+
   // --- Pre-tool gates: plan-first + dispatch-first + review gate ---
   pi.on(
     "tool_call",
-    async (event: ToolCallEvent): Promise<ToolCallEventResult | undefined> => {
+    async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | undefined> => {
       try {
-        // Sub-agent sessions (dispatcher-spawned, GLITCH_SUBAGENT=1) run without
-        // the primary's workflow gates — matches the OpenCode design where
-        // sub-agents were plugin-free.
-        if (process.env.GLITCH_SUBAGENT === "1") return undefined;
+        // Sub-agent sessions run without the primary's workflow gates, matching
+        // the OpenCode design where sub-agents were plugin-free.
+        if (isSubAgentSession(ctx)) return undefined;
 
         const agentName = extractAgentName((event as any).input);
         const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimaryMode();
 
         // --- dispatch tracking on task-like custom tools ---
-        if (event.toolName === "task" || event.toolName === "dispatch" || event.toolName === "subagent_spawn" || event.toolName === "delegate_task") {
+        if (isDispatchToolCall(event.toolName, (event as any).input)) {
           // Hard no-dispatch gate for direct-execution modes (omni/lightweight).
           // The mode file is re-read per call, so mid-session /agent switches
           // take effect immediately.
@@ -640,7 +697,15 @@ export default function (pi: ExtensionAPI) {
                 "To use sub-agents, ask Troy to switch modes: /agent glitch.",
             };
           }
-          // task dispatch itself is allowed in dispatch-first modes; timestamp recorded after via tool_execution_end
+          // task dispatch itself is allowed in dispatch-first modes. Stamp the
+          // evidence HERE as well as in tool_execution_end, because that event
+          // carries only toolCallId, toolName, result and isError with no input,
+          // so it can never see the batch `subagent` tool's action and cannot
+          // tell a spawn from a list. tool_call is the only place the action is
+          // available.
+          const dispatchName = extractAgentName((event as any).input);
+          lastTaskTime.set(dispatchName, Date.now());
+          lastDispatchTime = Date.now();
         }
 
         // --- edit / write gates ---
@@ -791,9 +856,9 @@ export default function (pi: ExtensionAPI) {
     try {
       const tool = event.toolName || "unknown";
 
-      if (tool === "task" || tool === "dispatch" || tool === "subagent_spawn" || tool === "delegate_task") {
-        const args = (event as any).args ?? (event as any).input ?? {};
-        const agentName = extractAgentName(args);
+      const dispatchArgs = (event as any).args ?? (event as any).input ?? {};
+      if (isDispatchToolCall(tool, dispatchArgs)) {
+        const agentName = extractAgentName(dispatchArgs);
         lastTaskTime.set(agentName, Date.now());
         lastDispatchTime = Date.now();
 

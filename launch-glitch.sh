@@ -54,6 +54,30 @@ fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Glitch starting..." > "$LOG_FILE"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Args: $*" >> "$LOG_FILE"
 
+# Pin the Glitch root so root resolution never depends on cwd (root.mjs
+# honors GLITCH_PI_ROOT first and uses the value without validating it).
+# Under Git Bash $DIR can be POSIX "/e/...", which Windows node resolves
+# as "<drive>:\e\..." (verified), so export the drive form node understands.
+case "$DIR" in
+  /[a-zA-Z]/*)
+    export GLITCH_PI_ROOT="${DIR:1:1}:${DIR:2}"
+    ;;
+  *)
+    export GLITCH_PI_ROOT="$DIR"
+    ;;
+esac
+
+# Launch directory = project root
+cd "$DIR" || { echo "Error: cannot cd into $DIR"; exit 1; }
+
+# Keep the pi-web-ui sub-agent template store in step with .pi/agents/*.md.
+# The server reads ONLY ~/.pi-web/subagent-templates.json and ignores the repo
+# copy, so a launcher-time sync is what stops the model pins drifting the way
+# they did for 8 days. Non-fatal on purpose: a sync failure must never stop Pi
+# from starting.
+"$NODE_CMD" "$DIR/scripts/sync-subagent-templates.mjs" >> "$LOG_FILE" 2>&1 || \
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] subagent template sync failed (non-fatal)" >> "$LOG_FILE"
+
 "$NODE_CMD" "$DIR/scripts/launch-unified.mjs" "$@"
 NODE_EXIT=$?
 if [ $NODE_EXIT -ne 0 ]; then

@@ -24,7 +24,7 @@
  *   by --pi runs. Plain (non --pi) runs still write .agents/skills for legacy callers.
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -92,14 +92,15 @@ for (const target of TARGETS) {
   }
 
   if (checkOnly) {
-    // cheap drift probe: compare SKILL.md bytes for common skills
+    // Drift probe: compare SKILL.md content for common skills. A size comparison
+    // missed equal-length edits, so two files that differ only in wording read as clean.
     for (const name of common) {
       const a = join(SOURCE, name, 'SKILL.md');
       const b = join(target, name, 'SKILL.md');
       if (!existsSync(a) || !existsSync(b)) { drift++; continue; }
-      const sa = statSync(a);
-      const sb = statSync(b);
-      if (sa.size !== sb.size) drift++;
+      try {
+        if (!readFileSync(a).equals(readFileSync(b))) drift++;
+      } catch { drift++; }
     }
     console.log(`  ${common.length} common, drift signals so far: ${drift}`);
     continue;

@@ -64,7 +64,7 @@ function walk(dir, base, out = []) {
 }
 
 function checkRepo({ key, path }) {
-  const r = { repo: key, untracked: [], litter: [], stale: [], frontmatterStale: [], orphanedSkills: [] };
+  const r = { repo: key, untracked: [], litter: [], stale: [], frontmatterStale: [], orphanedSkills: [], skillDrift: [], skillRuntimeOnly: [] };
   if (!existsSync(join(path, '.git'))) { r.error = 'not a git repo'; return r; }
 
   // A. untracked
@@ -133,6 +133,24 @@ function checkRepo({ key, path }) {
         if (!corpus.includes(d.name)) r.orphanedSkills.push(d.name);
       }
     }
+
+    // F. Skills drift: canonical engine source vs the generated runtime tree.
+    // `.pi/skills/` is gitignored and rewritten by sync-skills.mjs --pi, so an
+    // edit made only there is silently lost on the next sync. Report it instead.
+    const runtimeDir = join(ROOT, '.pi', 'skills');
+    if (!existsSync(skillsDir) || !existsSync(runtimeDir)) {
+      r.skillDrift.push('n/a (engine source or runtime tree missing)');
+    } else {
+      for (const d of readdirSync(runtimeDir, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue;
+        const src = join(skillsDir, d.name, 'SKILL.md');
+        const tgt = join(runtimeDir, d.name, 'SKILL.md');
+        if (!existsSync(src)) { r.skillRuntimeOnly.push(d.name); continue; }
+        try {
+          if (!readFileSync(src).equals(readFileSync(tgt))) r.skillDrift.push(d.name);
+        } catch { r.skillDrift.push(`${d.name} (unreadable)`); }
+      }
+    }
   }
   return r;
 }
@@ -156,6 +174,8 @@ if (AS_JSON) {
       ['Untracked files', r.untracked], ['Backup/temp litter', r.litter],
       [`Stale tracked files (>${STALE_DAYS}d)`, r.stale],
       ['Frontmatter staleness', r.frontmatterStale], ['Orphaned skills (unreferenced)', r.orphanedSkills],
+      ['Skills: source/tree drift (edit the engine source, never .pi/skills)', r.skillDrift],
+      ['Skills: in runtime tree only (would be lost on sync)', r.skillRuntimeOnly],
     ];
     let any = false;
     for (const [label, items] of rows) {

@@ -197,7 +197,7 @@ Use the table to find the correct place to add a thing. Adding to the wrong laye
 | To add | Put it in | Register it in | Not here |
 |---|---|---|---|
 | A new agent role | `.pi/agents/<role>.md` | auto-discovered | `.pi/settings.json` |
-| A new skill | `.pi/skills/<name>/SKILL.md` | `.pi/skills/` index | `SYSTEM.md` |
+| A new skill | `glitch-memorycore/plugins/glitch-skills/skills/<name>/SKILL.md` | engine `develop`, then `sync-skills.mjs --pi` | `.pi/skills/` (generated tree) · `SYSTEM.md` |
 | A new runtime behavior | `.pi/extensions/<name>.ts` | **`.pi/settings.json` `extensions`** | Prompt prose alone |
 | A new tool or MCP server | `.pi/settings.json` `packages` | `.pi/settings.json` | `scripts/` |
 | A new agent mode | `.pi/agent-profiles/<mode>.md` | mode switcher | `.pi/agents/` |
@@ -207,6 +207,8 @@ Use the table to find the correct place to add a thing. Adding to the wrong laye
 | A new project | `E:/Glitch AI/code/<name>/` | `scripts/init-project.mjs` | Anywhere else |
 
 **The registration step is the one people skip.** An extension not listed in `.pi/settings.json` does not load. All 11 on disk are registered. To check, compare `ls .pi/extensions/*.ts` against the `extensions` array in `.pi/settings.json`. The twelfth file, `stuck-detector-logic.mts`, is an imported module, not an extension, and is correctly unregistered.
+
+**A skill is authored in the engine, never in the runtime tree.** Edit `glitch-memorycore/plugins/glitch-skills/skills/<name>/SKILL.md` in the `glitch-engine` repo, then run `node scripts/sync-skills.mjs --pi` to regenerate. `.pi/skills/` is gitignored (`.gitignore:111`) and rewritten with force overwrite, so any edit made only there is lost on the next sync. Check for drift with `node scripts/sync-skills.mjs --pi --check` or `node scripts/repo-hygiene.mjs`.
 
 ---
 
@@ -232,6 +234,8 @@ Architecture decisions that are hard to reverse get a row. One line each.
 | 2026-10-04 | Architecture document established at repo root | Rules were spread across `SYSTEM.md`, standards, and gates with no single authority | Split docs by feature |
 | 2026-10-04 | Invariants cite grep anchors, never line numbers | Line numbers rotted on the first commit that touched a gate. An anchor stays true across edits. | `file:line` evidence in invariants |
 | 2026-10-04 | Feature notes move to `docs/features/` | `docs/architecture.md` held a feature note while claiming to be the architecture doc | Flat `docs/` layout |
+| 2026-10-05 | Skill content is authored in the engine source tree, never in `.pi/skills/` | `.pi/skills/` is gitignored and regenerated with force overwrite, so a skill pass that lands there is silently destroyed by the next sync. This happened once; the whole pass had to be re-landed. | Authoring skills in the runtime tree |
+| 2026-10-05 | All engine work happens on the `develop` branch | R16 forbids core edits on `main`, and a skill change is core content | Working directly on `main` |
 
 ---
 
@@ -244,7 +248,9 @@ Recorded here so the next reader inherits them instead of rediscovering them. Ea
 - **The repo-hygiene gate is not automated.** `scripts/repo-hygiene.mjs` has no caller. `docs/engineering-standards.md` section 4 lists it as a gate, which overstates its enforcement.
 - **The quality gate is self-reported.** In direct-execution modes the PASS marker is written by the same agent that wrote the code. It is a forcing function, not an independent check.
 - **A persisted sub-agent stays gated.** `persist: true` writes a transcript, so the in-memory session signal misses it.
-- **Gate state does not survive a restart.** Invariant 9 covers this.
+- **Gate state does not survive a restart.** Invariant 11 covers this.
+- **The skill drift probe under-reported until 2026-10-05.** It compared file sizes, so two skills that differed only in wording read as clean. It now compares content, and `repo-hygiene.mjs` section F reports source-versus-tree drift plus runtime-only skills. Live check: 68 common, 0 drift.
+- **The engine source was stale for three skills.** `verifier` was an 8-line frontmatter stub in the engine while the runtime copy held the real 218-line skill, so one `--pi` sync would have destroyed it. `linter` and `writing` carried older trigger descriptions. All three now match the runtime copy, and `adversarial-review` moved into the engine so a fresh clone gets it.
 
 ---
 
@@ -275,3 +281,6 @@ Recorded here so the next reader inherits them instead of rediscovering them. Ea
 | 2026-10-04 | Registered `blast-radius.ts` and `compaction-diary.ts` | Both existed on disk but never loaded. Section 10 gap closed. |
 | 2026-10-04 | `AGENTS.md` three-repo table synced to section 4 | Two copies of one rule had already drifted |
 | 2026-10-05 | Removed the dead OpenCode `CONFIG_FILES` allowlist from `routing.ts`; `isConfigFile` now matches `config/*.json` only | All five listed paths never existed in this fork, and `.json` is not a code extension, so the allowlist could never change a gate outcome. Section 10 gap closed. |
+| 2026-10-05 | Skill drift probe compares content, not size; `repo-hygiene.mjs` gained a skills-drift section | A size comparison missed equal-length edits and under-reported drift (7 reported against 8 actual). Section 10 gap closed. |
+| 2026-10-05 | Section 7 states that skills are authored in the engine, and `.pi/skills/` is a generated mirror | The table pointed at the generated tree, which is the instruction that caused the losing edit. |
+| 2026-10-05 | Rescued `verifier`, `linter`, `writing` into the engine source and brought `adversarial-review` under engine ownership | The engine source held an empty `verifier` stub, so a sync would have replaced a working skill with a blank one. |

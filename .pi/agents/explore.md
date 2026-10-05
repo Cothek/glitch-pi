@@ -2,7 +2,7 @@
 name: explore
 description: "Read-only codebase recon. Answers 'where is X', 'what uses Y', 'which file has Z'. Returns file paths, line references, and minimal context for another agent to act. Never modifies anything."
 tools: read, find, grep, ls, webfetch
-model: commandcode/stealth/space-bunny-alpha
+model: commandcode/poolside/laguna-s-2.1-free
 ---
 
 

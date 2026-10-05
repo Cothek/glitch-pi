@@ -203,14 +203,6 @@ const CODE_EXTENSIONS = new Set([
 
 const MEMORY_PATHS = ["user/", "glitch-memorycore/"];
 
-const CONFIG_FILES = new Set([
-  "opencode.json",
-  "config/opencode-normal.json",
-  "config/opencode-free.json",
-  "config/opencode-local.json",
-  "config/opencode-safe.json",
-]);
-
 const GIT_OPERATIONS = new Set([
   "git add", "git commit", "git push", "git pull", "git fetch",
   "git merge", "git rebase", "git checkout", "git switch",
@@ -249,7 +241,11 @@ function isMemoryFile(filePath: string): boolean {
 
 function isConfigFile(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, "/");
-  return CONFIG_FILES.has(normalized) || (normalized.startsWith("config/") && normalized.endsWith(".json"));
+  // Directory pattern only, no enumerated allowlist. Everything it matches is
+  // .json, which isCodeFile never accepts, so a listed filename could never
+  // change a gate outcome — the old OpenCode allowlist pointed at files this
+  // fork never had and was dead weight.
+  return normalized.startsWith("config/") && normalized.endsWith(".json");
 }
 
 function isExemptFile(filePath: string): boolean {
@@ -710,7 +706,7 @@ export default function (pi: ExtensionAPI) {
                     `File: ${filePath}\n` +
                     `You MUST write a plan to ${sessionPlanPath(currentSessionID)} (via the plan-first skill) before editing code files.\n` +
                     "Plan template: Goal, Approach, Files to change, Risks, Verification.\n" +
-                    "Exempt: memory files (user/*.md), config files (config/*.json, opencode.json).\n" +
+                    "Exempt: memory files (user/*.md), config files (config/*.json).\n" +
                     'To force-skip for an intentionally simple task: include "quick task" in the prompt.',
                 };
               }
@@ -730,7 +726,7 @@ export default function (pi: ExtensionAPI) {
                   reason:
                     `⛔ Dispatch-First Violation: Direct edit on ${filePath} without prior subagent dispatch.\n` +
                     `You MUST dispatch to a sub-agent first (delegate_task or subagent_spawn, e.g. delegate_task with agent: "coder" for code) before editing files directly.\n` +
-                    "Exempt: memory files (user/*.md), config files (opencode.json), and git operations.",
+                    "Exempt: memory files (user/*.md), config files (config/*.json), and git operations.",
                 };
               }
             }

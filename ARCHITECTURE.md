@@ -244,7 +244,6 @@ Recorded here so the next reader inherits them instead of rediscovering them. Ea
 - **The repo-hygiene gate is not automated.** `scripts/repo-hygiene.mjs` has no caller. `docs/engineering-standards.md` section 4 lists it as a gate, which overstates its enforcement.
 - **The quality gate is self-reported.** In direct-execution modes the PASS marker is written by the same agent that wrote the code. It is a forcing function, not an independent check.
 - **A persisted sub-agent stays gated.** `persist: true` writes a transcript, so the in-memory session signal misses it.
-- **Old OpenCode paths linger in routing config.** `CONFIG_FILES` still lists `opencode.json` and `config/opencode-*.json`. This fork has no OpenCode. Anchor: `CONFIG_FILES` in `.pi/extensions/routing.ts`.
 - **Gate state does not survive a restart.** Invariant 9 covers this.
 
 ---
@@ -275,3 +274,4 @@ Recorded here so the next reader inherits them instead of rediscovering them. Ea
 | 2026-10-04 | Invariants switched to grep anchors after review found two wrong line references and eight drifting ones | Evidence that cannot be checked is not evidence |
 | 2026-10-04 | Registered `blast-radius.ts` and `compaction-diary.ts` | Both existed on disk but never loaded. Section 10 gap closed. |
 | 2026-10-04 | `AGENTS.md` three-repo table synced to section 4 | Two copies of one rule had already drifted |
+| 2026-10-05 | Removed the dead OpenCode `CONFIG_FILES` allowlist from `routing.ts`; `isConfigFile` now matches `config/*.json` only | All five listed paths never existed in this fork, and `.json` is not a code extension, so the allowlist could never change a gate outcome. Section 10 gap closed. |

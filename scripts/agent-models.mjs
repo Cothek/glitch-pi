@@ -36,12 +36,12 @@
  *                     or ~/.pi/agent)
  *   --repo            override the repository root (default: the parent of this file)
  *   --save-config     snapshot current agent pins into a named configuration (use with
- *                     --edit-config to rename an existing config instead, keeping its pins)
+ *                      --edit-config to rename an existing config and re-capture its pins)
  *   --config-desc     description for a saved config (used with --save-config)
  *   --apply-config    batch-set every agent pin from a saved configuration
  *   --list-configs    print saved configurations
  *   --delete-config   remove a saved configuration by id
- *   --edit-config     rename an existing config (by id); requires --save-config for the new name
+ *   --edit-config     update an existing config (by id): rename it and re-capture the pins
  */
 
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
@@ -160,6 +160,18 @@ function slugifyConfigId(name) {
 		.replace(/^-+|-+$/g, "") || "config";
 }
 
+/** Current pin for every agent (null = inherits the main model). Throws-free: returns
+ *  an error string when no agent files exist. */
+function capturePins(repoRoot, agentDir) {
+	const { agents, dir } = readAgents(repoRoot);
+	if (!agents.length) return { error: `no agent files found in ${dir}` };
+	const catalog = buildCatalog(agentDir);
+	const report = buildReport(agents, catalog.ids, catalog.source);
+	const pins = {};
+	for (const row of report.rows) pins[row.name] = row.pin;
+	return { pins };
+}
+
 function main() {
 	let opts;
 	try {
@@ -206,29 +218,29 @@ function main() {
 	}
 
 	if (opts.editConfig) {
-		// Rename an existing config (keep its pins, change name/description).
+		// Rename an existing config AND re-capture the current pins, so the preset holds
+		// the models that are actually set on the agents right now.
 		const existing = readConfigs(repoRoot);
 		const prev = existing.find((c) => c.id === opts.editConfig);
 		if (!prev) { console.error(`config not found: ${opts.editConfig}`); process.exitCode = 1; return; }
 		const newName = opts.saveConfig || prev.name;
 		if (!newName || newName.length > 80) { console.error("name is required (max 80 chars)"); process.exitCode = 2; return; }
-		const config = { ...prev, name: newName, description: opts.configDesc || null, updatedAt: new Date().toISOString() };
+		const captured = capturePins(repoRoot, agentDir);
+		if (captured.error) { console.error(captured.error); process.exitCode = 2; return; }
+		const config = { ...prev, name: newName, description: opts.configDesc || null, updatedAt: new Date().toISOString(), pins: captured.pins, agentCount: Object.keys(captured.pins).length };
 		const updated = existing.filter((c) => c.id !== opts.editConfig);
 		updated.push(config);
 		updated.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 		writeConfigs(repoRoot, updated);
 		if (opts.json) console.log(JSON.stringify({ ok: true, config: { id: config.id, name: newName, description: config.description, createdAt: config.createdAt, updatedAt: config.updatedAt, agentCount: Object.keys(config.pins || {}).length } }, null, 2));
-		else console.log(`renamed config "${prev.name}" -> "${newName}" (${config.id})`);
+		else console.log(`updated config "${prev.name}" -> "${newName}" (${config.id}) with ${Object.keys(captured.pins).length} agent pins`);
 		return;
 	}
 
 	if (opts.saveConfig) {
-		const { agents, dir } = readAgents(repoRoot);
-		if (!agents.length) { console.error(`no agent files found in ${dir}`); process.exitCode = 2; return; }
-		const catalog = buildCatalog(agentDir);
-		const report = buildReport(agents, catalog.ids, catalog.source);
-		const pins = {};
-		for (const row of report.rows) pins[row.name] = row.pin;
+		const captured = capturePins(repoRoot, agentDir);
+		if (captured.error) { console.error(captured.error); process.exitCode = 2; return; }
+		const pins = captured.pins;
 		const id = slugifyConfigId(opts.saveConfig);
 		const now = new Date().toISOString();
 		const existing = readConfigs(repoRoot);

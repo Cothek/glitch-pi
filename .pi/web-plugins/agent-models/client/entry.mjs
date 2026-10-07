@@ -190,6 +190,7 @@ const STYLE_CSS = `
 .am-config-input:focus{border-color:var(--accent);outline:none}
 .am-config-form-btns{display:flex;gap:6px}
 .am-config-err{border:1px solid var(--red);background:var(--red-soft, transparent);border-radius:6px;padding:6px 8px;font-size:11.5px;color:var(--text)}
+.am-config-note{border:1px solid var(--accent);border-radius:6px;padding:6px 8px;font-size:11.5px;color:var(--text)}
 /* Chat-bar button (server entry registers kind:"view", label "Agent Models").
    Sized to the native composer dropdowns: 25x25 at desktop (the host renders
    .composer-tools .chip with 4px vertical padding and a 13px font -> text box
@@ -397,6 +398,7 @@ function createInstance(container, ctx) {
 		configName: "",
 		configDesc: "",
 		configError: null,
+		configNote: null,
 		savingConfig: false,
 		selected: new Set(),
 		bulkOpen: false,
@@ -1088,6 +1090,11 @@ function createInstance(container, ctx) {
 			err.appendChild(retry);
 			configBar.appendChild(err);
 		}
+		// Result of the last preset save/apply. Rendered here (never as a row note) so a
+		// preset write cannot leave a stale "saved: X -> Y" line under an agent row.
+		if (state.configNote && !state.configError) {
+			configBar.appendChild(el("div", "am-config-note", state.configNote));
+		}
 		if (state.configFormOpen) {
 			const form = el("div", "am-config-form");
 			const nameInput = el("input");
@@ -1122,6 +1129,9 @@ function createInstance(container, ctx) {
 			const btns = el("div", "am-config-form-btns");
 			btns.append(saveBtn, cancelBtn);
 			form.append(nameInput, descInput, btns);
+			if (state.editingConfigId) {
+				form.appendChild(el("span", "am-note", "Update re-captures the models currently set on every agent"));
+			}
 			if (state.savingConfig) form.appendChild(el("span", "am-note", "saving…"));
 			configBar.appendChild(form);
 			return;
@@ -1194,8 +1204,8 @@ function createInstance(container, ctx) {
 			state.configFormOpen = true;
 			// "Save current" ALWAYS captures a fresh snapshot - never a rename of the
 			// config an earlier Edit session left behind. A stale editingConfigId made a
-			// save-current-after-edit silently RENAME the old config (pins never
-			// re-captured) instead of creating the new one the name asked for.
+			// save-current-after-edit silently RENAME the old config instead of creating
+			// the new one the name asked for.
 			state.editingConfigId = null;
 			state.configName = "";
 			state.configDesc = "";
@@ -1213,7 +1223,7 @@ function createInstance(container, ctx) {
 		editBtn.type = "button";
 		editBtn.disabled = !state.selectedConfig || state.savingConfig;
 		editBtn.setAttribute("data-am-config-edit", "1");
-		editBtn.title = "Rename this preset (keeps its pins)";
+		editBtn.title = "Rename this preset and re-capture the models currently set on every agent";
 		editBtn.textContent = "Edit";
 		editBtn.addEventListener("click", () => editConfig());
 		const deleteBtn = el("button", "am-btn");
@@ -1239,13 +1249,22 @@ function createInstance(container, ctx) {
 
 	async function saveConfig() {
 		if (!state.configName) return;
+		const wasEdit = !!state.editingConfigId;
 		state.savingConfig = true;
+		state.configError = null;
+		state.configNote = null;
 		renderConfigBar();
 		const payload = await postSaveConfig(state.configName, state.configDesc, state.editingConfigId);
 		if (state.destroyed) return;
 		state.savingConfig = false;
 		if (payload && payload.ok) {
 			state.configFormOpen = false;
+			// A preset write is not an agent write: drop the per-agent "saved:" line, or it
+			// sits under that row looking like this save produced it.
+			state.savedNote = null;
+			const savedName = (payload.config && payload.config.name) || state.configName;
+			const savedCount = payload.config && payload.config.agentCount;
+			state.configNote = (wasEdit ? "updated " : "saved ") + savedName + (savedCount === undefined ? "" : ": " + savedCount + " agents captured");
 			// The edit session is done - a fresh save or a rename must never leak its
 			// editId into the NEXT "Save current", which would rename-or-404 instead of
 			// creating the new config.
@@ -1297,7 +1316,8 @@ function createInstance(container, ctx) {
 			state.diag.lastAt = new Date().toLocaleTimeString();
 			const s = payload.summary || {};
 			const skipped = s.invalid ? ", " + s.invalid + " skipped (unavailable)" : "";
-			state.savedNote = { agent: "(all)", text: "applied " + (payload.name || id) + ": " + (s.applied || 0) + " agents updated" + skipped };
+			state.savedNote = null;
+			state.configNote = "applied " + (payload.name || id) + ": " + (s.applied || 0) + " agents updated" + skipped;
 			state.openFor = null;
 			state.query = "";
 		} else {

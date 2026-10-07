@@ -208,6 +208,13 @@ function configSummary(config) {
 	};
 }
 
+/** Every agent's current pin from a fresh report (null = inherits the main model). */
+function pinsFromReport(report) {
+	const pins = {};
+	for (const row of report?.rows ?? []) pins[row.name] = row.pin;
+	return pins;
+}
+
 export default definePlugin({
 	async activate(host) {
 		const cleanup = [];
@@ -585,31 +592,37 @@ export default definePlugin({
 
 					let config;
 					if (editId) {
-						// Editing an existing config: rename it, keep its pins.
+						// Editing an existing config: rename it AND re-capture the pins. Rename-only
+						// silently dropped the models just chosen in the panel, so Edit + Update
+						// looked like it saved nothing.
 						const prev = existing.find((c) => c.id === editId);
 						if (!prev) {
 							return json(res, 404, { ok: false, error: "config not found: " + editId });
 						}
+						const report = await state(true);
+						const pins = pinsFromReport(report);
 						config = {
 							...prev,
 							id: editId,
 							name,
 							description,
 							updatedAt: now,
+							pins,
+							agentCount: Object.keys(pins).length,
 						};
 						const updated = existing.filter((c) => c.id !== editId);
 						updated.push(config);
 						updated.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 						await writeConfigs(host, updated);
-						host.log("renamed config: " + prev.name + " -> " + name + " (" + editId + ")");
+						host.log("edited config: " + prev.name + " -> " + name + " (" + editId + ") - " + Object.keys(pins).length + " pins re-captured");
+						// `report` was built BEFORE configs.json changed, so its configs list still
+						// holds the pre-edit name. The client adopts report.configs for the dropdown
+						// and the edit form, so re-read instead of shipping a stale roster.
 						json(res, 200, { ok: true, config: configSummary(config), report: await state(true) });
 					} else {
 						// New config: capture current pins.
 						const report = await state(true);
-						const pins = {};
-						for (const row of report.rows) {
-							pins[row.name] = row.pin; // null if inheriting
-						}
+						const pins = pinsFromReport(report);
 						const id = slugifyConfigId(name);
 						config = {
 							id,

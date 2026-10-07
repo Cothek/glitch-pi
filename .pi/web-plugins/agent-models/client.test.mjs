@@ -740,6 +740,47 @@ describe("agent-models client: config bar", () => {
 		assert.equal(saveCall.body.editId, "free-tier", "editId is sent when editing");
 	});
 
+	it("a preset Update clears the stale row note and reports its own result", async () => {
+		globalThis.fetch = async (url, init = {}) => {
+			const body = init.body ? JSON.parse(init.body) : null;
+			fetchCalls.push({ url: String(url), method: init.method ?? "GET", body });
+			if (String(url).includes("/set-model")) {
+				return { ok: true, status: 200, json: async () => ({ ok: true, agent: body.agent, model: body.model, previous: "commandcode/z-ai/glm-5.3-flash", changed: true, backup: ".pi/agent-models/backups/coder-1.md", report: STATE_WITH_CONFIG }) };
+			}
+			if (String(url).includes("/configs/save")) {
+				return { ok: true, status: 200, json: async () => ({ ok: true, config: { id: "free-tier", name: body.name, description: null, agentCount: 14 }, report: STATE_WITH_CONFIG }) };
+			}
+			return { ok: true, status: 200, json: async () => STATE_WITH_CONFIG };
+		};
+		const { container } = mountFresh();
+		await new Promise((r) => setTimeout(r, 5));
+		const bar = container.querySelector(".am-configs-bar");
+		bar.querySelector('[data-am-config-btn]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-option="free-tier"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		bar.querySelector('[data-am-config-edit]').click();
+		await new Promise((r) => setTimeout(r, 5));
+
+		// Repin an agent WHILE the edit form is open - the reported flow.
+		rowOf(container, "coder").querySelector('[data-am-action="pick"]').click();
+		await new Promise((r) => setTimeout(r, 5));
+		container.querySelector('[data-am-option="commandcode/z-ai/glm-5.3-flash"]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		assert.ok(rowOf(container, "coder").querySelector(".am-saved"), "precondition: the per-agent saved note is showing");
+
+		container.querySelector('[data-am-config-save-submit]').click();
+		await new Promise((r) => setTimeout(r, 10));
+		const save = fetchCalls.find((c) => c.url.includes("/configs/save"));
+		assert.equal(save.body.editId, "free-tier", "the update still carries editId");
+
+		assert.equal(rowOf(container, "coder").querySelector(".am-saved"), null, "the stale per-agent note is cleared");
+		const note = container.querySelector(".am-config-note");
+		assert.ok(note, "the preset result is reported in the config bar");
+		assert.match(note.textContent, /updated Free Tier/);
+		assert.match(note.textContent, /14 agents captured/);
+	});
+
 	it("saves a named config via POST /configs/save and closes the form", async () => {
 		const { container } = mountFresh();
 		await new Promise((r) => setTimeout(r, 5));

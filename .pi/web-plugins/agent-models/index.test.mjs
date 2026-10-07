@@ -830,9 +830,9 @@ describe("plugin: config routes", () => {
 		assert.equal(p.configs.length, 1);
 		assert.equal(p.configs[0].pins.coder, "nvidia/nvidia/nemotron-3.5-lightening-30b-a3b".replace("-lightening", "-lightning"));
 		});
-		it("POST /configs/save with editId renames an existing config, preserving pins", async () => {
-			// Pre-populate configsData with a saved config
-			const originalPins = { coder: "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b", reviewer: "opencode/mimo-v2.5-free" };
+		it("POST /configs/save with editId renames an existing config AND re-captures its pins", async () => {
+			// Stale pins: what the preset held from an earlier snapshot.
+			const stalePins = { coder: "stale/model-from-an-earlier-snapshot", reviewer: "opencode/mimo-v2.5-free" };
 			configsData = JSON.stringify({
 				configs: [{
 					id: "old-id",
@@ -840,16 +840,16 @@ describe("plugin: config routes", () => {
 					description: "old desc",
 					createdAt: "2026-10-01T00:00:00.000Z",
 					updatedAt: "2026-10-01T00:00:00.000Z",
-					pins: originalPins,
+					pins: stalePins,
 				}],
 			});
 			writes.length = 0;
-			// Edit: rename to "New Name" with new description, keep the same id and pins
+			// Edit: rename to "New Name" with a new description, keep the same id.
 			const p = await callPost({ name: "New Name", description: "new desc", editId: "old-id" }, saveConfigRoute);
 			assert.equal(p.ok, true, p.error ?? "");
 			assert.equal(p.config.id, "old-id", "config id is preserved");
 			assert.equal(p.config.name, "New Name", "name is updated");
-			// Verify the written configs.json has the renamed config with original pins
+			assert.equal(p.config.agentCount, 4, "agentCount reflects the re-captured pins");
 			const configWrite = writes.filter((w) => w.rel === ".pi/agent-models/configs.json").pop();
 			assert.ok(configWrite, "configs.json must be written");
 			const doc = JSON.parse(configWrite.data);
@@ -857,7 +857,41 @@ describe("plugin: config routes", () => {
 			const cfg = doc.configs[0];
 			assert.equal(cfg.id, "old-id", "id preserved in written file");
 			assert.equal(cfg.name, "New Name", "name updated in written file");
-			assert.deepEqual(cfg.pins, originalPins, "pins preserved (not re-captured)");
+			// The point of the edit path: pins describe the LIVE agents, not the stale preset.
+			assert.equal(cfg.pins.coder, "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b", "coder pin re-captured from the live agent");
+			assert.notEqual(cfg.pins.coder, stalePins.coder, "stale pin must not survive an edit");
+			assert.equal(cfg.pins.reviewer, "opencode/mimo-v2.5-free");
+			assert.equal(cfg.pins.vision, null, "inherit is captured as null");
+			assert.equal(cfg.createdAt, "2026-10-01T00:00:00.000Z", "createdAt is preserved across an edit");
+			assert.notEqual(cfg.updatedAt, "2026-10-01T00:00:00.000Z", "updatedAt moves on an edit");
+			// The client adopts report.configs for the dropdown and the edit form, so the
+			// response must carry the POST-write config list, not the one read for pins.
+			assert.ok(p.report && p.report.configs, "the response carries a report with configs");
+			assert.equal(p.report.configs.length, 1);
+			assert.equal(p.report.configs[0].name, "New Name", "report.configs shows the NEW name, not the pre-edit one");
+			assert.equal(p.report.configs[0].id, "old-id", "report.configs keeps the id");
+		});
+
+		it("editing a preset after repinning an agent stores the NEW model", async () => {
+			// The reported bug: snapshot a preset, change a model, edit the preset, and the
+			// change vanished from the preset.
+			configsData = null;
+			writes.length = 0;
+			const saved = await callPost({ name: "Free" }, saveConfigRoute);
+			assert.equal(saved.ok, true, saved.error ?? "");
+
+			const setModelRoute = host.mock.routes.find((r) => r.method === "POST" && r.path === "/set-model");
+			assert.ok(setModelRoute, "/set-model must be registered");
+			const repin = await callPost({ agent: "coder", model: "nvidia/moonshotai/kimi-k3" }, setModelRoute);
+			assert.equal(repin.ok, true, repin.error ?? "");
+
+			const edited = await callPost({ name: "Free", editId: "free" }, saveConfigRoute);
+			assert.equal(edited.ok, true, edited.error ?? "");
+			const write = writes.filter((w) => w.rel === ".pi/agent-models/configs.json").pop();
+			const doc = JSON.parse(write.data);
+			const cfg = doc.configs.find((c) => c.id === "free");
+			assert.ok(cfg, "the preset must still exist after the edit");
+			assert.equal(cfg.pins.coder, "nvidia/moonshotai/kimi-k3", "preset holds the model chosen after the snapshot");
 		});
 
 		it("POST /configs/save with editId returns 404 for unknown id", async () => {

@@ -250,3 +250,17 @@ test("absolute own-session path mutation is allowed", () => {
 	);
 	assert.equal(v.allowed, true);
 });
+
+test("hasPlanMutation: staging and committing do NOT mutate plan FILE CONTENTS", () => {
+	// Deliberate: this gate guards plan file BYTES. `git add` touches the index and
+	// `git commit` writes objects/HEAD — neither changes a file's contents. `commit`
+	// MUST stay exempt, or `git commit -m "...data/plans/x..."` is flagged and the
+	// original false positive returns (it blocked real commits). See the review note
+	// of 2026-10-08 rejecting the "remove add/commit/notes from GIT_READONLY" finding.
+	assert.equal(hasPlanMutation(`git add data/plans/current-plan.md`), false);
+	assert.equal(hasPlanMutation(`git commit -m "notes about data/plans/current-plan.md"`), false);
+	assert.equal(hasPlanMutation(`git commit -F msg.txt`), false);
+	// but a command that really rewrites or deletes the file is still caught
+	assert.equal(hasPlanMutation(`git rm data/plans/current-plan.md`), true);
+	assert.equal(hasPlanMutation(`git checkout -- data/plans/current-plan.md`), true);
+});

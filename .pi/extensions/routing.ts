@@ -410,7 +410,7 @@ function isPassVerdict(text: string): boolean {
   // in the evidence on a later line must not turn a PASS into a FAIL, which would
   // re-create the deadlock.
   const qualified = (idx: number, len: number): boolean =>
-    /\b(?:with|but|however)\b/i.test(leadBare.slice(idx + len).split("\n")[0]);
+    /\b(?:with|but|however|if|once|after|provided|assuming|unless)\b/i.test(leadBare.slice(idx + len).split("\n")[0]);
 
   // 1. An explicit label wins outright. This protects the common
   //    "this would FAIL without the fix. Verdict: PASS" shape.

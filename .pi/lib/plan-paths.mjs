@@ -144,7 +144,7 @@ export function stripHeredocs(command) {
 const GIT_READONLY = new Set(["status","diff","log","show","add","fetch","push","branch","tag","rev-parse","ls-files","ls-remote","blame","grep","config","remote","describe","shortlog","reflog","cat-file","hash-object","check-ignore","symbolic-ref","rev-list","whatchanged","notes","archive","verify-commit","verify-tag","name-rev","count-objects","commit","merge-base","show-ref","for-each-ref","diff-tree","diff-files"]);
 
 /** Shell verbs that take free-text arguments and never mutate files. */
-const TEXT_ONLY_VERBS = new Set(["echo","printf","write-host","write-output","write-warning","write-error","write-verbose","console.log"]);
+const TEXT_ONLY_VERBS = new Set(["echo","printf","write-host","write-output","write-warning","write-error","write-verbose","console.log","console.error","console.warn","console.info","console.debug"]);
 
 /** First bare command token of a segment, lowercased, path and .exe stripped. */
 function segmentVerb(seg) {

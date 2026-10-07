@@ -2,7 +2,7 @@
 name: oracle
 description: "Read-only high-IQ consultant for hard problems: architecture design, multi-system tradeoffs, deep debugging, root cause. Consults, never implements. Use when stuck or before a big decision."
 tools: read, find, grep, ls, webfetch, skill
-model: nvidia/z-ai/glm-5.3
+model: commandcode/Qwen/Qwen3.7-Max
 ---
 
 

@@ -200,6 +200,7 @@ async function main() {
 	// Coverage against the models pi actually has configured: a gap should be visible
 	// here rather than as "n/a" in the UI.
 	try {
+		// Intentional external read: this is the Pi harness's own config dir, not Glitch state.
 		const agentDir = resolve(process.env.PI_CODING_AGENT_DIR ?? join(process.env.USERPROFILE ?? "", ".pi", "agent"));
 		const cfg = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf8").replace(/^\uFEFF/, ""));
 		// models is an ARRAY of {id,...} in models.json (Object.keys on it yields indices).

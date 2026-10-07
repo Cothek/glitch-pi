@@ -2,7 +2,7 @@
 name: general
 description: "General-purpose sub-agent for chores that are NOT code: bash runs, config edits, file moves, renames, cleanups, installs, and small mechanical tasks. NOT for code changes or feature work (that is @coder)."
 tools: read, edit, bash, find, grep, ls, webfetch, question, todowrite, skill
-model: commandcode/z-ai/glm-5.3-flash
+model: commandcode/poolside/laguna-s-2.1-free
 ---
 
 

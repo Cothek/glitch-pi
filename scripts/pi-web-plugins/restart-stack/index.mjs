@@ -30,7 +30,10 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 
-const ROOT = process.env.GLITCH_PI_ROOT || "E:\\Glitch AI\\glitch-pi";
+// Root resolution — single source of truth (honors GLITCH_PI_ROOT first).
+import { glitchRoot } from "../../../.pi/lib/root.mjs";
+
+const ROOT = glitchRoot();
 const REQUEST = join(ROOT, "scripts", "restart-request.mjs");
 const WEB_PORT = Number(process.env.GLITCH_PI_WEBUI_PORT ?? 8787);
 const AUTH_PORT = Number(process.env.GLITCH_PI_AUTH_PORT ?? 4103);

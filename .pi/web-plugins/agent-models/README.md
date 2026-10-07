@@ -21,8 +21,13 @@ Live example when this was built: 10 agents, 2 pins OK, **6 dead pins**, 2 inher
 1. **Chat-bar button** — a small 🧠 chip in the composer, right of the thinking dropdown (order 135: after model 120 / thinking 130, before the DSH chips). Click opens the page. Registered as `kind:"view"`, so the stock client's click handler does the navigation — no custom client code on the click path. Restyled by the client entry to the native chip look (25x25, radius 8) so it matches the native composer dropdowns.
 2. **Right-panel "Agent Models" tab** — one row per agent: name + status badge, `pin -> effective`, then the note.
 3. **`/agent-models`** in the chat box (server-side command, no browser needed).
-4. **`GET /plugins-api/agent-models/state`** — the JSON the tab renders.
-5. **`node scripts/agent-models.mjs`** — the same table on the CLI. `--json`, `--strict` (exit 1 when anything needs attention, usable as a gate), `--help`.
+4. **`GET /plugins-api/agent-models/state`** — the JSON the tab renders (now includes a `configs` summary list).
+5. **`GET /plugins-api/agent-models/configs`** — full saved config list (with pins).
+6. **`POST /plugins-api/agent-models/configs/save`** — snapshot current pins into a named preset (upserts by slug id). Send `editId` to rename an existing preset **and re-capture its pins** from the live agents.
+7. **`POST /plugins-api/agent-models/configs/apply`** — batch-apply a saved preset; validates each pin against the live catalog, skips unresolvable ones.
+8. **`POST /plugins-api/agent-models/configs/delete`** — remove a saved preset.
+9. **`POST /plugins-api/agent-models/set-models`** — apply ONE model to MANY agents in a single validated, backed-up batch (the panel's multi-select).
+10. **`node scripts/agent-models.mjs`** — the same table on the CLI, plus `--save-config`, `--apply-config`, `--list-configs`, `--delete-config`, `--edit-config`, `--config-desc`, and `--dry-run`. `--json`, `--strict` (exit 1 when anything needs attention, usable as a gate), `--help`.
 
 ## Statuses
 
@@ -110,7 +115,7 @@ The host re-scans `<dataDir>/plugins` on every WS attach (`pluginMgr.ensureLoade
 node --test .pi/web-plugins/agent-models/index.test.mjs .pi/web-plugins/agent-models/client.test.mjs
 ```
 
-47 tests: 35 server-side (parser, status truth table, lints, cost labels, the `/state` payload, the frontmatter rewrite, the write route) and 12 for the CLIENT via a fake DOM (`client.test.mjs`).
+102 tests: 62 server-side (parser, status truth table, lints, cost labels, the `/state` payload, the frontmatter rewrite, the single-agent write route, the bulk `/set-models` route - batch apply + per-agent backups, dedupe, empty/traversal/unknown-agent/bad-model/over-cap guards - and the config save/apply/delete/edit routes, including edit re-captures the pins and the response carries the post-write config list) and 40 for the CLIENT via a fake DOM (`client.test.mjs`), including 15 tests for the presets bar (render, save flow, empty-name guard, save-button-enabled-on-name-type, apply, apply-error, delete, config count in the `/state` payload, edit rename + edit-on-unknown-id, a preset update clearing the stale per-agent saved note, and the 2026-10-04 stale-editId regressions: save-current clears a cancelled edit, delete-then-save-new sends no editId, the Update label, a failed-save retry honors the visible name) and 5 for bulk selection (checkbox count, Select all/Clear, bulk picker gating, apply POST body + summary note, error surfaced with selection kept).
 
 The client harness exists because every bug this plugin actually shipped was client-side and invisible to the server tests: a picker whose tail referenced a variable removed in a refactor (the panel rendered "Render failed"), an id-only stylesheet guard that pinned the first deploy's CSS for the life of the page, and a flex container that squashed rows instead of scrolling. The harness mounts the client, clicks a row to open the picker, filters by provider/tier/capability, applies a model (asserting the POST body), rolls back, and re-mounts over a deliberately stale stylesheet. It is a regression net for wiring mistakes, not a substitute for looking at the real page.
 
@@ -181,6 +186,77 @@ Safety, in order:
 
 `POST /plugins-api/agent-models/set-model` accepts `{ agent, model }` (`model: null` = inherit) and returns `{ ok, agent, model, previous, changed, reason, backup, report }`, where `report` is the refreshed roster so the UI updates in one round trip. The manifest therefore requests `fs:write`; the plugin could not write a byte without it.
 
+## Row layout (dense, single line)
+
+Each agent item is **one vertically centered line**, following the `ui-craft-dense-dashboard` variant (density 9, motion 3, craft 7): `.am-row-line` is a single flex row at `min-height:28px` holding, in order, the selection checkbox, the agent name, the status badge, `pin -> effective`, the cost/tier/think chips, an issues marker, and the caret. Nothing stacks underneath, so a 14-agent roster is one screen instead of three.
+
+Text treatment follows the same skill: the agent name and the model ids are set in the mono face because they are **identifiers**, cost chips carry `tabular-nums`, the status badge is sentence case (11px, 4px grid - no uppercase + letterspacing, which the anti-slop rules ban), and every spacing value sits on the 4/8px grid. Warnings and the `why` reason no longer get their own line: they collapse to a truncating `.am-issues` marker whose `title` holds the full text. A ticked row gets an accent tint plus an accent border so the selection is visible at a glance.
+
+## Multi-agent selection and bulk apply
+
+Every agent row carries a selection checkbox (`data-am-select="<agent>"`), a **sibling** of the row toggle button (nesting an input inside a button is invalid HTML). Both share one horizontal line - `.am-row-line`, `display:flex` - so the checkbox sits inline to the **left of the agent name** and costs no extra row height; the open picker still stacks below that line at full width. Ticking it selects the agent and never opens that row's picker.
+
+A bulk bar sits between the presets bar and the filter row: **Select all** (every row matching the current filter), **Clear**, a live `N selected` count (`data-am-bulk-count`), and **Set model on selected…** (disabled until something is ticked). Opening it renders the same inline picker as a single row - search box, **provider / tier / capability quick-filter chips**, tier + vision + 200K+ badges, cost chips, and the Inherit option - and clicking a model applies it to **every** selected agent in one POST.
+
+The bulk chips read the same `modelFacets()` helper as the row picker, so both surfaces report identical counts. Bulk filters keep their own state (`bulkProvider` / `bulkTier` / `bulkCapability`), so opening the bulk picker never inherits a narrowing left behind in a row picker; a chip click updates the option list **in place** (no full re-render, so the search caret survives), and all filters **reset when the picker is opened or closed** so a stale narrow filter can never silently shape the next bulk apply.
+
+`POST /plugins-api/agent-models/set-models` accepts `{ agents: [...], model }` (`model: null` = inherit) and returns `{ ok, model, summary: { requested, applied, unchanged, failed }, results, report }`. Validation runs **once for the whole batch**, never per row:
+
+- names are deduped and trimmed, then must match `/^[A-Za-z0-9._-]+$/` and resolve to a file actually discovered in `.pi/agents` (path traversal is rejected before any filesystem access)
+- the model must be in the live catalog or be an explicit inherit, so an unknown pin can never be written
+- at most 100 agents per call
+
+Each affected file is backed up **before** its first byte changes, using one shared timestamp so a single apply is one recognizable backup group. A per-agent failure (unreadable file, no frontmatter) does not abort the batch: it is reported in `results` and counted in `summary.failed`, matching the configs/apply behavior. On success the panel clears the selection and shows the summary; on failure the error is shown and the selection is kept so a retry is one click.
+
+## Saved configurations (presets)
+
+Between the header and the filters there is a bar that snapshots the **current** pin of every agent into a named, editable preset, so a whole model setup can be swapped in one click instead of repinning agents one by one.
+
+**Where presets live:** `.pi/agent-models/configs.json` (gitignored, like `costs.json`). The host plugin writes it directly via `fs:write` (already requested). The format is:
+
+```json
+{
+  "configs": [
+    { "id": "free-tier", "name": "Free Tier", "description": "All free models",
+      "createdAt": "2026-09-25T12:00:00Z", "updatedAt": "2026-09-25T12:00:00Z",
+      "agentCount": 3, "pins": { "coder": "nvidia/nvidia/nemotron-4", "reviewer": "opencode/mimo-v2.5-free", "vision": null } }
+  ]
+}
+```
+
+`id` is a slug of the name; `pins` captures the model line (or `null` for inherit) for each agent as it is right now.
+
+**In the panel:** the bar shows a dropdown (or "No saved presets"), a **Save current** button, an **Apply** button, an **Edit** button (enabled when a preset is selected), and a **×** delete button.
+
+**Styling (matches the agent drop-down):** the dropdown button reuses the agent-switcher chip recipe — `var(--chip-bg,var(--bg-elev2))` surface, 1px border, radius 8, 25px metrics (padding 4px 10px, font 13px, line-height 15px), caret `::after` with the open-state 180° rotation via `aria-expanded`. The menu clones the agent drop-down menu: same surface, radius 10, padding 6, `0 12px 40px #00000080` shadow, z-index 1000, compact 340-480px width, `max-height:min(360px,100vh - 240px)` with scroll, an uppercase 11px **Saved presets** header, and a ✓ on the current row. Verified by computed-style capture (headless Edge + CDP).
+
+**Toggle bug (found live, fixed):** the dropdown toggle used to call `renderConfigBar()` synchronously during the click dispatch, so the bubbling document-level outside-click handler saw the original button node as detached ("outside") and closed the menu in the same tick — the dropdown could never stay open. Fix: `event.stopPropagation()` in the toggle listener, pinned by a client test that models real click bubbling in the FakeNode fixture.
+
+**Stale-editId bug (found live, fixed 2026-10-04):** `editingConfigId` was set by Edit and never cleared — not on save success, not on Cancel/Escape, not by Save current, not by delete. Two live symptoms, one root cause:
+1. **Save current after an Edit session silently RENAMED the old config** (id kept, pins never re-captured) instead of creating the new one the name asked for — editing appeared to do nothing.
+2. **Edit → delete → save a new config 404'd** with `config not found: <id>` — the stale editId pointed at the deleted config.
+Fix: `editingConfigId` is cleared on save success, on save FAILURE (a retry from the still-open form honors the visible name — save as new/upsert — instead of re-404ing the stale id), by Save current (it always captures a fresh snapshot), by Cancel/Escape, and when the edited config is deleted. The form's Save button reads **Update** while an edit session is active. Pinned by 4 client tests (save-current-after-edit, delete-then-save-new, Update label, failed-save retry). Verified live via a headless Edge CDP drive: all flows pass against the real server, and the control group (page reload resets client state) proves the server routes were never the problem.
+
+- **Save current** opens an inline form (name + optional description). Saving POSTs `POST /plugins-api/agent-models/configs/save` with `{ name, description }`. If a config is currently selected and being edited, the `editId` is also sent — the server renames the existing config and re-captures its pins, keeping the same id. Otherwise the server slugifies the id, upserts by id, and returns the refreshed `report` (which includes the updated config list).
+- **Edit** (enabled when a preset is selected) pre-fills the same save form with the config's current name and description. Saving renames the preset in place and **re-captures the pins from the live agents**, so the models you just chose are what the preset holds afterwards. The id never changes, so apply and delete keep working. Sharing pins is deliberate: to keep a preset frozen, save a copy under a new name instead of editing it. On the CLI this is `--edit-config <id>` paired with `--save-config "<new name>" --config-desc "<new desc>"`.
+- **Apply** sends `POST /plugins-api/agent-models/configs/apply` with `{ id }`. The server walks every pin: each one is re-validated against the **live** catalog. Models that still exist are written (with backup + frontmatter rewrite, exactly like the per-agent write); models that no longer resolve are **skipped** and counted as `invalid` in the summary rather than being written to an invalid pin. The response carries `{ ok, id, name, summary: { applied, invalid, skipped }, report }`.
+- **Delete** POSTs `POST /plugins-api/agent-models/configs/delete` with `{ id }` and requires a browser `confirm()`. The server removes the config and returns the new list.
+- **Feedback**: a preset save/apply reports its own result in the config bar (for example `updated Free: 14 agents captured`). A preset write clears any per-agent `saved: ...` line first, because leaving it under the row made the preset save look like it had written that agent.
+
+**On the CLI:**
+
+```
+node scripts/agent-models.mjs --save-config "Free Tier" --config-desc "All free"
+node scripts/agent-models.mjs --list-configs
+node scripts/agent-models.mjs --apply-config free-tier
+node scripts/agent-models.mjs --delete-config free-tier
+node scripts/agent-models.mjs --edit-config free-tier --save-config "Free Tier" --config-desc "All on free endpoints"   # renames AND re-captures the current pins
+```
+
+`--save-config` captures the current pins of every agent file found (reads frontmatter, same as the panel). `--apply-config` walks the saved pins and writes each agent file using `setModelInFrontmatter`, skipping any whose model is no longer in the catalog with a warning (the CLI also has `--dry-run` to preview without writing).
+
+Config summaries (id, name, description, createdAt, updatedAt, agentCount) are included in every `/state` payload, so the bar needs no extra fetch.
+
 ## Verified end to end (2026-09-24)
 
 Driven through the real UI in the running web UI, not from curl:
@@ -191,6 +267,30 @@ Driven through the real UI in the running web UI, not from curl:
 - on disk: `.pi/agents/reviewer.md` line 5 = `model: commandcode/z-ai/glm-5.3-flash` (everything else untouched), and `.pi/agent-models/backups/reviewer-2026-09-24T21-42-30-602Z.md` holds the original `opencode/mimo-v2.5-free`
 - `node scripts/agent-models.mjs` agrees: `3 pinned OK | 5 dead pins | 0 unresolved | 2 inherit`
 
+## Why a change can take up to 15s to appear
+
+Every write path adopts the roster the server returns **in the same response**, so rows repaint as soon as the POST lands. `applyModel` (one agent), `applyRestore` (rollback), `applyBulk` (multi-agent) and `applyConfig` (preset) all assign `state.report = payload.report`.
+
+`POLL_MS = 15000` is the safety net for edits made **outside** this panel (a hand-edited `.pi/agents/*.md`, a CLI write). It is not the update path. When a write response was discarded, the rows sat on the previous report until the next tick, which looked like a 15-second hang after the files were already written. The regression test asserts a preset apply repaints the rows with **no** additional `/state` request, so the poll cannot mask a regression.
+
+Measured server cost on this box (curl, direct to :8787 with the loopback token): `/state` cache hit 4 ms, forced `/state?refresh=1` 17 ms across three runs. The write itself is a handful of local file operations per agent.
+
+## Why a change can take up to 15s to appear
+
+Every write path adopts the roster the server returns **in the same response**, so rows repaint as soon as the POST lands. `applyModel` (one agent), `applyRestore` (rollback), `applyBulk` (multi-agent) and `applyConfig` (preset) all assign `state.report = payload.report`.
+
+`POLL_MS = 15000` is the safety net for edits made **outside** this panel (a hand-edited `.pi/agents/*.md`, a CLI write). It is not the update path. When a write response was discarded, the rows sat on the previous report until the next tick, which looked like a 15-second hang after the files were already written. The regression test asserts a preset apply repaints the rows with **no** additional `/state` request, so the poll cannot mask a regression.
+
+Measured server cost on this box (curl, direct to :8787 with the loopback token): `/state` cache hit 4 ms, forced `/state?refresh=1` 17 ms across three runs. The write itself is a handful of local file operations per agent.
+
+## Notes on the note bars
+
+Two different green summary lines share one colour but not one box. The per-row saved line (`.am-saved`) is left aligned under its row and keeps a bottom pad; the bulk bar summary (`.am-bulk-note`) spans the bar on its own line, is horizontally centered, and carries `align-self:center` with an explicit `line-height` so it sits on the bar's vertical center. They are deliberately separate classes - sharing one made the bulk text ride high in its box.
+
+## If a new route 404s on the live server
+
+Server routes register when the plugin **activates**. A page reload alone never re-activates a loaded plugin (`ensureLoaded` skips ids it already holds), so a route added to a live plugin 404s with the SPA fallback until the plugin is re-activated: **Settings -> Plugins -> Rescan** (sends the `plugins_reload` socket message, disposes and re-activates every plugin with an epoch cache-buster) or a server restart. The client detects the non-JSON fallback and names this fix in the error instead of a bare status code.
+
 ## Not built
 
-Bulk actions (repin every dead pin in one go) and a provider/key editor. The picker covers one agent at a time by design.
+Bulk actions on **multiple agents** are built (select rows, apply one model to all - see below). Not built: a "repin every dead pin in one go" sweep, and a provider/key editor.

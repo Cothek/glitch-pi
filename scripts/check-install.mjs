@@ -10,8 +10,8 @@
  *   1 = one or more critical components missing
  */
 
-import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
-import { execFileSync, execSync } from 'node:child_process';
+import { existsSync, statSync, readFileSync, readdirSync, realpathSync, lstatSync } from 'node:fs';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -284,47 +284,217 @@ check('Cloudflared', 'Tools', () => {
   };
 });
 
-function findBashViaSystemGit() {
-  if (process.platform !== 'win32') return null;
-  const pathDirs = (process.env.PATH || process.env.Path || '')
-    .split(';').map(p => p.trim().replace(/^"|"$/g, '')).filter(Boolean);
-  for (const dir of pathDirs) {
-    const gitExe = join(dir, 'git.exe');
-    if (existsSync(gitExe)) {
-      const gitRoot = dirname(dir);
-      const usrBin = join(gitRoot, 'usr', 'bin');
-      const bashExe = join(usrBin, 'bash.exe');
-      if (existsSync(bashExe)) return bashExe;
+function persistedPathDirs() {
+  // The installer's own rule: session PATH is NOT authoritative (launch
+  // scripts prepend bundled paths per launch, and a fresh terminal can lack
+  // git entirely), so git discovery reads the persisted User/Machine PATH.
+  // The checker must agree, or a machine whose git lives only on the
+  // persisted PATH clones fine but reports "Bash not found".
+  const dirs = [];
+  const queries = [
+    ['reg.exe', ['query', 'HKCU\\Environment', '/v', 'Path']],
+    ['reg.exe', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', '/v', 'Path']]
+  ];
+  for (const [cmd, args] of queries) {
+    try {
+      const out = execFileSync(cmd, args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+      for (const m of String(out).matchAll(/REG_(?:EXPAND_)?SZ\s+Path\s+([^\r\n]+)/gi)) {
+        for (const p of m[1].split(';')) {
+          const t = p.trim().replace(/^"|"$/g, '');
+          if (t) dirs.push(t);
+        }
+      }
+    } catch { /* reg unavailable or key missing: session PATH + roots still apply */ }
+  }
+  return dirs;
+}
+// Walk up to 4 ancestors from git.exe probing usr\bin\bash.exe then
+// bin\bash.exe at each level. Mirrors Test-BashBesideGit in install-pie.ps1
+// so the installer and the checker agree on every git layout (cmd\,
+// mingw64\bin, bin\, scoop, chocolatey shim, portable git).
+function bashBesideGitExe(gitExe) {
+  if (!gitExe) return null;
+  let dir = dirname(gitExe);
+  for (let i = 0; i < 4; i++) {
+    for (const rel of [['usr', 'bin', 'bash.exe'], ['bin', 'bash.exe']]) {
+      const candidate = join(dir, ...rel);
+      if (existsSync(candidate)) return candidate;
     }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
   return null;
+}
+
+function findBashViaSystemGit() {
+  if (process.platform !== 'win32') return null;
+  const seen = new Set();
+  const pathDirs = [];
+  for (const d of [...persistedPathDirs(), ...(process.env.PATH || process.env.Path || '').split(';')]) {
+    const t = d.trim().replace(/^"|"$/g, '');
+    if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); pathDirs.push(t); }
+  }
+  // Collect git.exe candidates (every PATH dir that contains git.exe). We
+  // reuse this list for the FAILURE note so the user can see what was probed.
+  const gitCandidates = [];
+  for (const dir of pathDirs) {
+    const gitExe = join(dir, 'git.exe');
+    if (existsSync(gitExe)) gitCandidates.push(gitExe);
+  }
+  // Helper: derive the git ROOT from `git --exec-path` output by stripping
+  // the trailing \mingw64\libexec\git-core / \mingw64\libexec / \libexec\git-core.
+  // Returns null when the exec fails or the result does not look like a path.
+  function rootFromExecPath(gitExe) {
+    let out;
+    try {
+      out = spawnSync(gitExe, ['--exec-path'], { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch { return null; }
+    if (!out || out.status !== 0 || !out.stdout) return null;
+    let root = String(out.stdout).split(/\r?\n/)[0].trim().replace(/^"|"$/g, '');
+    if (!root) return null;
+    // Normalize forward slashes (git on Windows emits POSIX-style paths).
+    const rootLower = root.replace(/\//g, '\\').toLowerCase();
+    for (const suffix of ['\\mingw64\\libexec\\git-core', '\\mingw64\\libexec', '\\libexec\\git-core']) {
+      const idx = rootLower.lastIndexOf(suffix);
+      if (idx >= 0 && idx + suffix.length === rootLower.length) {
+        root = root.slice(0, idx);
+        break;
+      }
+    }
+    return root || null;
+  }
+  // Pass 1 (NEW): ask git itself via --exec-path. git on PATH can be a
+  // chocolatey shim, scoop or portable install whose real root no
+  // dirname(dirname()) walk resolves; --exec-path gives the layout-proof
+  // root and we probe usr\bin/bash.exe + bin/bash.exe under it.
+  for (const gitExe of gitCandidates) {
+    const root = rootFromExecPath(gitExe);
+    if (!root) continue;
+    for (const rel of [['usr', 'bin', 'bash.exe'], ['bin', 'bash.exe']]) {
+      const candidate = join(root, ...rel);
+      if (existsSync(candidate)) return candidate;
+    }
+    // Also try the cmd/git.exe convention even when --exec-path yielded a
+    // non-empty root (covers layouts where git.exe is in cmd\ and bash is
+    // under cmd\..\usr\bin, which the ancestor walk already covers -- kept
+    // as a safety net).
+    const cmdGit = join(root, 'cmd', 'git.exe');
+    if (existsSync(cmdGit)) {
+      const bash = bashBesideGitExe(cmdGit);
+      if (bash) return bash;
+    }
+  }
+  // Pass 2: every PATH dir with git.exe; resolve bash by walking up from git.exe.
+  for (const gitExe of gitCandidates) {
+    const bash = bashBesideGitExe(gitExe);
+    if (bash) return bash;
+  }
+  // Pass 3: bare bash.exe sitting directly in a PATH dir (scoop/chocolatey
+  // shims, standalone MinGit, etc.) -- git on PATH not required.
+  for (const dir of pathDirs) {
+    const bashExe = join(dir, 'bash.exe');
+    if (existsSync(bashExe)) return bashExe;
+  }
+  // Pass 4: last-ditch known install roots. git.exe may live in cmd\ or bin\.
+  const roots = [
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs', 'Git') : null,
+    'C:\\Program Files\\Git',
+    'C:\\Program Files (x86)\\Git',
+    'D:\\Program Files\\Git'
+  ].filter(Boolean);
+  for (const root of roots) {
+    for (const sub of ['cmd', 'bin']) {
+      const gitExe = join(root, sub, 'git.exe');
+      if (!existsSync(gitExe)) continue;
+      const bash = bashBesideGitExe(gitExe);
+      if (bash) return bash;
+    }
+  }
+  // Attach diagnostic info so callers can produce a self-explaining note.
+  findBashViaSystemGit.lastDiagnostics = {
+    gitCandidates,
+    bareBashOnPath: pathDirs.some((d) => existsSync(join(d, 'bash.exe'))),
+  };
+  return null;
+}
+
+// Execution probe: bash.exe being on disk is necessary, not sufficient.
+// Mirrors the install-pie.ps1 self-test that runs `bash --version` after
+// MinGit is finalized: a file that exists may still fail to launch (busybox
+// shim that exits immediately, DLL search-path mismatch, blocked by AV, etc.).
+// Returns { ok, shortVersion, error }. shortVersion is X.Y[.Z]; error is a
+// short human-readable reason on failure.
+function probeBashExecutable(bashExe) {
+  let out;
+  try {
+    out = execFileSync(bashExe, ['--version'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    const msg = (e && (e.message || String(e))) || 'unknown error';
+    const short = msg.split('\n')[0].slice(0, 200);
+    return { ok: false, shortVersion: null, error: short };
+  }
+  const text = String(out || '').trim();
+  if (!text) {
+    return { ok: false, shortVersion: null, error: 'no output' };
+  }
+  const m = text.match(/version\s+(\d+\.\d+(?:\.\d+)?)/i);
+  const shortVersion = m ? m[1] : text.split('\n')[0].slice(0, 40);
+  return { ok: true, shortVersion, error: null };
 }
 
 check('Bash (MinGit)', 'Tools', () => {
   if (isWin) {
     const bashExe = join(ROOT_DIR, 'data', 'mingit', 'usr', 'bin', 'bash.exe');
     if (existsSync(bashExe)) {
+      const probe = probeBashExecutable(bashExe);
+      if (probe.ok) {
+        return {
+          ok: true,
+          version: null,
+          path: 'data/mingit/usr/bin/bash.exe',
+          note: `bundled MinGit (bash ${probe.shortVersion})`,
+        };
+      }
       return {
-        ok: true,
+        ok: false,
         version: null,
         path: 'data/mingit/usr/bin/bash.exe',
-        note: 'bundled MinGit',
+        note: `bundled MinGit bash.exe is present at data\\mingit\\usr\\bin\\bash.exe but failed to execute (${probe.error}). Glitch's bash tool will not work. Re-run the installer to re-extract MinGit, or delete data\\mingit and let it re-provision.`,
       };
     }
     const sysBash = findBashViaSystemGit();
     if (sysBash) {
+      const probe = probeBashExecutable(sysBash);
+      if (probe.ok) {
+        return {
+          ok: true,
+          version: null,
+          path: sysBash,
+          note: `system git bash (bash ${probe.shortVersion})`,
+        };
+      }
       return {
-        ok: true,
+        ok: false,
         version: null,
         path: sysBash,
-        note: 'system git bash',
+        note: `system git bash at ${sysBash} exists but failed to execute (${probe.error}). Glitch's bash tool will not work.`,
       };
     }
+    const diag = findBashViaSystemGit.lastDiagnostics || { gitCandidates: [], bareBashOnPath: false };
+    const candList = diag.gitCandidates.length
+      ? diag.gitCandidates.join(', ')
+      : '(none on PATH)';
+    const bareOnPath = diag.bareBashOnPath ? 'yes' : 'no';
     return {
       ok: false,
       version: null,
       path: null,
-      note: 'Bash not found (no bundled MinGit and no system git bash) -- run scripts/bootstrap.ps1',
+      note: `Bash not found. git.exe candidates: ${candList}; bare bash.exe on PATH: ${bareOnPath}. Re-run the installer to provision the bundled MinGit (includes bash), or install Git for Windows.`,
     };
   }
   const v = safeExec('bash', ['--version']);
@@ -600,6 +770,142 @@ check('User Profile', 'Config', () => {
     version: synced ? 'synced' : 'local-only',
     path: 'user/',
     note: synced ? null : 'no .git -- local only',
+  };
+});
+
+// The user memory repo lives at <root>/user and reaches the Pi engine through
+// a user-side link (%USERPROFILE%\.pi\agent\user on Windows, $HOME/.pi/agent/
+// user elsewhere). If the link is missing or points elsewhere, the engine
+// reads and writes a DIFFERENT memory directory and the two silently diverge.
+// Compare the physical (realpath) target of both sides.
+check('User Memory Link', 'Config', () => {
+  const home = isWin ? process.env.USERPROFILE : process.env.HOME;
+  if (!home) {
+    return {
+      ok: false,
+      version: null,
+      path: null,
+      note: 'no home dir (USERPROFILE/HOME unset) -- cannot verify the user memory link',
+    };
+  }
+  const userSide = join(home, '.pi', 'agent', 'user');
+  const repoSide = join(ROOT_DIR, 'user');
+  const makeParent = isWin
+    ? `md "${dirname(userSide)}"`
+    : `mkdir -p "${dirname(userSide)}"`;
+  const makeLink = isWin
+    ? `cmd /c mklink /J "${userSide}" "${repoSide}"`
+    : `ln -s "${repoSide}" "${userSide}"`;
+  let realUser = null;
+  try {
+    realUser = realpathSync(userSide);
+  } catch {
+    realUser = null;
+  }
+  if (!realUser) {
+    return {
+      ok: false,
+      version: null,
+      path: null,
+      note: `${userSide} is missing -- memory not linked. Repair: ${makeParent} then ${makeLink}`,
+    };
+  }
+  let realRepo = null;
+  try {
+    realRepo = realpathSync(repoSide);
+  } catch {
+    realRepo = null;
+  }
+  if (!realRepo) {
+    return {
+      ok: false,
+      version: null,
+      path: null,
+      note: `${repoSide} is missing -- user memory not initialized (see User Profile)`,
+    };
+  }
+  const sameDir = isWin
+    ? realUser.toLowerCase() === realRepo.toLowerCase()
+    : realUser === realRepo;
+  if (sameDir) {
+    return {
+      ok: true,
+      version: 'linked',
+      path: '.pi/agent/user -> user/',
+      note: null,
+    };
+  }
+  // User side exists but resolves elsewhere. A real directory (not a link)
+  // must be merged/moved BY HAND first -- warn, never suggest deleting it.
+  let isLink = false;
+  try {
+    isLink = lstatSync(userSide).isSymbolicLink();
+  } catch {
+    isLink = false;
+  }
+  if (isLink) {
+    const removeLink = isWin ? `rmdir "${userSide}"` : `rm "${userSide}"`;
+    return {
+      ok: false,
+      version: null,
+      path: userSide,
+      note: `link points to ${realUser}, not ${realRepo} -- repair: ${removeLink} then ${makeLink}`,
+    };
+  }
+  return {
+    ok: false,
+    version: null,
+    path: userSide,
+    note: `real directory exists at ${userSide} (not a link) -- merge/move its contents into ${repoSide} BY HAND, then repair: ${makeLink}`,
+  };
+});
+
+// Informational only (never a failure): the install-time root record written
+// by scripts/write-root-record.mjs (called from install-pie.ps1 near the end
+// of a successful install) so a Glitch install can be located from inside
+// itself. Reports whether the record exists and whether its recorded root
+// matches the actual root.
+check('Root Record', 'Config', () => {
+  const recordPath = join(ROOT_DIR, 'data', 'config', 'root.json');
+  const relPath = 'data/config/root.json';
+  if (!existsSync(recordPath)) {
+    return {
+      ok: true,
+      version: 'none',
+      path: relPath,
+      note: 'informational: not written yet -- run: node scripts/write-root-record.mjs',
+    };
+  }
+  let recordedRoot = null;
+  try {
+    recordedRoot = JSON.parse(readFileSync(recordPath, 'utf-8')).root;
+  } catch {
+    return {
+      ok: true,
+      version: 'unreadable',
+      path: relPath,
+      note: 'informational: exists but unreadable/invalid JSON',
+    };
+  }
+  if (typeof recordedRoot !== 'string' || !recordedRoot) {
+    return {
+      ok: true,
+      version: 'incomplete',
+      path: relPath,
+      note: 'informational: exists but has no root field',
+    };
+  }
+  const actualRoot = ROOT_DIR.replace(/\\/g, '/');
+  const matches = isWin
+    ? recordedRoot.toLowerCase() === actualRoot.toLowerCase()
+    : recordedRoot === actualRoot;
+  return {
+    ok: true,
+    version: matches ? 'ok' : 'mismatch',
+    path: relPath,
+    note: matches
+      ? null
+      : `informational: recorded root ${recordedRoot} != actual root ${actualRoot}`,
   };
 });
 

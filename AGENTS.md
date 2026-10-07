@@ -1,3 +1,15 @@
+# Glitch — Repo Instructions
+
+## Read first
+
+| Document | Owns |
+|---|---|
+| **`ARCHITECTURE.md`** | The five-layer map, the three-repo rule, the invariants, the extension-point table, the change protocol. **Structural authority.** |
+| `docs/engineering-standards.md` | How to write code and what "done" means. |
+| `.pi/SYSTEM.md` | The runtime prompt contract the model reads. |
+
+`ARCHITECTURE.md` wins on any conflict about structure or behavior. Change the document in the same commit as the code when the change touches layers, repo ownership, invariants, or extension points.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
@@ -55,11 +67,13 @@ This project is indexed by GitNexus as **glitch-pi**.
 
 This project is one of three repos with a single, distinct purpose each. A file that does not fit its repo's purpose is a dead-file candidate by definition.
 
-| Repo | Path | Purpose | Never contains |
+**`ARCHITECTURE.md` section 4 is canonical for this table.** This copy is a summary. If they disagree, `ARCHITECTURE.md` wins.
+
+| Repo | Path | Owns | Never holds |
 | --- | --- | --- | --- |
-| **glitch (main)** | `glitch-pi/` | Engine + agent config: code, scripts, routing, root AGENTS.md | User memory, logs, temp artifacts, screenshots |
-| **user** | `glitch-pi/user/` (own git repo, symlinked to `%USERPROFILE%/.pi/agent/user`) | Memory files only: main-memory, decisions, patterns, reminders, post-mortems, diaries, session state | Engine code, binaries, caches |
-| **memory core** | `glitch-pi/glitch-memorycore/` (submodule) | Search + skills + plugin engine, source of truth for `.pi/skills/` | User data, runtime state |
+| **glitch-pi** | `E:/Glitch AI/glitch-pi` | Layers 1, 2, 3, 5. Scripts, routing, extensions, config, docs. | User memory, logs, scratch, screenshots |
+| **user** | `glitch-pi/user/` (own git repo, symlinked to `%USERPROFILE%/.pi/agent/user`) | Layer 4. Memory files: main-memory, decisions, patterns, reminders, post-mortems, diaries, session state. | Engine code, binaries, caches |
+| **memory core** | `glitch-pi/glitch-memorycore/` (submodule) | Search + skills registry + plugin engine, source of truth for `.pi/skills/` | User data, runtime state |
 
 **File-category rule (prevention)**: every new file gets one category at creation time: `engine` (committed, curated), `user-memory` (committed to user repo), `scratch` (`data/scratch/`, disposable), `log` (`data/logs/`, disposable). Scratch and log paths are purged by policy (see `scripts/janitor.mjs`); nothing ambiguous may accumulate there.
 

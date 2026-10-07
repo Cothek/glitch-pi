@@ -4,9 +4,12 @@
     Standalone installer - download and run directly from GitHub.
 
 .DESCRIPTION
-    This script installs Glitch Pie by cloning the repository, running the bootstrap
-    script to download dependencies (Node.js, OpenCode, Handy, etc.), optionally
-    setting up a user profile from GitHub, and launching Glitch.
+    This script installs Glitch Pie by cloning the repository and running the
+    bootstrap script, which downloads the dependencies the Pi engine needs:
+    Node.js, the pi CLI + pi-web-ui stack, engine skills, and the Cloudflare
+    tunnel binary. Optionally sets up a user profile from GitHub, and launches
+    Glitch. Handy (optional voice input) is offered as a prompt and installed
+    only if you say yes (Windows; the download recipe is Windows-only).
 
 .PARAMETER InstallDir
     Custom installation directory (default: $HOME\glitch-pi)
@@ -58,7 +61,7 @@ param(
 )
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-$InstallerVersion = "1.1.0-pie.1"
+$InstallerVersion = "1.1.0-pie.5"
 
 # Set up logging - captures all output to a file for diagnosis
 # Log starts in TEMP (always exists) and is relocated into the install directory
@@ -91,6 +94,23 @@ trap {
     return
 }
 
+# Resolve a helper script that ships inside the cloned repository. WHY NOT
+# $PSScriptRoot: it is EMPTY when the installer runs via `irm ... | iex`
+# (no backing file -> "Join-Path ... empty string" fatal, reproduced on a
+# fresh install answering Y to the virtual-monitor prompt), and the
+# -OutFile/-File flow points it at the TEMP download where the helpers do
+# not exist. The clone at $InstallDir\scripts is the reliable source.
+function Resolve-RepoScript([string]$relative) {
+    $dirs = @()
+    if ($InstallDir) { $dirs += (Join-Path $InstallDir "scripts") }
+    if ($PSScriptRoot) { $dirs += $PSScriptRoot }
+    foreach ($dir in $dirs) {
+        $p = Join-Path $dir $relative
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    return ''
+}
+
 # Color output helpers
 function Write-Header { param([string]$msg) Write-Host "`n$msg" -ForegroundColor Magenta }
 function Write-Step   { param([string]$msg) Write-Host "  $msg" -ForegroundColor Cyan }
@@ -120,6 +140,72 @@ function Get-PersistedGitPath {
 
 function Test-GitInPersistedPath {
     return $null -ne (Get-PersistedGitPath)
+}
+
+# Git alone is not enough: Glitch's scripts (bash tool, tunnel helpers,
+# page-picker unzip) need bash.exe from the same Git tree. A MinGit-only or
+# otherwise bash-less git passes the git.exe gate and then leaves the
+# install without bash (reproduced: fresh install reported 'Bash not
+# found'). Mirror the checker's resolver: walk up to 4 ancestors from
+# git.exe probing usr\bin then bin, AND accept a bare bash.exe sitting
+# directly in any persisted-or-session PATH entry.
+function Test-BashBesideGit {
+    param([string]$GitExe)
+    if (-not $GitExe) { return $false }
+    # Strategy 1 (NEW): ask git itself via --exec-path. A shim / scoop /
+    # portable git on PATH can have a real root no ancestor walk resolves;
+    # git --exec-path is the authoritative answer and we strip the trailing
+    # \mingw64\libexec\git-core / \mingw64\libexec / \libexec\git-core to
+    # get the git ROOT, then probe usr\bin and bin under it.
+    $execPath = $null
+    try { $execPath = (& $GitExe --exec-path 2>$null | Select-Object -First 1) } catch { $execPath = $null }
+    if ($execPath) {
+        $root = $execPath.Trim().Trim('"')
+        # git on Windows emits POSIX-style paths from --exec-path; normalize to backslashes.
+        $rootBack = $root -replace '/', '\\'
+        $matched = $false
+        foreach ($suffix in @('\mingw64\libexec\git-core', '\mingw64\libexec', '\libexec\git-core')) {
+            if ($rootBack.ToLower().EndsWith($suffix)) {
+                $root = $rootBack.Substring(0, $rootBack.Length - $suffix.Length)
+                $matched = $true
+                break
+            }
+        }
+        if (-not $matched -and ($root -ne $rootBack)) { $root = $rootBack }
+        if ($root -and (Test-Path (Join-Path $root 'usr\bin\bash.exe'))) { return $true }
+        if ($root -and (Test-Path (Join-Path $root 'bin\bash.exe'))) { return $true }
+    }
+    # Walk up to 4 ancestors: <git>/cmd -> ... -> <gitroot>. Probe usr\bin then
+    # bin at each level. Mirrors bashBesideGitExe in check-install.mjs.
+    $dir = Split-Path $GitExe -Parent
+    for ($i = 0; $i -lt 4; $i++) {
+        foreach ($rel in @("usr\bin\bash.exe", "bin\bash.exe")) {
+            if (Test-Path (Join-Path $dir $rel)) { return $true }
+        }
+        $parent = Split-Path $dir -Parent
+        if ([string]::IsNullOrEmpty($parent) -or ($parent -eq $dir)) { break }
+        $dir = $parent
+    }
+    # Accept a bare bash.exe in any PATH entry -- session AND persisted. The
+    # installer's gate uses the persisted PATH because launch-glitch prepends
+    # bundled MinGit at every launch without persisting it; but bash from a
+    # scoop/chocolatey shim dir or a standalone MinGit only needs to be on
+    # PATH to satisfy Glitch's bash tool.
+    foreach ($scope in @('Session', 'User', 'Machine')) {
+        $pathValue = $null
+        if ($scope -eq 'Session') {
+            $pathValue = $env:PATH
+        } else {
+            $pathValue = [Environment]::GetEnvironmentVariable('Path', $scope)
+        }
+        if ([string]::IsNullOrEmpty($pathValue)) { continue }
+        foreach ($entry in $pathValue.Split(';')) {
+            $trimmed = $entry.Trim().Trim('"').TrimEnd('\')
+            if ([string]::IsNullOrEmpty($trimmed)) { continue }
+            if (Test-Path (Join-Path $trimmed 'bash.exe')) { return $true }
+        }
+    }
+    return $false
 }
 
 # Find node.exe via the PERSISTED (global) PATH -- same philosophy as the git
@@ -303,7 +389,7 @@ Parameters:
   -UserRepo <url>      GitHub user repo URL for profile sync (e.g. https://github.com/user/repo.git)
 
 Prerequisites:
-  - Git (auto-downloaded if missing -- portable MinGit ~40 MB)
+  - Git with bash (auto-downloaded automatically - no system Git needed)
   - Internet connection
   - PowerShell 5.1+ (built into Windows 10/11)
 
@@ -326,12 +412,21 @@ try {
 
 # Banner
 $BannerVersionContent = if ($InstallerCommit) { "v$InstallerVersion - commit $InstallerCommit ($Branch)" } else { "v$InstallerVersion" }
-$BannerPad = [Math]::Max(0, [Math]::Floor((77 - $BannerVersionContent.Length) / 2))
-$BannerVersionLine = "|" + (" " * $BannerPad) + $BannerVersionContent + (" " * [Math]::Max(0, 77 - $BannerPad - $BannerVersionContent.Length)) + "|"
+# Center every banner line programmatically. The hand-counted literal lines
+# used to be 80-81 chars wide against a 79-char border, so the right | landed
+# past the border's + and wrapped on 80-column consoles.
+function Format-BannerLine([string]$text) {
+    $padTotal = [Math]::Max(0, 77 - $text.Length)
+    $left = [Math]::Floor($padTotal / 2)
+    return "|" + (" " * $left) + $text + (" " * ($padTotal - $left)) + "|"
+}
+$BannerLine1 = Format-BannerLine "GLITCH PIE INSTALLER (Windows)"
+$BannerLine2 = Format-BannerLine "Personal AI Companion - Persistent Memory"
+$BannerVersionLine = Format-BannerLine $BannerVersionContent
 Write-Host @"
 +=============================================================================+
-|                         GLITCH PIE INSTALLER (Windows)                        |
-|                    Personal AI Companion - Persistent Memory                 |
+$BannerLine1
+$BannerLine2
 $BannerVersionLine
 +=============================================================================+
 "@ -ForegroundColor Magenta
@@ -374,76 +469,336 @@ $gitProvisioned = $false
 $gitStagedDir = $null
 $gitNeedsPersistence = $false
 $gitPath = (Get-Command git -ErrorAction SilentlyContinue).Source
+if (-not $gitPath) { $gitPath = Get-PersistedGitPath }
 
-if (Test-GitInPersistedPath) {
-    # Git already on the global (persisted) PATH -- nothing to do, don't ask.
-    if (-not $gitPath) {
-        # Session doesn't see it yet (PATH changed after this terminal opened).
-        # Resolve the actual git.exe from the persisted PATH.
-        $gitPath = Get-PersistedGitPath
-    }
+# Bash is resolved via `git --exec-path` FIRST (see Test-BashBesideGit) so a
+# shim / scoop / portable git on PATH whose real root the ancestor walk
+# cannot reach is still recognised. The ancestor walk + bare-bash-on-PATH
+# pass remain as fallbacks.
+if (Test-BashBesideGit -GitExe $gitPath) {
+    Write-Step "  bash available for Glitch's scripts"
+} else {
+    Write-Step "  no bash beside git - MinGit (which includes bash) will be provisioned"
+}
+
+if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
+    # Git + bash already on the global (persisted) PATH -- nothing to do.
     Write-Success "Git found in system PATH: $gitPath"
 } else {
-    # Git NOT on the global PATH. Provision if needed, then ask to persist.
-    if (-not $gitPath) {
-        # Check if MinGit was already downloaded to the install dir (partial re-run)
+    # Git NOT on the global PATH (or no bash beside it). Provision if needed, then ask to persist.
+    if ((-not $gitPath) -or -not (Test-BashBesideGit -GitExe $gitPath)) {
+        # Check if MinGit was already downloaded to the install dir (partial re-run).
+        # Only reuse when bash.exe sits beside git.exe: an earlier install may
+        # have left a busybox MinGit (git.exe present, no bash). In that case
+        # wipe the stale tree and fall through to the normal provisioning path
+        # so we download a full (bashful) MinGit instead.
         $existingBundledGit = Join-Path $InstallDir "data\mingit\cmd\git.exe"
+        $existingBundledBash = Join-Path $InstallDir "data\mingit\usr\bin\bash.exe"
         if (Test-Path $existingBundledGit) {
-            $gitPath = $existingBundledGit
-            $env:PATH = "$(Split-Path $gitPath -Parent);$env:PATH"
-            Write-Step "Using existing bundled Git at $gitPath"
-            $gitNeedsPersistence = $true
+            if (Test-Path $existingBundledBash) {
+                $gitPath = $existingBundledGit
+                $env:PATH = "$(Split-Path $gitPath -Parent);$env:PATH"
+                Write-Step "Using existing bundled Git at $gitPath"
+                $gitNeedsPersistence = $true
+            } else {
+                Write-Step "Existing bundled MinGit has no bash (busybox build) - re-provisioning full MinGit"
+                Remove-Item (Join-Path $InstallDir "data\mingit") -Recurse -Force -ErrorAction SilentlyContinue
+            }
         } else {
-            Write-Warn "Git not found in PATH."
-            Write-Step "Downloading MinGit (portable Git for Windows, ~40 MB)..."
+            if ($gitPath) {
+                Write-Warn "Git found at $gitPath but no bash beside it - Glitch needs bash, provisioning MinGit..."
+            } else {
+                Write-Warn "Git not found in PATH."
+            }
+            Write-Step "Provisioning Git (ordered tier list: ZIP -> 7-Zip SFX -> NSIS -> MinGit)..."
 
             $gitStagedDir = Join-Path $env:TEMP "glitch-mingit"
             $gitBin = Join-Path $gitStagedDir "cmd\git.exe"
+            $gitBash = Join-Path $gitStagedDir "usr\bin\bash.exe"
 
-            # Try to get latest release URL from GitHub API
+            # Probe the staging dir: bash-capable tiers require BOTH cmd\git.exe
+            # AND usr\bin\bash.exe; tier 4 (MinGit) accepts git.exe alone.
+            function Test-GitStagedTree {
+                    param([string]$StagedDir)
+                    $probeGit  = Join-Path $StagedDir "cmd\git.exe"
+                    $probeBash = Join-Path $StagedDir "usr\bin\bash.exe"
+                    return [pscustomobject]@{
+                        Git  = (Test-Path $probeGit)
+                        Bash = (Test-Path $probeBash)
+                        GitExePath  = if (Test-Path $probeGit)  { $probeGit }  else { $null }
+                        BashExePath = if (Test-Path $probeBash) { $probeBash } else { $null }
+                    }
+                }
+
+            # Resolve the latest release once. Asset NAMES use the 3-part
+            # version (e.g. "2.56.0") while the tag uses 4-part
+            # (v2.56.0.windows.1). The download URLs embed the tag, but the
+            # asset filenames we pattern-match embed the 3-part form.
             try {
                 $apiUrl = "https://api.github.com/repos/git-for-windows/git/releases/latest"
                 $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10
-                $minGitAsset = $release.assets | Where-Object { $_.name -like "MinGit-*-64-bit.zip" } | Select-Object -First 1
-                if ($minGitAsset) {
-                    $downloadUrl = $minGitAsset.browser_download_url
-                    Write-Step "  Found: $($minGitAsset.name)"
+                $tagName = $release.tag_name
+                $assets  = $release.assets
+            } catch {
+                $tagName = $null
+                $assets  = @()
+            }
+            $ver3 = if ($tagName) { ($tagName -replace '^v','') -replace '\.windows\.','.' } else { '2.56.0' }
+            $fallbackTag = 'v2.47.0.windows.2'
+            $fallbackVer3 = '2.47.0'
+
+            # Helper: emit a fresh staging dir per tier; wipe any leftovers from
+            # a prior tier so a half-extracted archive does not fool the probe.
+            $tierAttempt = 0
+            function Reset-StagingDir {
+                    param([string]$Dir)
+                    if (Test-Path $Dir) { Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue }
+                    New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+                }
+
+            # TIER 1: a plain bash-capable ZIP (rare today, kept for future
+            # PortableGit-*-64-bit.zip releases). Expand-Archive only.
+            $tier1Asset = $assets | Where-Object {
+                $_.name -like "PortableGit-*-64-bit.zip" -or
+                $_.name -like "Git-*-64-bit.zip"
+            } | Where-Object { $_.name -notlike "*busybox*" -and $_.name -notlike "*arm64*" } | Select-Object -First 1
+            $tierAccepted = $false
+            $tierAcceptedName = $null
+            $tierIsGitOnly = $false
+
+            if ($tier1Asset) {
+                $tierAttempt++
+                Write-Step "Trying tier 1 (bash-capable ZIP): $($tier1Asset.name)"
+                $tempZip = Join-Path $env:TEMP "glitch-git-tier1.zip"
+                $dlOk = $false
+                try {
+                    Invoke-WithSpinner -Label "Downloading $($tier1Asset.name)" -DoneMessage "Download" -ScriptBlock {
+                        Invoke-WebRequest -Uri $using:tier1Asset.browser_download_url -OutFile $using:tempZip -UseBasicParsing -TimeoutSec 120
+                    }
+                    $dlOk = $true
+                } catch {
+                    Write-Step "Tier 1 failed: download error - $($_.Exception.Message) - trying next option"
+                }
+                if ($dlOk) {
+                    try {
+                        Reset-StagingDir $gitStagedDir
+                        Invoke-WithSpinner -Label "Extracting $($tier1Asset.name)" -DoneMessage "Extract" -ScriptBlock {
+                            Expand-Archive -Path $using:tempZip -DestinationPath $using:gitStagedDir -Force
+                        }
+                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
+                        if ($probe.Git -and $probe.Bash) {
+                            $tierAccepted = $true
+                            $tierAcceptedName = $tier1Asset.name
+                        } else {
+                            Write-Step "Tier 1 failed: extracted archive missing cmd\git.exe or usr\bin\bash.exe - trying next option"
+                        }
+                    } catch {
+                        Write-Step "Tier 1 failed: $($_.Exception.Message) - trying next option"
+                    } finally {
+                        Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+
+            # TIER 2: PortableGit-<ver>-64-bit.7z.exe (7-Zip SFX). 7z.sfx honours
+            # `-y` (auto-confirm overwrite) and `-o<dir>` (output). Run via the
+            # call operator with an argument array so quoting is safe.
+            if (-not $tierAccepted) {
+                $tier2Asset = $assets | Where-Object {
+                    $_.name -like "PortableGit-*-64-bit.7z.exe" -and $_.name -notlike "*arm64*"
+                } | Select-Object -First 1
+                if (-not $tier2Asset) {
+                    # Synthesize the URL from the tag if the API list was empty
+                    $tier2Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/PortableGit-$fallbackVer3-64-bit.7z.exe"
+                    $tier2Name = "PortableGit-$fallbackVer3-64-bit.7z.exe (fallback)"
                 } else {
-                    throw "No MinGit asset found in latest release"
+                    $tier2Url  = $tier2Asset.browser_download_url
+                    $tier2Name = $tier2Asset.name
                 }
-            } catch {
-                # Fallback to known good version
-                $downloadUrl = "https://github.com/git-for-windows/git/releases/download/v2.47.0.windows.2/MinGit-2.47.0.2-64-bit.zip"
-                Write-Step "  Using fixed MinGit 2.47.0.2 (API failed: $($_.Exception.Message))"
+                $tierAttempt++
+                Write-Step "Trying tier 2 (7-Zip SFX): $tier2Name"
+                $tempSfx = Join-Path $env:TEMP "glitch-git-tier2.7z.exe"
+                $dlOk = $false
+                try {
+                    Invoke-WithSpinner -Label "Downloading $tier2Name" -DoneMessage "Download" -ScriptBlock {
+                        Invoke-WebRequest -Uri $tier2Url -OutFile $using:tempSfx -UseBasicParsing -TimeoutSec 120
+                    }
+                    $dlOk = $true
+                } catch {
+                    Write-Step "Tier 2 failed: download error - $($_.Exception.Message) - trying next option"
+                }
+                if ($dlOk) {
+                    try {
+                        Reset-StagingDir $gitStagedDir
+                        # 7-Zip SFX supports -y and -o<dir>. Wait for completion
+                        # so the probe below sees the extracted tree.
+                        $sfxProc = Start-Process -FilePath $tempSfx -ArgumentList @('-y', "-o$gitStagedDir") -Wait -PassThru -NoNewWindow
+                        if ($sfxProc.ExitCode -ne 0) {
+                            throw "7-Zip SFX exited with code $($sfxProc.ExitCode)"
+                        }
+                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
+                        if ($probe.Git -and $probe.Bash) {
+                            $tierAccepted = $true
+                            $tierAcceptedName = $tier2Name
+                        } else {
+                            Write-Step "Tier 2 failed: extracted SFX missing cmd\git.exe or usr\bin\bash.exe - trying next option"
+                        }
+                    } catch {
+                        Write-Step "Tier 2 failed: $($_.Exception.Message) - trying next option"
+                    } finally {
+                        Remove-Item $tempSfx -Force -ErrorAction SilentlyContinue
+                    }
+                }
             }
 
-            $tempZip = Join-Path $env:TEMP "glitch-mingit.zip"
-            try {
-                Invoke-WithSpinner -Label "Downloading MinGit (40MB)" -DoneMessage "MinGit" -ScriptBlock {
-                  Invoke-WebRequest -Uri $using:downloadUrl -OutFile $using:tempZip -UseBasicParsing -TimeoutSec 120
+            # TIER 3: Git-<ver>-64-bit.exe (silent NSIS). /VERYSILENT suppresses
+            # most dialogs; /NORESTART prevents reboot prompts; /NOCANCEL
+            # prevents the abort button; /SP- skips the "welcome" page so no
+            # UAC pre-prompt beyond the elevation the installer always
+            # requires. /DIR installs into our bundled mingit dir.
+            if (-not $tierAccepted) {
+                $tier3Asset = $assets | Where-Object {
+                    $_.name -like "Git-*-64-bit.exe" -and $_.name -notlike "*arm64*"
+                } | Select-Object -First 1
+                if (-not $tier3Asset) {
+                    $tier3Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/Git-$fallbackVer3-64-bit.exe"
+                    $tier3Name = "Git-$fallbackVer3-64-bit.exe (fallback)"
+                } else {
+                    $tier3Url  = $tier3Asset.browser_download_url
+                    $tier3Name = $tier3Asset.name
                 }
-
-                New-Item -ItemType Directory -Path $gitStagedDir -Force | Out-Null
-                Invoke-WithSpinner -Label "Extracting MinGit" -DoneMessage "MinGit" -ScriptBlock {
-                  Expand-Archive -Path $using:tempZip -DestinationPath $using:gitStagedDir -Force
+                $tierAttempt++
+                Write-Step "Trying tier 3 (NSIS silent): $tier3Name"
+                $tempNsis = Join-Path $env:TEMP "glitch-git-tier3.exe"
+                $nsisTargetDir = Join-Path $env:TEMP "glitch-git-nsis-install"
+                if (Test-Path $nsisTargetDir) { Remove-Item $nsisTargetDir -Recurse -Force -ErrorAction SilentlyContinue }
+                New-Item -ItemType Directory -Path $nsisTargetDir -Force | Out-Null
+                $dlOk = $false
+                try {
+                    Invoke-WithSpinner -Label "Downloading $tier3Name" -DoneMessage "Download" -ScriptBlock {
+                        Invoke-WebRequest -Uri $tier3Url -OutFile $using:tempNsis -UseBasicParsing -TimeoutSec 120
+                    }
+                    $dlOk = $true
+                } catch {
+                    Write-Step "Tier 3 failed: download error - $($_.Exception.Message) - trying next option"
                 }
-                Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
-
-                if (-not (Test-Path $gitBin)) {
-                    throw "MinGit binary not found after extraction at $gitBin"
+                if ($dlOk) {
+                    try {
+                        Reset-StagingDir $gitStagedDir
+                        # NSIS will raise ONE UAC dialog (Elevation) which we
+                        # cannot suppress without UAC disabled. The installer's
+                        # own elevation elsewhere makes this acceptable.
+                        $nsisArgs = @(
+                            '/VERYSILENT',
+                            '/SUPPRESSMSGBOXES',
+                            '/NORESTART',
+                            '/NOCANCEL',
+                            '/SP-',
+                            "/DIR=`"$nsisTargetDir`""
+                        )
+                        Write-Step "  Note: the installer may raise ONE UAC prompt to elevate."
+                        $nsisProc = Start-Process -FilePath $tempNsis -ArgumentList $nsisArgs -Wait -PassThru
+                        if ($nsisProc.ExitCode -ne 0) {
+                            throw "Git NSIS returned exit code $($nsisProc.ExitCode)"
+                        }
+                        # NSIS installs into $nsisTargetDir\cmd\git.exe (and a
+                        # usr\bin/bash.exe beside it). Copy the whole tree into
+                        # the staging dir for a uniform downstream probe.
+                        if (Test-Path $nsisTargetDir) {
+                            Copy-Item "$nsisTargetDir\*" $gitStagedDir -Recurse -Force
+                        }
+                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
+                        if ($probe.Git -and $probe.Bash) {
+                            $tierAccepted = $true
+                            $tierAcceptedName = $tier3Name
+                        } else {
+                            Write-Step "Tier 3 failed: installed Git missing cmd\git.exe or usr\bin\bash.exe - trying next option"
+                        }
+                    } catch {
+                        Write-Step "Tier 3 failed: $($_.Exception.Message) - trying next option"
+                    } finally {
+                        Remove-Item $tempNsis -Force -ErrorAction SilentlyContinue
+                        Remove-Item $nsisTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+                    }
                 }
-                $env:PATH = "$gitStagedDir\cmd;$gitStagedDir\usr\bin;$env:PATH"
-                $gitPath = $gitBin
-                $gitProvisioned = $true
-                $gitNeedsPersistence = $true
-                Write-Success "MinGit staged to $gitStagedDir (will be moved after clone)"
-            } catch {
-                Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Error "Failed to download MinGit: $_"
-                Write-Error "Install Git manually from https://git-scm.com/download/win"
-                Write-Error "After installing, restart your terminal and re-run the installer."
-                throw "Installation failed"
             }
+
+            # TIER 4 (last resort, git-ONLY): the non-busybox MinGit zip.
+            # MinGit ships git.exe but NO usr\bin\bash.exe -- so this tier
+            # accepts git.exe alone and warns loudly that bash is absent.
+            # The install MUST CONTINUE (Glitch works for git operations; only
+            # bash-dependent features like shell tools and some skills will
+            # not run).
+            if (-not $tierAccepted) {
+                $tier4Asset = $assets | Where-Object {
+                    $_.name -like "MinGit-*-64-bit.zip" -and $_.name -notlike "*busybox*"
+                } | Select-Object -First 1
+                if (-not $tier4Asset) {
+                    $tier4Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/MinGit-$fallbackVer3.2-64-bit.zip"
+                    $tier4Name = "MinGit-$fallbackVer3.2-64-bit.zip (fallback)"
+                } else {
+                    $tier4Url  = $tier4Asset.browser_download_url
+                    $tier4Name = $tier4Asset.name
+                }
+                $tierAttempt++
+                Write-Step "Trying tier 4 (MinGit git-only last resort): $tier4Name"
+                $tempZip4 = Join-Path $env:TEMP "glitch-git-tier4.zip"
+                $dlOk = $false
+                try {
+                    Invoke-WithSpinner -Label "Downloading $tier4Name" -DoneMessage "Download" -ScriptBlock {
+                        Invoke-WebRequest -Uri $tier4Url -OutFile $using:tempZip4 -UseBasicParsing -TimeoutSec 120
+                    }
+                    $dlOk = $true
+                } catch {
+                    Write-Step "Tier 4 failed: download error - $($_.Exception.Message)"
+                }
+                if ($dlOk) {
+                    try {
+                        Reset-StagingDir $gitStagedDir
+                        Invoke-WithSpinner -Label "Extracting $tier4Name" -DoneMessage "Extract" -ScriptBlock {
+                            Expand-Archive -Path $using:tempZip4 -DestinationPath $using:gitStagedDir -Force
+                        }
+                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
+                        if ($probe.Git) {
+                            $tierAccepted = $true
+                            $tierAcceptedName = $tier4Name
+                            $tierIsGitOnly = $true
+                        } else {
+                            Write-Step "Tier 4 failed: extracted archive missing cmd\git.exe"
+                        }
+                    } catch {
+                        Write-Step "Tier 4 failed: $($_.Exception.Message)"
+                    } finally {
+                        Remove-Item $tempZip4 -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+
+            # No tier yielded even git.exe -- give the user an actionable path
+            # instead of silently continuing with no git at all.
+            if (-not $tierAccepted) {
+                throw "Could not provision Git at all. Install Git for Windows from https://git-scm.com/download/win and re-run this installer."
+            }
+
+            if (-not $tierIsGitOnly) {
+                # Bashful tiers: require bash at staging (probe above already
+                # enforced this for tier 1-3). Belt-and-braces check.
+                if (-not (Test-Path $gitBash)) {
+                    Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
+                    throw "Provisioned Git tier ($tierAcceptedName) unexpectedly lacks bash. Install Git for Windows from https://git-scm.com/download/win"
+                }
+            } else {
+                # Tier 4 (MinGit) is git-only by design. Warn loudly and let
+                # the install continue -- Glitch's git operations work; only
+                # bash-dependent features (skills, shell tools) will not run.
+                Write-Warn "Installed git-only MinGit (no bash). Glitch works, but shell features and skills that call bash will not run. Re-run the installer or install Git for Windows to enable bash."
+            }
+
+            $env:PATH = "$gitStagedDir\cmd;$gitStagedDir\usr\bin;$env:PATH"
+            $gitPath = $gitBin
+            $gitProvisioned = $true
+            $gitNeedsPersistence = $true
+            Write-Success "Git staged from $tierAcceptedName to $gitStagedDir (will be moved after clone)"
         }
     } else {
         # gitPath was found via session PATH
@@ -553,14 +908,22 @@ if (-not (Test-Path "$InstallDir\.git")) {
       Write-Error "Clone failed: $_"
       throw "Installation failed"
     }
-    if ($Branch -ne "main") {
-        Write-Step "Checking out branch: $Branch..."
-        Push-Location $InstallDir
-        $prevEAP = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        & $gitPath checkout $Branch 2>&1 | Out-Null
-        $ErrorActionPreference = $prevEAP
-        Pop-Location
+    # Always check out the requested branch. The clone follows the repo's
+    # DEFAULT branch (develop for glitch-pi), so even the default -Branch main
+    # needs a real checkout. Non-fatal: on failure continue on the cloned branch.
+    Write-Step "Checking out branch: $Branch..."
+    Push-Location $InstallDir
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $coOut = & $gitPath checkout $Branch 2>&1
+    $coCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    Pop-Location
+    if ($coCode -ne 0) {
+        Write-Warn "git checkout $Branch failed (exit $coCode): $coOut"
+        Write-Warn "Continuing on the cloned default branch."
+    } else {
+        Write-Success "On branch: $Branch"
     }
 
     # Finalize bundled git: move the staged MinGit into the install dir so the
@@ -571,13 +934,42 @@ if (-not (Test-Path "$InstallDir\.git")) {
         if (-not (Test-Path $finalGitDir)) { New-Item -ItemType Directory -Path $finalGitDir -Force | Out-Null }
         Copy-Item "$gitStagedDir\*" $finalGitDir -Recurse -Force
         if (-not (Test-Path (Join-Path $finalGitDir "cmd\git.exe"))) {
-            throw "MinGit copy failed: $finalGitDir\cmd\git.exe missing after copy"
+            throw "Git copy failed: $finalGitDir\cmd\git.exe missing after copy"
+        }
+        # Mirror the tier 1-3 bash check at the final location: a successful
+        # copy can still leave us with a bashless bundled git when tier 4
+        # (MinGit, git-only) was accepted. In that case we still proceed --
+        # Glitch's git operations work; only bash-dependent features
+        # (skills, shell tools) will not run -- but we re-warn so the user
+        # sees the state at install time, not just on a later launch.
+        if (-not (Test-Path (Join-Path $finalGitDir "usr\bin\bash.exe"))) {
+            Write-Warn "Bundled Git at $finalGitDir has no bash. Glitch works, but shell features and skills that call bash will not run. Re-run the installer or install Git for Windows to enable bash."
         }
         Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $env:TEMP "glitch-mingit.zip") -Force -ErrorAction SilentlyContinue
         $env:PATH = "$finalGitDir\cmd;$finalGitDir\usr\bin;$env:PATH"
         $gitPath = Join-Path $finalGitDir "cmd\git.exe"
         Write-Success "MinGit installed to $finalGitDir"
+
+        # Execution self-test: the bashless-busybox guard above proves bash.exe
+        # EXISTS, but Glitch's tools actually INVOKE bash. A copy that extracted
+        # fine can still be unusable (e.g. a busybox-bash shim that exits
+        # immediately, or a DLL-search-path mismatch). Run --version; if it
+        # works, log the version; if not, warn loudly but keep going so the
+        # installer still finishes (the existing extractor and persistence
+        # logic remain intact - this is purely a visibility upgrade).
+        $bundledBash = Join-Path $finalGitDir "usr\bin\bash.exe"
+        try {
+            $bashVersionOut = & $bundledBash --version 2>&1
+            $bashVersionLine = ($bashVersionOut | Select-Object -First 1) -as [string]
+            if ($LASTEXITCODE -eq 0 -and $bashVersionLine) {
+                Write-Success "Bundled bash works: $bashVersionLine"
+            } else {
+                Write-Warn "Bundled bash at $bundledBash did not report a version (exit $LASTEXITCODE). Glitch's bash tool may not work; consider installing Git for Windows."
+            }
+        } catch {
+            Write-Warn "Bundled bash at $bundledBash failed to execute ($($_.Exception.Message)). Glitch's bash tool may not work; consider installing Git for Windows."
+        }
     }
 
     # Persist the FINAL git location for the staged (just-downloaded) case.
@@ -807,46 +1199,88 @@ if (Test-Path (Join-Path $bundledNodeBin "gitnexus.cmd")) {
 }
 
 if ($gitnexusCmd) {
-    # Find Git's mingw64\bin (ships OpenSSL 3 DLLs the FTS extension needs)
+    # Find Git's OpenSSL 3 DLLs (libssl-3*.dll) across multiple roots, both
+    # mingw64\bin and usr\bin. Git for Windows ships these DLLs in either bin,
+    # so probe both. Dedupe roots case-insensitively so the same git install
+    # (e.g. resolved via Get-PersistedGitPath AND Get-Command git) is only
+    # scanned once.
     $gitMingw64Bin = $null
-    $gitExe = Get-Command git -ErrorAction SilentlyContinue
-    if ($gitExe) {
-        $gitPath = $gitExe.Source
-        $idx = $gitPath.ToLower().IndexOf('\cmd\git')
-        if ($idx -ge 0) {
-            $candidate = Join-Path (Join-Path $gitPath.Substring(0, $idx) 'mingw64') 'bin'
-            if (Test-Path (Join-Path $candidate 'libssl-3-x64.dll')) {
-                $gitMingw64Bin = $candidate
-            }
+    $gitRootForLog = ''
+
+    # Build the candidate root list.
+    $gitRootCandidates = @()
+    $persistedGit = Get-PersistedGitPath
+    if ($persistedGit) {
+        $idx = $persistedGit.ToLower().IndexOf('\cmd\git')
+        if ($idx -ge 0) { $gitRootCandidates += $persistedGit.Substring(0, $idx) }
+        else { $gitRootCandidates += Split-Path -Parent $persistedGit }
+    }
+    $cmdGit = Get-Command git -ErrorAction SilentlyContinue
+    if ($cmdGit) {
+        $idx2 = $cmdGit.Source.ToLower().IndexOf('\cmd\git')
+        if ($idx2 -ge 0) { $gitRootCandidates += $cmdGit.Source.Substring(0, $idx2) }
+    }
+    if ($InstallDir) { $gitRootCandidates += Join-Path $InstallDir 'data\mingit' }
+    if ($env:LOCALAPPDATA) { $gitRootCandidates += Join-Path $env:LOCALAPPDATA 'Programs\Git' }
+    $gitRootCandidates += @(
+        'C:\Program Files\Git',
+        'C:\Program Files (x86)\Git',
+        'D:\Program Files\Git'
+    )
+
+    # Deduplicate case-insensitively (Windows paths).
+    $seen = @{}
+    $dedupedRoots = @()
+    foreach ($r in $gitRootCandidates) {
+        if ([string]::IsNullOrEmpty($r)) { continue }
+        $key = $r.ToLower().TrimEnd('\')
+        if (-not $seen.ContainsKey($key)) {
+            $seen[$key] = $true
+            $dedupedRoots += $r
         }
     }
-    if (-not $gitMingw64Bin) {
-        # Fallback: scan common Git install roots
-        $roots = @('C:\Program Files\Git', 'D:\Program Files\Git', 'E:\Program Files\Git', 'C:\Program Files (x86)\Git')
-        foreach ($root in $roots) {
-            $candidate = Join-Path (Join-Path $root 'mingw64') 'bin'
-            if (Test-Path (Join-Path $candidate 'libssl-3-x64.dll')) {
+
+    foreach ($root in $dedupedRoots) {
+        foreach ($sub in @('mingw64\bin', 'usr\bin')) {
+            $candidate = Join-Path $root $sub
+            if (-not (Test-Path $candidate)) { continue }
+            $hit = Get-ChildItem -Path $candidate -Filter 'libssl-3*.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) {
                 $gitMingw64Bin = $candidate
+                $gitRootForLog = $root
                 break
             }
         }
+        if ($gitMingw64Bin) { break }
     }
 
     if ($gitMingw64Bin) {
-        Write-Step "Found Git mingw64 bin at $gitMingw64Bin - prepending to PATH for FTS/OpenSSL"
+        Write-Step "Found OpenSSL 3 DLL at $gitMingw64Bin (root $gitRootForLog) - prepending to PATH for FTS"
         $env:PATH = $gitMingw64Bin + ';' + $env:PATH
     } else {
-        Write-Warn "Git mingw64 bin not found - FTS extension may fail to load (OpenSSL 3 DLLs missing). Semantic search will degrade."
+        Write-Warn "Git mingw64\bin / usr\bin not found in any candidate root - FTS extension may fail to load (OpenSSL 3 DLLs missing). Semantic search will degrade."
     }
 
-    # Repair FTS indexes (one-time; subsequent analyzes maintain them incrementally)
+    # Repair FTS indexes (one-time; subsequent analyzes maintain them incrementally).
+    # Capture the full output so the catch block can surface the real error
+    # instead of just the exception type ($_ in PowerShell renders as
+    # "System.Management.Automation.RemoteException" for native failures).
     Write-Step "Repairing GitNexus FTS indexes..."
     $env:GITNEXUS_LBUG_BUFFER_POOL_SIZE = '4294967296'  # 4 GiB - required when FTS is enabled
+    $repairOut = ''
+    $repairExit = 0
     try {
-        & $gitnexusCmd analyze --repair-fts 2>&1 | ForEach-Object { Write-Host "  $_" }
-        Write-Success "GitNexus FTS indexes repaired successfully"
+        $repairOut = & $gitnexusCmd analyze --repair-fts 2>&1 | ForEach-Object { Write-Host "  $_"; $_ }
+        $repairExit = $LASTEXITCODE
     } catch {
-        Write-Warn "FTS repair failed (non-fatal): $_"
+        $repairExit = -1
+    }
+    if ($repairExit -eq 0) {
+        Write-Success "GitNexus FTS indexes repaired successfully"
+    } else {
+        $lastLine = ($repairOut -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace($lastLine)) { $lastLine = "gitnexus exited with code $repairExit" }
+        Write-Warn "FTS repair failed (non-fatal): $lastLine"
         Write-Host "  You can run manually later: gitnexus analyze --repair-fts"
     }
 } else {
@@ -941,6 +1375,13 @@ if ($cuaPresent) {
         $cuaOk = $false
         try {
             Invoke-WithSpinner -Label "Installing cua-driver" -DoneMessage "cua-driver" -ScriptBlock {
+                # Start-Job spawns a child PowerShell that does NOT inherit the
+                # parent's -ExecutionPolicy Bypass. On machines that default to
+                # Restricted, that child then refuses to load the official
+                # installer's downloaded .psm1 ("running scripts is disabled on
+                # this system"). Process scope needs no admin, so relax it for
+                # this job before invoking the downloaded installer.
+                try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction SilentlyContinue } catch {}
                 # irm | iex cannot pass switches, so invoke as a scriptblock instead.
                 # Default AutoStart=true registers the logon serve task (admin once).
                 & ([scriptblock]::Create((Invoke-RestMethod -Uri "https://cua.ai/driver/install.ps1")))
@@ -967,12 +1408,12 @@ if ($cuaPresent) {
 # Wire the MCP server whenever the driver is present (also on re-install: keeps the
 # wiring in sync). The junction path is stable across driver upgrades.
 if (Test-Path $cuaBin) {
-    $wireMcp = Join-Path $PSScriptRoot "lib\wire-mcp.mjs"
+    $wireMcp = Resolve-RepoScript "lib\wire-mcp.mjs"
     $bundledNode = Join-Path $InstallDir "data\node\node.exe"
     $nodeCmd = $null
     if (Test-Path $bundledNode) { $nodeCmd = $bundledNode }
     elseif (Get-Command node -ErrorAction SilentlyContinue) { $nodeCmd = "node" }
-    if ($nodeCmd -and (Test-Path $wireMcp)) {
+    if ($nodeCmd -and $wireMcp -and (Test-Path $wireMcp)) {
         & $nodeCmd $wireMcp --id cua-driver --command $cuaBin --args mcp
     } else {
         Write-Warn "Could not wire the cua-driver MCP server (no node or helper missing)."
@@ -985,8 +1426,65 @@ if (Test-Path $cuaBin) {
     $dcCfg = Join-Path $dcCfgDir "desktop-control.json"
     $dcEnabled = (Test-Path $cuaBin) -and ($cuaPresent -or ($cuaAnswer -match '^[Yy]'))
     if (-not (Test-Path $dcCfg)) {
+        # Missing-file write: first run -- write the initial state.
         New-Item -ItemType Directory -Path $dcCfgDir -Force | Out-Null
         "{ `"enabled`": $($dcEnabled.ToString().ToLower()) }" | Set-Content -Path $dcCfg -Encoding UTF8
+    } elseif (($cuaAnswer -match '^[Yy]') -and (Test-Path $cuaBin)) {
+        # Repair an existing enabled:false. An earlier run whose cua install
+        # failed (e.g. execution policy) wrote enabled:false here and the
+        # file was never repaired, so launch-unified.mjs skipped the daemon
+        # forever. When the driver is now present and the user opted in
+        # THIS run, flip a stale false to true; never downgrade.
+        try {
+            $dcExisting = Get-Content -LiteralPath $dcCfg -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($dcExisting.enabled -eq $false) {
+                # Match the original missing-file write style (no -Compress,
+                # single-line space-separated) so a re-read sees the same
+                # shape it had before. ConvertTo-Json's default 4-space indent
+                # would change file formatting on every repair.
+                '{ "enabled": true }' | Set-Content -LiteralPath $dcCfg -Encoding UTF8
+            }
+        } catch {
+            # Parse failure (truncated file, hand-edit, etc.) -- warn and
+            # leave the file alone so we never silently corrupt it.
+            Write-Warn "  Could not parse $dcCfg -- leaving it untouched: $($_.Exception.Message)"
+        }
+    }
+}
+
+# 4.85 Handy (optional voice input) - ask, never assume. The manifest recipe
+# (config/tools.json handy-voice) knows how to fetch and extract the MSI, so
+# this step reuses it instead of duplicating download/extract logic. The recipe
+# has a win32 platform entry only: on macOS/Linux nothing here can install it.
+$handyTarget = Join-Path $InstallDir "handy-voice\Handy\handy.exe"
+Write-Header "Handy (optional voice input)"
+if (Test-Path $handyTarget) {
+    Write-Success "Handy already installed"
+} else {
+    Write-Host "  Handy gives Glitch local voice input (~35 MB download)." -ForegroundColor White
+    Write-Host "  It runs only when you talk to Glitch. Skipping is fine - add it" -ForegroundColor White
+    Write-Host "  later with: node scripts\check-updates.mjs --apply --filter handy-voice"
+    Write-Prompt "  Install Handy now? [y/N] "
+    $handyAnswer = Read-Host
+    if ($handyAnswer -match '^[Yy]') {
+        $handyNode = Join-Path $InstallDir "data\node\node.exe"
+        if (-not (Test-Path $handyNode)) { $handyNode = "node" }
+        Push-Location $InstallDir
+        try {
+            & $handyNode "scripts\check-updates.mjs" --apply --filter handy-voice
+        } catch {
+            Write-Warn "  Handy install failed (non-fatal): $_"
+        } finally {
+            Pop-Location
+        }
+        if (Test-Path $handyTarget) {
+            Write-Success "Handy installed at handy-voice\Handy\handy.exe"
+        } else {
+            Write-Warn "  Handy was not installed. Retry later with:"
+            Write-Host "    cd $InstallDir; node scripts\check-updates.mjs --apply --filter handy-voice" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Step "  Skipped. Add later with: node scripts\check-updates.mjs --apply --filter handy-voice"
     }
 }
 
@@ -1022,11 +1520,11 @@ if ($vddOk) {
     Write-Prompt "  Install headless display driver now? [y/N] "
     $vddAnswer = Read-Host
     if ($vddAnswer -match '^[Yy]') {
-        $vddScript = Join-Path $PSScriptRoot "install-headless-display.ps1"
-        if (Test-Path $vddScript) {
+        $vddScript = Resolve-RepoScript "install-headless-display.ps1"
+        if ($vddScript -and (Test-Path $vddScript)) {
             & $vddScript
         } else {
-            Write-Warn "install-headless-display.ps1 not found at $vddScript"
+            Write-Warn "install-headless-display.ps1 not found in the install dir's scripts folder."
         }
     } else {
         Write-Warn "Skipped. Run later: scripts\install-headless-display.ps1"
@@ -1307,6 +1805,26 @@ if ($cloneAttempted -and -not (Test-Path "$userDir\.git")) {
     Write-Host ""
 }
 
+# 5.5. Record the install root INSIDE the install (data\config\root.json) so
+# diagnostics and humans can locate this Glitch install from within it.
+# Runs BEFORE the verification step so check-install.mjs can report the fresh
+# record (informational). Non-fatal on failure.
+$rootRecordScript = Join-Path $InstallDir "scripts\write-root-record.mjs"
+if (Test-Path $rootRecordScript) {
+    $recordNode = if (Test-Path "$InstallDir\data\node\node.exe") { "$InstallDir\data\node\node.exe" } else { "node" }
+    Write-Step "Recording install root..."
+    Push-Location $InstallDir
+    & $recordNode "scripts\write-root-record.mjs" "$InstallDir"
+    $recordExit = $LASTEXITCODE
+    Pop-Location
+    if ($recordExit -ne 0) {
+        Write-Warn "Root record write failed (non-fatal, exit $recordExit)."
+        Write-Host "  Run later: cd $InstallDir; node scripts\write-root-record.mjs" -ForegroundColor DarkGray
+    }
+} else {
+    Write-Warn "scripts\write-root-record.mjs not found -- install root not recorded."
+}
+
 # 6. Verify installation
 Write-Header "Verifying installation..."
 Push-Location $InstallDir
@@ -1381,6 +1899,7 @@ Next steps:
   * Local mode:    cd $InstallDir && .\launch-glitch.bat (select Local at prompt)
   * Safe mode:     cd $InstallDir && .\launch-glitch.bat (select Safe at prompt)
   * Update:        Re-run this installer (it will pull latest)
+  * Set up models:  set OPENROUTER_API_KEY (or another provider key), then restart Glitch - or run /login inside the TUI
   * User sync:     .\scripts\sync-user.ps1 -Push  (after making changes)
 
 Documentation: https://github.com/Cothek/glitch-pi

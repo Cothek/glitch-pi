@@ -29,6 +29,7 @@ Code is not done until ALL of these hold:
 - **Graph check before commit**: `detect_changes` before committing in indexed repos.
 - **Branch discipline** (R16): no Glitch core edits on `main`. Feature branches for everything non-trivial.
 - **Never `--no-verify`** to skip a gate unless Troy says so explicitly, and he names the risk he is accepting.
+- **Never edit a generated tree.** Edit the source it is generated from, then regenerate. `.pi/skills/` is generated and gitignored; its source is `glitch-memorycore/plugins/glitch-skills/skills/` in the `glitch-engine` repo. An edit made only in the generated copy is destroyed by the next `node scripts/sync-skills.mjs --pi` run. Confirm a path first: `git check-ignore -v <path>`. Detect drift with `node scripts/sync-skills.mjs --pi --check` or `node scripts/repo-hygiene.mjs`.
 
 ## 4. Quality gates (enforced, not optional)
 
@@ -69,3 +70,4 @@ Commit messages explain WHY when the why is not obvious from the diff.
 Post-mortem lessons that change a rule are appended here.
 
 - 2026-10-01 — Initial codification (three-repo hygiene + quality gates session).
+- 2026-10-05 — Never edit a generated tree. A full pass of skill edits landed only in `.pi/skills/`, which is gitignored and force-overwritten on sync, so the work had to be re-landed in the engine source. Post-mortem: skill work landed in a generated tree. Enforced by content-comparing drift in `sync-skills.mjs --check` and `repo-hygiene.mjs` section F.

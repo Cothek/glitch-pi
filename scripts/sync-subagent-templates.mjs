@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync, renameSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -10,14 +10,31 @@ const AGENTS_DIR = join(REPO_ROOT, '.pi', 'agents');
 const PROFILES_DIR = join(REPO_ROOT, '.pi', 'agent-profiles');
 
 const VALID_THINKING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const DEFAULT_TARGET = pathToFileURL(join(homedir(), '.pi-web', 'subagent-templates.json')).pathname.replace(/^\//, '');
+// The pi-web-ui SERVER resolves its template store as
+// join(stateStore.dataDir, "subagent-templates.json"), and dataDir is ~/.pi-web.
+// It does NOT read the repo copy and it does NOT honour PI_WEB_TEMPLATES
+// (verified: zero references anywhere in pi-web-ui/dist). Writing to
+// <repo>/data/config therefore produced dead config that looked correct while
+// every live sub-agent kept running whatever ~/.pi-web held, which is how the
+// model pins drifted 8 days stale while the repo showed the right models.
+//
+// So the default target must be the server's own file. PI_WEB_TEMPLATES is still
+// honoured as an explicit override for anyone running a non-standard dataDir.
+// homedir() rather than a literal so this stays portable across machines.
+const DEFAULT_TARGET = join(homedir(), '.pi-web', 'subagent-templates.json');
 
 function printHelp() {
   process.stdout.write(
     `Usage: sync-subagent-templates.mjs [--dry-run] [--help]\n` +
     `\n` +
     `Regenerates the pi-web-ui subagent template list from .pi/agents/*.md.\n` +
-    `Writes JSON atomically to PI_WEB_TEMPLATES (default: %USERPROFILE%\\.pi-web\\subagent-templates.json).\n` +
+    `Writes JSON atomically to $PI_WEB_TEMPLATES when set; otherwise defaults to\n` +
+    `<home>/.pi-web/subagent-templates.json, which is the file the pi-web-ui SERVER\n` +
+    `actually reads (it resolves join(stateStore.dataDir, "subagent-templates.json")\n` +
+    `and does not honour PI_WEB_TEMPLATES). Writing anywhere else produces dead config.\n` +
+    `NOTE: entries regenerated from .md are overwritten wholesale, so edits made\n` +
+    `directly in the pi-web-ui template UI are replaced on the next run. Treat\n` +
+    `.pi/agents/*.md as the source of truth.\n` +
     `\n` +
     `  --dry-run   Print the summary without writing anything.\n` +
     `  --help      Show this message and exit.\n`

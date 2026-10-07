@@ -28,8 +28,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ensureSessionScratchpad, mergeSessionIntoShared } from "../lib/memory-paths.mjs";
+// Root resolution — single source of truth for WHERE the Glitch root is.
+import { glitchRoot } from "../lib/root.mjs";
 
-const GLITCH_ROOT = "E:/Glitch AI/glitch-pi";
+const GLITCH_ROOT = glitchRoot();
 const USER_DIR = path.join(GLITCH_ROOT, "user");
 const DIARY_DIR = path.join(USER_DIR, "daily-diary", "current");
 

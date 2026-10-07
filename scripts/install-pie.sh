@@ -18,7 +18,7 @@ USER_REPO=""
 BRANCH=""
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-INSTALLER_VERSION="1.1.0-pie.1"
+INSTALLER_VERSION="1.1.0-pie.4"
 
 # Set up logging - captures all output to a file for diagnosis.
 # Logs to /tmp first (the install dir may not exist yet and must not be
@@ -253,12 +253,23 @@ fi
 BANNER_PAD=$(( (77 - ${#BANNER_VERSION_CONTENT}) / 2 ))
 if [ "$BANNER_PAD" -lt 0 ]; then BANNER_PAD=0; fi
 BANNER_VERSION_LINE="║$(printf '%*s' "$BANNER_PAD" '')${BANNER_VERSION_CONTENT}$(printf '%*s' $((77 - BANNER_PAD - ${#BANNER_VERSION_CONTENT})) '')║"
+# Center every banner line at the same 77-char inner width as the borders.
+# The hand-counted literal lines used to render at four different widths
+# (81/81/80/80/79), so the right ║ never lined up with the border corners.
+banner_line() {
+    local text="$1"
+    local pad=$(( (77 - ${#text}) / 2 ))
+    if [ "$pad" -lt 0 ]; then pad=0; fi
+    local right=$((77 - pad - ${#text}))
+    if [ "$right" -lt 0 ]; then right=0; fi
+    printf '║%*s%s%*s║' "$pad" '' "$text" "$right" ''
+}
 cat <<EOF
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                         GLITCH PIE INSTALLER (macOS/Linux)                    ║
-║                    Personal AI Companion - Persistent Memory                 ║
+╔$(printf '═%.0s' {1..77})╗
+$(banner_line "GLITCH PIE INSTALLER (macOS/Linux)")
+$(banner_line "Personal AI Companion - Persistent Memory")
 $BANNER_VERSION_LINE
-╚══════════════════════════════════════════════════════════════════════════════╝
+╚$(printf '═%.0s' {1..77})╝
 EOF
 
 # 1. Check prerequisites
@@ -522,15 +533,25 @@ if [ ! -d "$INSTALL_DIR/.git" ]; then
     fi
 fi
 
-# 4. Run bootstrap (if exists - it's Windows-specific but launch scripts handle deps)
+# 4. Bootstrap check (Windows has bootstrap-pi.ps1; on macOS/Linux the launch
+#    scripts self-provision: Node.js via launch-glitch.sh, the Pi engine via
+#    the first-run dependency installer inside launch-unified.mjs)
 header "Checking for bootstrap script..."
-BOOTSTRAP_PATH="$INSTALL_DIR/scripts/bootstrap.ps1"
+BOOTSTRAP_PATH="$INSTALL_DIR/scripts/bootstrap-pi.ps1"
 if [ -f "$BOOTSTRAP_PATH" ]; then
-    warn "bootstrap.ps1 is Windows-specific (PowerShell)."
-    warn "On macOS/Linux, dependencies are handled by the launch scripts automatically."
+    step "bootstrap-pi.ps1 present (used by Windows installs; not run here)."
+    step "On macOS/Linux, launch-glitch.sh downloads Node.js and the first"
+    step "interactive launch installs the Pi engine (pi CLI + pi-web-ui)."
 else
-    step "No bootstrap needed - launch scripts handle Node.js/OpenCode download."
+    warn "bootstrap-pi.ps1 not found — launch-glitch.sh will still fetch Node.js."
 fi
+
+# Handy (optional voice input): the download recipe in config/tools.json has a
+# win32 platform entry only, so macOS/Linux cannot install Handy automatically.
+header "Handy (optional voice input)"
+step "Not provisioned on macOS/Linux (Windows-only download recipe)."
+warn "  Want voice input? Install Handy manually and drop Handy.app into:"
+warn "    $INSTALL_DIR/handy-voice/"
 
 
 # 4.5. Install GitNexus (MCP code graph)
@@ -832,6 +853,18 @@ DASHEOF
   done
 
   success "Local user profile created at $USER_DIR"
+
+  # Initialize the profile as a git repo on 'main' (never 'master'), the same
+  # thing the Windows installer does. The completion message tells users to
+  # `git add -A && git commit && git push` from user/ for cross-machine sync;
+  # without a repo that push fails on macOS/Linux.
+  if [ ! -d "$USER_DIR/.git" ]; then
+    if git -C "$USER_DIR" init -b main >/dev/null 2>&1 || { git -C "$USER_DIR" init >/dev/null 2>&1 && git -C "$USER_DIR" branch -m main >/dev/null 2>&1; }; then
+      success "  User profile git repo initialized on main"
+    else
+      warn "  Could not initialize git in the user profile (non-fatal)."
+    fi
+  fi
 else
   success "User profile already exists at $USER_DIR (kept as-is)"
 fi
@@ -1044,34 +1077,17 @@ if [ "$NO_LAUNCH" = false ]; then
         step "Starting Glitch Pie..."
         cd "$INSTALL_DIR"
         echo ""
-        echo "Select launch mode:"
-        echo "  1) Normal (paid) - Recommended for most users"
-        echo "  2) Free - Emergency fallback when paid quota is exhausted"
-        echo "  3) Local - Use local LM Studio models"
-        echo "  4) Safe - Minimal config for troubleshooting"
+        echo "First launch note: Node.js and the Pi engine are installed now"
+        echo "(one-time, large download). This terminal runs the TUI directly."
         echo ""
-        prompt "Enter choice [1-4, Enter for Normal (paid)]: "
-        MODE_FLAG=""
-        while true; do
-            read -r mode_choice </dev/tty
-            case "$mode_choice" in
-                1|"") MODE_FLAG="--mode normal-paid"; break ;;
-                2) MODE_FLAG="--mode normal-free"; break ;;
-                3) MODE_FLAG="--mode normal-local"; break ;;
-                4) MODE_FLAG="--mode safe"; break ;;
-                *) echo "Invalid choice. Please enter 1, 2, 3, or 4 (or Enter for default)." ;;
-            esac
-        done
-        step "Launching in $(echo "$MODE_FLAG" | sed 's/--mode //') mode..."
-        nohup ./launch-glitch.sh "$MODE_FLAG" > glitch.log 2>&1 &
-        PID=$!
-        success "Glitch Pie launched (PID: $PID)"
+        # Foreground launch, NOT nohup: the TUI needs this terminal, and the
+        # first-run engine install needs an interactive (TTY) launch so
+        # launch-unified.mjs's dependency installer actually runs. A detached
+        # (non-TTY) first launch would skip the install and leave the engine
+        # missing. When the TUI exits, control returns to this installer.
+        ./launch-glitch.sh --mode pi
         echo ""
-        echo "  To launch again later, run:" 
-        echo "    cd $INSTALL_DIR"
-        echo "    ./launch-glitch.sh"
-        echo ""
-        echo "  Logs: tail -f $INSTALL_DIR/glitch.log"
+        success "Glitch Pie exited. To launch again: cd $INSTALL_DIR && ./launch-glitch.sh"
     fi
 fi
 
@@ -1097,9 +1113,8 @@ Glitch Pie is installed at: $INSTALL_DIR
 
 Next steps:
   • Launch:        cd $INSTALL_DIR && ./launch-glitch.sh
-  • Free mode:     cd $INSTALL_DIR && ./launch-glitch.sh (select Free at prompt)
-  • Local mode:    cd $INSTALL_DIR && ./launch-glitch.sh (select Local at prompt)
-  • Safe mode:     cd $INSTALL_DIR && ./launch-glitch.sh (select Safe at prompt)
+  • Pi TUI:       cd $INSTALL_DIR && ./launch-glitch.sh --mode pi
+  • Web UI:       start glitch, then pick the Web interface (stack on :8787)
   • Update:        Re-run this installer (it will pull latest)
   • User sync:     cd $INSTALL_DIR/user && git add -A && git commit -m 'update' && git push  (after making changes)
 

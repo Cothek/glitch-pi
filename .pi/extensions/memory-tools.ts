@@ -14,6 +14,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+// Root resolution — single source of truth for WHERE the Glitch root is.
+import { glitchRoot } from "../lib/root.mjs";
 
 const STOP_WORDS = new Set([
   "is", "are", "the", "a", "an", "in", "on", "at", "to", "for", "of", "by", "with",
@@ -53,10 +55,11 @@ function runGrep(term: string, dir: string): string[] {
 }
 
 export default function (pi: ExtensionAPI) {
-    // Canonical memory lives in glitch-pi/user (own git repo, gitignored by the
+    // Canonical memory lives in <root>/user (own git repo, gitignored by the
   // parent repo). Unified 2026-09-29: glitch-ai/user is the legacy backup
-  // (pre-pi era); search deps live in the glitch-pi memorycore submodule.
-  const dir = "E:/Glitch AI/glitch-pi";
+  // (pre-pi era); search deps live in the memorycore submodule. The root comes
+  // from the shared resolver, so it is correct on every machine.
+  const dir = glitchRoot();
 
   // --- recall ---
   pi.registerTool({

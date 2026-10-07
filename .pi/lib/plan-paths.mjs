@@ -119,9 +119,69 @@ export function extractPlanRefs(command) {
 const MUTATION_VERB_RE =
 	/\b(mv|move|ren|rename|rm|del|erase|rmdir|rd|deltree|cp|copy|copy-item|move-item|remove-item|rename-item|tee|shred|truncate)\b/i;
 
-/** True when the command both mutates and touches plan paths. */
+/**
+ * Remove heredoc BODIES only (they are data, never commands). Quoted strings are
+ * deliberately KEPT: a verb inside quotes is still a verb when the quotes are a
+ * wrapper argument (`bash -c "mv a b"`). Stripping quotes here would blind the
+ * ownership gate — a false negative is worse than the false positive this
+ * replaced.
+ */
+export function stripHeredocs(command) {
+	let s = String(command ?? "");
+	s = s.replace(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1([\s\S]*?)^\s*\2\s*$/gm, " ");
+	return s;
+}
+
+/** git subcommands that provably cannot modify FILE CONTENTS in the working
+ *  tree, so their free-text arguments (commit messages, refs) are not scanned
+ *  for mutation verbs. Deliberately SHORT: anything not listed is treated as
+ *  potentially writing, because a false negative in an ownership gate is worse
+ *  than a false positive. Notably ABSENT, all of which CAN change or delete
+ *  working-tree files: checkout, restore, clean, reset, switch, stash, worktree,
+ *  submodule, pull, merge, rebase, cherry-pick, revert, am, apply, rm, mv,
+ *  sparse-checkout. A curated "cannot write" list rots silently; an allowlist
+ *  fails loud. */
+const GIT_READONLY = new Set(["status","diff","log","show","add","fetch","push","branch","tag","rev-parse","ls-files","ls-remote","blame","grep","config","remote","describe","shortlog","reflog","cat-file","hash-object","check-ignore","symbolic-ref","rev-list","whatchanged","notes","archive","verify-commit","verify-tag","name-rev","count-objects","commit","merge-base","show-ref","for-each-ref","diff-tree","diff-files"]);
+
+/** Shell verbs that take free-text arguments and never mutate files. */
+const TEXT_ONLY_VERBS = new Set(["echo","printf","write-host","write-output","write-warning","write-error","write-verbose","console.log","console.error","console.warn","console.info","console.debug"]);
+
+/** First bare command token of a segment, lowercased, path and .exe stripped. */
+function segmentVerb(seg) {
+	const s = String(seg).replace(/^\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+/, "");
+	const tok = (s.trim().split(/\s+/)[0] || "");
+	return tok.replace(/^.*[\\/]/, "").replace(/\.exe$/i, "").toLowerCase();
+}
+
+/** Second token of a segment (the git subcommand), lowercased. */
+function segmentSubVerb(seg) {
+	const s = String(seg).replace(/^\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+/, "");
+	const toks = s.trim().split(/\s+/);
+	return (toks[1] || "").replace(/^.*[\\/]/, "").replace(/\.exe$/i, "").toLowerCase();
+}
+
+/** True when the command both mutates and touches plan paths.
+ *  Path test: RAW command. Verb test: heredoc bodies stripped, quotes kept, and
+ *  segments whose verb provably cannot write a file (git commit/log/...,
+ *  echo) are exempt so a plan path mentioned in a commit message is not a
+ *  mutation. */
 export function hasPlanMutation(command) {
-	return isPlanPath(command) && MUTATION_VERB_RE.test(String(command));
+	const raw = String(command ?? "");
+	if (!isPlanPath(raw)) return false;
+	const stripped = stripHeredocs(raw);
+	const segments = stripped.split(/&&|\|\||;|\||\r?\n/).map((s) => s.trim()).filter(Boolean);
+	if (segments.length === 0) return MUTATION_VERB_RE.test(stripped);
+	for (const seg of segments) {
+		const verb = segmentVerb(seg);
+		if (TEXT_ONLY_VERBS.has(verb)) continue;
+		if (verb === "git") {
+			// Fail closed: only a PROVEN read-only subcommand is skipped.
+			if (GIT_READONLY.has(segmentSubVerb(seg))) continue;
+			return true;
+		}
+		if (MUTATION_VERB_RE.test(seg)) return true;
+	}
+	return false;
 }
 
 /**

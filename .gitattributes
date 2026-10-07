@@ -1,0 +1,36 @@
+# Line-ending policy
+#
+# WHY THIS FILE EXISTS
+# core.autocrlf is true on this machine, so git normalizes text files to LF in
+# the index and expects CRLF in the worktree. AGENTS.md had been written with
+# MIXED line endings (git ls-files --eol reported w/mixed while the index held
+# LF). Git then normalized on read, got a different byte sequence than the
+# index, and reported the file as modified forever with an EMPTY diff:
+# `git diff --numstat AGENTS.md` printed nothing while `git status` still showed
+# it as M. That is the worst kind of noise, because it looks like a real change
+# and is not one.
+#
+# The fix is to state the intent explicitly rather than rely on a per-machine
+# core.autocrlf. With an explicit eol= value git stops emitting the
+# "LF will be replaced by CRLF" warning, and the file behaves the same on a
+# machine with autocrlf off.
+#
+# SCOPE: deliberately narrow. A blanket "* text=auto" would renormalize every
+# tracked file in the repo on the next checkout and bury the real diff in
+# thousands of unrelated line changes. Only the file that actually exhibited the
+# problem is pinned here. Add further entries as real cases appear, never as a
+# blanket default.
+#
+# WHY -text AND NOT eol=crlf
+# An earlier version of this file used `AGENTS.md text eol=crlf`, which silenced
+# the warning but did NOT hold. scripts/launch-unified.mjs auto-stashes local
+# changes before switching branches (line ~133, `git stash push`) and then
+# checks out main (line ~145). That stash/pop round-trip rewrites the worktree
+# file and restores it with MIXED line endings, so the file drifted back to
+# w/mixed on the next launch and the empty-but-present modification returned.
+#
+# `-text` disables git's end-of-line conversion for this path entirely, so the
+# bytes are stored and restored verbatim and the stash/pop cycle cannot mangle
+# them. Diffing still works as text; only the conversion is off. This is the
+# fix for the writer, not for the symptom.
+AGENTS.md -text

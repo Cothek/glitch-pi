@@ -7,6 +7,7 @@
  * Creates in the target repo:
  *   - AGENTS.md          (if absent) linking to engineering standards +
  *                        the GitNexus "Always Do / Never Do" block
+ *   - ARCHITECTURE.md    (if absent) the project's driving structure document
  *   - .gitignore         (baseline entries appended if missing)
  *   - .editorconfig      (if absent)
  *   - .gitnexus index    (when --with-gitnexus and the repo has code files)
@@ -55,6 +56,7 @@ function appendMissing(rel, lines) {
 const AGENTS_MD = `# Project Instructions (Glitch)
 
 Standards: follow **Glitch Engineering Standards** (glitch-pi \`docs/engineering-standards.md\`).
+Structure: read **ARCHITECTURE.md** first. It is the driving structure document for this project.
 Definition of done: runs, reviewed (fresh PASS marker before commit), tested when a test setup exists, conventional commit, docs updated.
 
 ## Always Do
@@ -68,6 +70,51 @@ Definition of done: runs, reviewed (fresh PASS marker before commit), tested whe
 - NEVER commit secrets, tokens, or \`*.key\` files.
 - NEVER use \`git commit --no-verify\` unless the user explicitly accepts the risk.
 - NEVER leave dead code — delete it; git remembers.
+`;
+
+// Sibling driving doc: AGENTS.md points readers here for project structure.
+const ARCHITECTURE_TEMPLATE = `# <Project Name> Architecture
+
+Parent standard: glitch-pi \`docs/engineering-standards.md\`. Replace <Project Name> with this repo's name.
+
+## Purpose
+
+What this project is for and who it serves. Two sentences maximum.
+
+## Goals
+
+Numbered list. Short, measurable statements of what success means.
+
+## Non-Goals
+
+What this project deliberately does not do, and why. One item per line.
+
+## System Shape
+
+The main components and how they connect. A short text diagram is fine.
+
+## Data and State
+
+Where data lives, what persists, and what is disposable.
+
+## Invariants
+
+Rules that must never break. One rule per line, no exceptions.
+
+## Key Decisions
+
+Add one row per decision that shaped this architecture.
+
+| Date | Decision | Why |
+| ---- | -------- | --- |
+
+## Change Log
+
+One row per structural change to this architecture.
+
+| Date | Change | Why |
+| ---- | ------ | --- |
+|      |        |     |
 `;
 
 const GITIGNORE_BASELINE = [
@@ -88,6 +135,7 @@ indent_size = 2
 `;
 
 writeIfAbsent('AGENTS.md', AGENTS_MD);
+writeIfAbsent('ARCHITECTURE.md', ARCHITECTURE_TEMPLATE);
 appendMissing('.gitignore', GITIGNORE_BASELINE);
 writeIfAbsent('.editorconfig', EDITORCONFIG);
 const scratchGitkeep = join(TARGET, 'data', 'scratch', '.gitkeep');

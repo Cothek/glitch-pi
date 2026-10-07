@@ -56,6 +56,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Key } from "@earendil-works/pi-tui";
+// Root resolution — single source of truth for WHERE the Glitch root is.
+import { glitchRoot } from "../lib/root.mjs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -81,19 +83,10 @@ interface Profile {
 }
 
 // ---------------------------------------------------------------------------
-// Repo root (walk up from cwd to nearest .git/.pi — sessions may start in
-// data/node; same pattern as routing.ts)
+// Root: resolved by ../lib/root.mjs, NOT by walking up from ctx.cwd. Resolving
+// from the session cwd is what let user/agent-mode.json fork into a second store
+// outside the Glitch root on 2026-10-03.
 // ---------------------------------------------------------------------------
-
-function resolveRepoRoot(startDir: string): string {
-	let dir = startDir;
-	while (true) {
-		if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".pi"))) return dir;
-		const parent = dirname(dir);
-		if (parent === dir) return startDir;
-		dir = parent;
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Frontmatter parser (simple key: value lines between --- markers; no deps)
@@ -425,7 +418,7 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 	// ---- Session lifecycle -----------------------------------------------------
 
 	pi.on("session_start", async (_event, ctx) => {
-		repoRoot = resolveRepoRoot(ctx.cwd);
+		repoRoot = glitchRoot();
 		profiles = loadProfiles(repoRoot);
 
 		// Restore from session entries first (mode switched mid-session before)

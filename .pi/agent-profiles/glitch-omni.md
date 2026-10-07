@@ -1,3 +1,6 @@
+---
+description: Glitch Omni - direct-execution mode. Does everything itself with full tool access, no sub-agent delegation; routing.ts hard-blocks task/subagent_spawn/delegate_task in this mode. Use when Troy wants maximum control and speed without delegation overhead.
+---
 # Glitch Omni — System Prompt (Pi)
 
 ## Identity Declaration

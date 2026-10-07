@@ -17,6 +17,7 @@ import {
 	isPlanPath,
 	normalizePath,
 	sessionPlanPath,
+	stripHeredocs,
 } from "./plan-paths.mjs";
 
 const SID_A = "01a0d4ef-4af5-7576-bf49-cd5d688b52e42b";
@@ -106,6 +107,95 @@ test("hasPlanMutation: verb + plans path, not reads", () => {
 	assert.equal(hasPlanMutation("git status"), false);
 });
 
+// --- stripHeredocs + hasPlanMutation false-positive guards ---
+
+// The live bug: a commit whose MESSAGE mentions renaming the plan file.
+const COMMIT_MSG_RENAME = `git commit -m "Rename: data/plans/current-plan.md -> data/plans/archive/x.md"`;
+// Same false-positive shape via a heredoc message body.
+const COMMIT_MSG_HEREDOC = `git commit -m <<'EOF'
+Remove data/plans/current-plan.md from the registry; the archive copy is canonical.
+EOF`;
+
+test("stripHeredocs: a heredoc body is removed while the leading command survives", () => {
+	// a heredoc body is removed while the leading command survives
+	const stripped = stripHeredocs(COMMIT_MSG_HEREDOC);
+	assert.doesNotMatch(stripped, /\bRemove\b/);
+	assert.match(stripped, /git commit -m/);
+	// quoted strings are deliberately KEPT: a wrapper verb inside quotes is still a verb
+	assert.match(stripHeredocs(`bash -c "mv a b"`), /\bmv\b/);
+});
+
+test("hasPlanMutation: a verb inside a quoted commit message is not a command (live bug)", () => {
+	assert.equal(hasPlanMutation(COMMIT_MSG_RENAME), false);
+});
+
+test("hasPlanMutation: a heredoc commit message body is not a command", () => {
+	assert.equal(hasPlanMutation(COMMIT_MSG_HEREDOC), false);
+});
+
+test("hasPlanMutation: wrapper commands keep their verb (gate-bypass regression)", () => {
+	// bash -c "..." — the mv lives INSIDE the quotes; stripping quotes blinded the gate
+	assert.equal(hasPlanMutation(`bash -c "mv data/plans/current-plan.md /tmp/y"`), true);
+	// cmd /c move — a wrapper hides the verb from a leading-token scan
+	assert.equal(hasPlanMutation(`cmd /c move data/plans/current-plan.md /tmp/`), true);
+});
+
+test("hasPlanMutation: a WRITING git subcommand is still judged", () => {
+	// git rm is not in GIT_READONLY, so the segment fails closed and fires
+	assert.equal(hasPlanMutation(`git rm data/plans/current-plan.md`), true);
+});
+
+test("hasPlanMutation: git subcommands that CAN write the working tree fail closed", () => {
+	// These were false NEGATIVES: checkout/restore/clean appeared in neither the
+	// exempt list nor MUTATION_VERB_RE, and stash/worktree/submodule were wrongly
+	// listed as unable to write. A blind ownership gate is worse than a noisy one,
+	// so every one of these must report a mutation.
+	for (const cmd of [
+		"git checkout -- data/plans/current-plan.md",
+		"git restore data/plans/current-plan.md",
+		"git clean -fd data/plans/current-plan.md",
+		"git stash pop data/plans/current-plan.md",
+		"git worktree remove data/plans/current-plan.md",
+		"git submodule update data/plans/current-plan.md",
+		"git rm data/plans/current-plan.md",
+	]) {
+		assert.equal(hasPlanMutation(cmd), true, `expected a mutation for: ${cmd}`);
+	}
+});
+
+test("hasPlanMutation: proven read-only git stays exempt", () => {
+	for (const cmd of [
+		"git log -- data/plans/current-plan.md",
+		"git status --porcelain data/plans/current-plan.md",
+		"git diff data/plans/current-plan.md",
+		"git show data/plans/current-plan.md",
+	]) {
+		assert.equal(hasPlanMutation(cmd), false, `expected no mutation for: ${cmd}`);
+	}
+});
+
+test("hasPlanMutation: text-only verbs are exempt even when they name a plan path", () => {
+	assert.equal(hasPlanMutation(`echo "rm data/plans/current-plan.md"`), false);
+});
+
+test("hasPlanMutation: quoted plan operands are still real mutations", () => {
+	assert.equal(
+		hasPlanMutation(`mv "E:/Glitch AI/glitch-pi/data/plans/sessions/other/current-plan.md" "E:/tmp/x.md"`),
+		true,
+	);
+	assert.equal(
+		hasPlanMutation(`Move-Item "E:/Glitch AI/glitch-pi/data/plans/current-plan.md" "E:/tmp/"`),
+		true,
+	);
+});
+
+test("hasPlanMutation: an unquoted verb inside a block survives quote stripping", () => {
+	assert.equal(
+		hasPlanMutation(`if (Test-Path x) { Remove-Item "E:/Glitch AI/glitch-pi/data/plans/current-plan.md" }`),
+		true,
+	);
+});
+
 // --- classifyPlanCommand (the ownership verdict) ---
 
 test("archive move of the session's own plan is allowed", () => {
@@ -159,4 +249,18 @@ test("absolute own-session path mutation is allowed", () => {
 		SID_A,
 	);
 	assert.equal(v.allowed, true);
+});
+
+test("hasPlanMutation: staging and committing do NOT mutate plan FILE CONTENTS", () => {
+	// Deliberate: this gate guards plan file BYTES. `git add` touches the index and
+	// `git commit` writes objects/HEAD — neither changes a file's contents. `commit`
+	// MUST stay exempt, or `git commit -m "...data/plans/x..."` is flagged and the
+	// original false positive returns (it blocked real commits). See the review note
+	// of 2026-10-08 rejecting the "remove add/commit/notes from GIT_READONLY" finding.
+	assert.equal(hasPlanMutation(`git add data/plans/current-plan.md`), false);
+	assert.equal(hasPlanMutation(`git commit -m "notes about data/plans/current-plan.md"`), false);
+	assert.equal(hasPlanMutation(`git commit -F msg.txt`), false);
+	// but a command that really rewrites or deletes the file is still caught
+	assert.equal(hasPlanMutation(`git rm data/plans/current-plan.md`), true);
+	assert.equal(hasPlanMutation(`git checkout -- data/plans/current-plan.md`), true);
 });

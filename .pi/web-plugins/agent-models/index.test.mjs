@@ -119,7 +119,7 @@ describe("resolver: parsing", () => {
 		// header line then carries a lone \r. Because "." does not match \r in JS, the
 		// key regex failed silently and a pinned agent reported as unpinned. Caught when
 		// the CLI claimed ten agents had no model after a checkout.
-		const crlf = `---\r\nname: pentester\r\ndescription: "d"\r\ntools: read, bash\r\nmodel: commandcode/z-ai/glm-5.3-flash\r\n---\r\n\r\nbody\r\n`;
+		const crlf = `---\r\nname: pentester\r\ndescription: "d"\r\ntools: read, bash\r\nmodel: commandcode\/z-ai\/glm-5\.3-flash\r\n---\r\n\r\nbody\r\n`;
 		const agent = parseAgentFile(crlf, "pentester.md");
 		assert.equal(agent.model, "commandcode/z-ai/glm-5.3-flash", "last key must survive CRLF");
 		assert.equal(agent.name, "pentester");
@@ -566,5 +566,470 @@ describe("plugin: POST /set-model (write path)", () => {
 		const coder = p.report.rows.find((r) => r.name === "coder");
 		assert.equal(coder.status, STATUS.INHERIT);
 		assert.equal(coder.pin, null);
+	});
+});
+
+
+describe("plugin: config routes", () => {
+	let host;
+	let writes;
+	let configsData;
+	let getConfigsRoute;
+	let saveConfigRoute;
+	let applyConfigRoute;
+	let deleteConfigRoute;
+	let stateRoute;
+
+	before(async () => {
+		const { readdirSync, readFileSync } = await import("node:fs");
+		const root = fixtureWorkspace();
+		const dir = join(root, ".pi", "agents");
+		const files = new Map();
+		for (const name of readdirSync(dir)) files.set(name, readFileSync(join(dir, name), "utf-8"));
+		configsData = null;
+		writes = [];
+
+		host = createMockHost({
+			cwd: root,
+			fs: {
+				list: async (rel) => {
+					if (rel === ".pi/agents") {
+						return [...files.keys()].sort().map((name) => ({ name, type: "file" }));
+					}
+					if (rel === ".pi/agent-models/backups") {
+						return [];
+					}
+					return [];
+				},
+				readText: async (rel) => {
+					if (rel === ".pi/agent-models/configs.json") {
+						if (!configsData) throw new Error("ENOENT configs.json");
+						return configsData;
+					}
+					const name = rel.split("/").pop();
+					if (!files.has(name)) throw new Error("ENOENT " + rel);
+					return files.get(name);
+				},
+				write: async (rel, data) => {
+					writes.push({ rel, data: String(data) });
+					if (rel.startsWith(".pi/agents/")) files.set(rel.split("/").pop(), String(data));
+					if (rel === ".pi/agent-models/configs.json") configsData = String(data);
+				},
+				mkdir: async () => {},
+			},
+			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
+		});
+
+		await plugin.activate(host);
+		getConfigsRoute = host.mock.routes.find((r) => r.method === "GET" && r.path === "/configs");
+		saveConfigRoute = host.mock.routes.find((r) => r.method === "POST" && r.path === "/configs/save");
+		applyConfigRoute = host.mock.routes.find((r) => r.method === "POST" && r.path === "/configs/apply");
+		deleteConfigRoute = host.mock.routes.find((r) => r.method === "POST" && r.path === "/configs/delete");
+		stateRoute = host.mock.routes.find((r) => r.path === "/state");
+	});
+
+	function callGetConfigs() {
+		return new Promise((resolve) => {
+			const res = { writeHead() {}, end(b) { try { resolve(JSON.parse(b)); } catch (err) { resolve({ parseError: String(err), raw: b }); } } };
+			getConfigsRoute.handler({ url: "/configs", headers: {}, body: undefined }, res);
+		});
+	}
+
+	function callPost(body, route) {
+		return new Promise((resolve) => {
+			const res = { writeHead() {}, end(b) { try { resolve(JSON.parse(b)); } catch (err) { resolve({ parseError: String(err), raw: b }); } } };
+			route.handler({ url: "", headers: {}, body }, res);
+		});
+	}
+
+	function callState(url = "/state") {
+		return new Promise((resolve) => {
+			const res = { writeHead() {}, end(b) { try { resolve(JSON.parse(b)); } catch (err) { resolve({ parseError: String(err), raw: b }); } } };
+			stateRoute.handler({ url, headers: {}, body: undefined }, res);
+		});
+	}
+
+	it("registers GET /configs", () => {
+		assert.ok(getConfigsRoute, "GET /configs should be registered");
+	});
+
+	it("returns ok:true with an empty config list when no file exists", async () => {
+		const p = await callGetConfigs();
+		assert.equal(p.ok, true);
+		assert.deepEqual(p.configs, []);
+	});
+
+	it("includes config summaries in the /state payload", async () => {
+		// Save a config first
+		const saved = await callPost({ name: "free-models", description: "All on free endpoints" }, saveConfigRoute);
+		assert.equal(saved.ok, true);
+		const state = await callState("/state?refresh=1");
+		assert.ok(state.configs, "state.payload should include configs");
+		assert.equal(state.configs.length, 1);
+		assert.equal(state.configs[0].id, "free-models");
+		assert.equal(state.configs[0].agentCount, 4);
+		// Summary must NOT include pins
+		assert.equal(state.configs[0].pins, undefined);
+		});
+
+	it("POST /configs/save captures all current agent pins", async () => {
+		writes.length = 0;
+		configsData = null;
+		const p = await callPost({ name: "free-models", description: "All on free endpoints" }, saveConfigRoute);
+		assert.equal(p.ok, true, p.error ?? "");
+		assert.equal(p.config.id, "free-models");
+		assert.equal(p.config.name, "free-models");
+		assert.equal(p.config.description, "All on free endpoints");
+		assert.equal(p.config.agentCount, 4);
+
+		// Verify configs.json was written with pins
+		const configWrite = writes.filter((w) => w.rel === ".pi/agent-models/configs.json").pop();
+		assert.ok(configWrite, "configs.json must be written");
+		const doc = JSON.parse(configWrite.data);
+		assert.equal(doc.configs.length, 1);
+		const cfg = doc.configs[0];
+		assert.equal(cfg.pins.coder, "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b");
+		assert.equal(cfg.pins.reviewer, "opencode/mimo-v2.5-free");
+		assert.equal(cfg.pins.vision, null);
+		assert.equal(cfg.pins.testing, "nvidia/does-not-exist");
+		assert.ok(cfg.createdAt, "createdAt should be set");
+		assert.equal(cfg.createdAt, cfg.updatedAt, "createdAt === updatedAt on first save");
+		});
+
+	it("POST /configs/save upserts when the same name is saved again", async () => {
+		configsData = null;
+		writes.length = 0;
+		// First save
+		await callPost({ name: "My Config", description: "v1" }, saveConfigRoute);
+		// Second save with same name but different pins (we changed coder first)
+		const p = await callPost({ name: "My Config", description: "v2" }, saveConfigRoute);
+		assert.equal(p.ok, true);
+		const write = writes.filter((w) => w.rel === ".pi/agent-models/configs.json").pop();
+		const doc = JSON.parse(write.data);
+		assert.equal(doc.configs.length, 1, "should still be 1 (upsert, not append)");
+		assert.equal(doc.configs[0].description, "v2");
+		});
+
+	it("POST /configs/save rejects an empty name", async () => {
+		configsData = null;
+		const p = await callPost({ name: "", description: "" }, saveConfigRoute);
+		assert.equal(p.ok, false);
+		assert.match(p.error, /name is required/);
+		});
+
+	it("POST /configs/apply batch-sets all pins from a saved config", async () => {
+		// Set up: save a config where reviewer is pinned to a valid catalog model
+		configsData = JSON.stringify({
+			configs: [{
+				id: "fix-all",
+				name: "Fix All",
+				description: null,
+				createdAt: "2026-10-01T00:00:00.000Z",
+				updatedAt: "2026-10-01T00:00:00.000Z",
+				pins: {
+					coder: "commandcode/Qwen/Qwen3.6-Plus",
+					reviewer: "commandcode/z-ai/glm-5.3-flash",
+					vision: null,
+					testing: "nvidia/moonshotai/kimi-k3",
+				},
+			}],
+		});
+		writes.length = 0;
+		const p = await callPost({ id: "fix-all" }, applyConfigRoute);
+		assert.equal(p.ok, true, p.error ?? "");
+		assert.equal(p.summary.applied, 2);
+		assert.equal(p.summary.invalid, 1);
+
+		// Verify each agent file was updated and backed up
+		const configApplyBackups = writes.filter((w) => w.rel.includes("config-apply-fix-all"));
+		assert.equal(configApplyBackups.length, 2, "each changed agent should get a backup");
+		// reviewer's model is not in the catalog, so it should be skipped (invalid) and NOT written
+		const reviewerFile = writes.find((w) => w.rel === ".pi/agents/reviewer.md");
+		assert.equal(reviewerFile, undefined, "reviewer.md must NOT be written (model not in catalog)");
+		});
+
+	it("POST /configs/apply skips pins whose model is not in the live catalog", async () => {
+		configsData = JSON.stringify({
+			configs: [{
+				id: "partial",
+				name: "Partial",
+				description: null,
+				createdAt: "2026-10-01T00:00:00.000Z",
+				updatedAt: "2026-10-01T00:00:00.000Z",
+				pins: {
+					coder: "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b",
+					reviewer: "openrouter/missing-seller/ghost-model",
+				},
+			}],
+		});
+		writes.length = 0;
+		const p = await callPost({ id: "partial" }, applyConfigRoute);
+		assert.equal(p.ok, true);
+		assert.equal(p.summary.applied, 1, "only coder should be applied");
+		assert.equal(p.summary.invalid, 1, "reviewer's model is not in the catalog");
+		assert.equal(p.summary.invalidList[0].agent, "reviewer");
+		});
+
+	it("POST /configs/apply returns 404 for an unknown config id", async () => {
+		configsData = JSON.stringify({ configs: [] });
+		const p = await callPost({ id: "nope" }, applyConfigRoute);
+		assert.equal(p.ok, false);
+		assert.match(p.error, /not found/);
+		});
+
+	it("POST /configs/apply returns 400 for an empty id", async () => {
+		const p = await callPost({ id: "" }, applyConfigRoute);
+		assert.equal(p.ok, false);
+		assert.match(p.error, /config id is required/);
+		});
+
+	it("POST /configs/delete removes a saved config", async () => {
+		configsData = JSON.stringify({
+			configs: [{
+				id: "to-delete",
+				name: "Delete Me",
+				description: null,
+				createdAt: "2026-10-01T00:00:00.000Z",
+				updatedAt: "2026-10-01T00:00:00.000Z",
+				pins: { coder: "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" },
+			}],
+		});
+		writes.length = 0;
+		const p = await callPost({ id: "to-delete" }, deleteConfigRoute);
+		assert.equal(p.ok, true);
+		assert.equal(p.deleted, "to-delete");
+		assert.equal(p.configs.length, 0);
+		const configWrite = writes.find((w) => w.rel === ".pi/agent-models/configs.json");
+		assert.ok(configWrite, "configs.json must be rewritten");
+		const doc = JSON.parse(configWrite.data);
+		assert.equal(doc.configs.length, 0);
+		});
+
+	it("POST /configs/delete returns 404 for an unknown id", async () => {
+		configsData = JSON.stringify({
+			configs: [{ id: "exists", name: "Exists", description: null, createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z", pins: {} }],
+		});
+		const p = await callPost({ id: "nope" }, deleteConfigRoute);
+		assert.equal(p.ok, false);
+		assert.match(p.error, /not found/);
+		});
+
+	it("GET /configs returns full configs with pins", async () => {
+		configsData = JSON.stringify({
+			configs: [{
+				id: "full",
+				name: "Full",
+				description: "has pins",
+				createdAt: "2026-10-01T00:00:00.000Z",
+				updatedAt: "2026-10-01T00:00:00.000Z",
+				pins: { coder: "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" },
+			}],
+		});
+		const p = await callGetConfigs();
+		assert.equal(p.ok, true);
+		assert.equal(p.configs.length, 1);
+		assert.equal(p.configs[0].pins.coder, "nvidia/nvidia/nemotron-3.5-lightening-30b-a3b".replace("-lightening", "-lightning"));
+		});
+		it("POST /configs/save with editId renames an existing config AND re-captures its pins", async () => {
+			// Stale pins: what the preset held from an earlier snapshot.
+			const stalePins = { coder: "stale/model-from-an-earlier-snapshot", reviewer: "opencode/mimo-v2.5-free" };
+			configsData = JSON.stringify({
+				configs: [{
+					id: "old-id",
+					name: "Old Name",
+					description: "old desc",
+					createdAt: "2026-10-01T00:00:00.000Z",
+					updatedAt: "2026-10-01T00:00:00.000Z",
+					pins: stalePins,
+				}],
+			});
+			writes.length = 0;
+			// Edit: rename to "New Name" with a new description, keep the same id.
+			const p = await callPost({ name: "New Name", description: "new desc", editId: "old-id" }, saveConfigRoute);
+			assert.equal(p.ok, true, p.error ?? "");
+			assert.equal(p.config.id, "old-id", "config id is preserved");
+			assert.equal(p.config.name, "New Name", "name is updated");
+			assert.equal(p.config.agentCount, 4, "agentCount reflects the re-captured pins");
+			const configWrite = writes.filter((w) => w.rel === ".pi/agent-models/configs.json").pop();
+			assert.ok(configWrite, "configs.json must be written");
+			const doc = JSON.parse(configWrite.data);
+			assert.equal(doc.configs.length, 1);
+			const cfg = doc.configs[0];
+			assert.equal(cfg.id, "old-id", "id preserved in written file");
+			assert.equal(cfg.name, "New Name", "name updated in written file");
+			// The point of the edit path: pins describe the LIVE agents, not the stale preset.
+			assert.equal(cfg.pins.coder, "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b", "coder pin re-captured from the live agent");
+			assert.notEqual(cfg.pins.coder, stalePins.coder, "stale pin must not survive an edit");
+			assert.equal(cfg.pins.reviewer, "opencode/mimo-v2.5-free");
+			assert.equal(cfg.pins.vision, null, "inherit is captured as null");
+			assert.equal(cfg.createdAt, "2026-10-01T00:00:00.000Z", "createdAt is preserved across an edit");
+			assert.notEqual(cfg.updatedAt, "2026-10-01T00:00:00.000Z", "updatedAt moves on an edit");
+			// The client adopts report.configs for the dropdown and the edit form, so the
+			// response must carry the POST-write config list, not the one read for pins.
+			assert.ok(p.report && p.report.configs, "the response carries a report with configs");
+			assert.equal(p.report.configs.length, 1);
+			assert.equal(p.report.configs[0].name, "New Name", "report.configs shows the NEW name, not the pre-edit one");
+			assert.equal(p.report.configs[0].id, "old-id", "report.configs keeps the id");
+		});
+
+		it("editing a preset after repinning an agent stores the NEW model", async () => {
+			// The reported bug: snapshot a preset, change a model, edit the preset, and the
+			// change vanished from the preset.
+			configsData = null;
+			writes.length = 0;
+			const saved = await callPost({ name: "Free" }, saveConfigRoute);
+			assert.equal(saved.ok, true, saved.error ?? "");
+
+			const setModelRoute = host.mock.routes.find((r) => r.method === "POST" && r.path === "/set-model");
+			assert.ok(setModelRoute, "/set-model must be registered");
+			const repin = await callPost({ agent: "coder", model: "nvidia/moonshotai/kimi-k3" }, setModelRoute);
+			assert.equal(repin.ok, true, repin.error ?? "");
+
+			const edited = await callPost({ name: "Free", editId: "free" }, saveConfigRoute);
+			assert.equal(edited.ok, true, edited.error ?? "");
+			const write = writes.filter((w) => w.rel === ".pi/agent-models/configs.json").pop();
+			const doc = JSON.parse(write.data);
+			const cfg = doc.configs.find((c) => c.id === "free");
+			assert.ok(cfg, "the preset must still exist after the edit");
+			assert.equal(cfg.pins.coder, "nvidia/moonshotai/kimi-k3", "preset holds the model chosen after the snapshot");
+		});
+
+		it("POST /configs/save with editId returns 404 for unknown id", async () => {
+			configsData = JSON.stringify({ configs: [] });
+			writes.length = 0;
+			const p = await callPost({ name: "New Name", editId: "does-not-exist" }, saveConfigRoute);
+			assert.equal(p.ok, false);
+			assert.equal(p.error, "config not found: does-not-exist");
+		});
+});
+
+describe("plugin: POST /set-models (bulk write path)", () => {
+	let host;
+	let files;
+	let writes;
+	let route;
+
+	before(async () => {
+		const { readdirSync, readFileSync } = await import("node:fs");
+		const root = fixtureWorkspace();
+		const dir = join(root, ".pi", "agents");
+		files = new Map();
+		for (const name of readdirSync(dir)) files.set(name, readFileSync(join(dir, name), "utf-8"));
+		writes = [];
+
+		host = createMockHost({
+			cwd: root,
+			fs: {
+				list: async () => [...files.keys()].sort().map((name) => ({ name, type: "file" })),
+				readText: async (rel) => {
+					const name = rel.split("/").pop();
+					if (!files.has(name)) throw new Error(`ENOENT ${rel}`);
+					return files.get(name);
+				},
+				write: async (rel, data) => {
+					writes.push({ rel, data: String(data) });
+					if (rel.startsWith(".pi/agents/")) files.set(rel.split("/").pop(), String(data));
+				},
+				mkdir: async () => {},
+			},
+			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
+		});
+		await plugin.activate(host);
+		route = host.mock.routes.find((r) => r.method === "POST" && r.path === "/set-models");
+	});
+
+	function post(body) {
+		return new Promise((resolve) => {
+			const res = {
+				writeHead() {},
+				end(b) {
+					try {
+						resolve(JSON.parse(b));
+					} catch (err) {
+						resolve({ parseError: String(err), raw: b });
+					}
+				},
+			};
+			route.handler({ url: "/set-models", headers: {}, body }, res);
+		});
+	}
+
+	it("registers POST /set-models", () => {
+		assert.ok(route, "POST /set-models should be registered");
+	});
+
+	it("applies ONE model to MANY agents and backs each one up", async () => {
+		const model = [...CATALOG].find((id) => !id.startsWith("opencode/"));
+		writes.length = 0;
+		const p = await post({ agents: ["coder", "reviewer", "testing"], model });
+		assert.equal(p.ok, true, p.error ?? "");
+		assert.equal(p.model, model);
+		assert.equal(p.summary.requested, 3);
+		assert.equal(p.summary.failed, 0);
+		assert.ok(p.summary.applied >= 1, "at least one agent changed");
+		assert.equal(p.results.length, 3);
+		for (const r of p.results) {
+			assert.equal(r.ok, true, r.reason ?? "");
+			if (r.changed) {
+				assert.equal(r.model, model);
+				assert.ok(r.backup, "a changed file must carry a backup path");
+			}
+		}
+		// Every changed agent file carries the pin on disk.
+		const onDisk = [...files.entries()].filter(([, body]) => body.includes(`model: ${model}`)).map(([n]) => n);
+		assert.ok(onDisk.length >= 1, "at least one agent file now pins the model");
+		// A backup was written for each changed agent (same stamp = one group).
+		const backups = writes.filter((w) => w.rel.includes("/backups/"));
+		assert.equal(backups.length, p.summary.applied, "one backup per changed agent");
+	});
+
+	it("dedupes repeated agent names instead of double-writing", async () => {
+		const model = [...CATALOG].find((id) => !id.startsWith("opencode/"));
+		const p = await post({ agents: ["vision", "vision", " vision "], model });
+		assert.equal(p.ok, true, p.error ?? "");
+		assert.equal(p.summary.requested, 1, "duplicates collapse to one agent");
+		assert.equal(p.results.length, 1);
+	});
+
+	it("treats an empty model as inherit for every selected agent", async () => {
+		const p = await post({ agents: ["coder"], model: null });
+		assert.equal(p.ok, true, p.error ?? "");
+		assert.equal(p.model, null);
+		const r = p.results[0];
+		assert.equal(r.ok, true, r.reason ?? "");
+		if (r.changed) assert.ok(!files.get("coder.md").includes("model:"), "inherit removes the pin line");
+	});
+
+	it("returns 400 when no agent is selected", async () => {
+		const p = await post({ agents: [], model: CATALOG[0] });
+		assert.equal(p.ok, false);
+		assert.equal(p.error, "no agents selected");
+	});
+
+	it("rejects a path-traversal agent name before touching the filesystem", async () => {
+		writes.length = 0;
+		const p = await post({ agents: ["../../secrets"], model: CATALOG[0] });
+		assert.equal(p.ok, false);
+		assert.match(p.error, /invalid agent name/);
+		assert.equal(writes.length, 0, "nothing is written on a rejected name");
+	});
+
+	it("returns 404 for an agent with no file", async () => {
+		const p = await post({ agents: ["coder", "nope"], model: CATALOG[0] });
+		assert.equal(p.ok, false);
+		assert.match(p.error, /unknown agent\(s\): nope/);
+	});
+
+	it("rejects a model that is not in the live catalog", async () => {
+		const p = await post({ agents: ["coder"], model: "nobody/no-such-model" });
+		assert.equal(p.ok, false);
+		assert.match(p.error, /not an available model/);
+	});
+
+	it("rejects a batch over the 100-agent cap", async () => {
+		const many = Array.from({ length: 101 }, (_, i) => `a${i}`);
+		const p = await post({ agents: many, model: CATALOG[0] });
+		assert.equal(p.ok, false);
+		assert.match(p.error, /too many agents/);
 	});
 });

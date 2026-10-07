@@ -28,9 +28,13 @@
  *   3. Review Gate: git commit when pendingReview && lastCode > lastReview.
  *      Bypass: --no-verify.
  *
- * GATE MODES (2026-09-23 fixes)
- *   - REPO_ROOT walks up from cwd to the nearest .git/.pi (sessions started
- *     in subdirectories like data/node resolved plan/marker paths wrong).
+ * GATE MODES (2026-09-23 fixes, root split 2026-10-03)
+ *   - ONE root, from ../lib/root.mjs: the folder holding .pi/extensions,
+ *     .pi/settings.json, scripts/, data/ and user/. It is derived from this
+ *     module's own location, so it is machine-independent and cannot drift with
+ *     either the server's cwd or the session's cwd. Nothing in Glitch resolves
+ *     state from ctx.cwd any more: doing so is what let user/agent-mode.json and
+ *     data/plans fork into a second store outside the root.
  *   - Dispatcher-spawned sub-agents (GLITCH_SUBAGENT=1) skip the primary's
  *     gates — matches the OpenCode design where sub-agents ran plugin-free.
  *   - Primary glitch-omni mode (user/agent-mode.json "mode": "glitch-omni")
@@ -48,9 +52,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
-import type { ExtensionAPI, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 // Session-scoped plan ownership rules — dependency-free lib, unit-tested in
 // .pi/lib/plan-paths.test.mjs (dispatch-plan.mjs pattern).
 import {
@@ -60,28 +64,63 @@ import {
   isPlanPath,
   sessionPlanPath,
 } from "../lib/plan-paths.mjs";
+// Root resolution — single source of truth for WHERE the Glitch root is.
+import { glitchRoot } from "../lib/root.mjs";
+// Sub-agent session detection: a sub-agent session IS the delegate, so the
+// primary's workflow gates below must not apply to it. Extracted to a
+// fail-closed lib (unit-tested in .pi/lib/subagent-session.test.mjs, root.mjs
+// pattern) because the inline version read a missing getSessionFile as "no
+// transcript" and silently exempted the session. The lib distinguishes
+// "cannot determine" (primary) from "determined: no transcript" (sub-agent).
+// KNOWN GAP: a `persist: true` sub-agent does get a transcript file, so the
+// in-memory-session signal misses it and it stays subject to the gates.
+// Closing that needs a session-identity signal from the host, which is not
+// confirmed to exist; guessing risks exempting primary sessions, which is far
+// worse. Default sub-agents are ephemeral, so the common path is covered.
+import { isSubAgentSession } from "../lib/subagent-session.mjs";
 
-// --- Paths (resolve repo root by walking up from cwd to the nearest .git/.pi) ---
-function resolveRepoRoot(): string {
-  let dir = process.cwd();
-  while (true) {
-    if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".pi"))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return process.cwd();
-    dir = parent;
-  }
-}
-const REPO_ROOT = resolveRepoRoot();
-const REVIEW_PASS_SCRIPT = join(REPO_ROOT, "scripts", "write-review-pass.mjs");
-const MARKER_PATH = join(REPO_ROOT, "data", ".review-pass.json");
+// --- Paths (both roots resolved by ../lib/root.mjs) ---
+// The 2026-10-03 incident: this extension seeded its root from process.cwd()
+// while agent-switcher.ts seeded from ctx.cwd, so the two read DIFFERENT
+// user/agent-mode.json files. When the server's cwd was the code repo, the gate's
+// copy of the marker did not exist, readAgentMode() fell back to "glitch", and
+// every mode-dependent gate inverted: No-Dispatch went inert under glitch-omni
+// while Dispatch-First hard-blocked read-only work.
+//
+// ONE root now, from one resolver. It is derived from this module's own location,
+// which is inside the code repo, so it is correct on every machine and cannot
+// drift with the server's cwd or the session's cwd. The earlier two-root split
+// existed only to paper over the mis-rooting; with the resolver it is dead weight,
+// and keeping a session-tier root is exactly what let user/agent-mode.json and
+// data/plans fork into a second store outside the root.
+// Owns git, scripts/, data/node, data/plans, the review-pass marker, user/.
+const ENGINE_ROOT = glitchRoot();
+const REVIEW_PASS_SCRIPT = join(ENGINE_ROOT, "scripts", "write-review-pass.mjs");
+const MARKER_PATH = join(ENGINE_ROOT, "data", ".review-pass.json");
 // Plan files are SESSION-SCOPED: data/plans/sessions/<sessionID>/current-plan.md
 // (built by planMarkerPath() below, canonical form in ../lib/plan-paths.mjs).
 // The old shared data/plans/current-plan.md let concurrent sessions overwrite
 // and archive each other's live plans — incident logged in user/current-session.md.
-const AGENT_MODE_PATH = join(REPO_ROOT, "user", "agent-mode.json");
+const AGENT_MODE_PATH = join(ENGINE_ROOT, "user", "agent-mode.json");
 
 const PLAN_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const DISPATCH_WINDOW_MS = 120_000; // 120s
+// Every tool name that counts as "the primary dispatched something". Kept as ONE
+// list on purpose: the two call sites drifted apart before, because the modern
+// batch tool is named `subagent` (it takes an action param such as spawn or
+// wait_all) and was missing here. Omitting it meant a legitimate dispatch never
+// refreshed the window, so the primary was blocked on its very next code edit
+// even seconds after delegating, with no way to satisfy the gate.
+const DISPATCH_TOOL_NAMES = new Set(["task", "dispatch", "subagent", "subagent_spawn", "delegate_task"]);
+// The batch `subagent` tool only counts as delegation when it actually spawns.
+// list, get_result, wait_all, templates and handoff are bookkeeping calls and
+// must not be able to satisfy dispatch-first on their own, or a single
+// status check would stand in for real delegation.
+function isDispatchToolCall(toolName: string, input: any): boolean {
+  if (!DISPATCH_TOOL_NAMES.has(toolName)) return false;
+  if (toolName === "subagent") return input?.action === "spawn";
+  return true;
+}
 const QUALITY_PASS_MAX_AGE_MS = 30 * 60 * 1000; // 30 min — review marker freshness for direct-exec commits
 
 // --- Primary agent mode (user/agent-mode.json, re-read per call so mid-session
@@ -116,7 +155,7 @@ function isDirectExecPrimaryMode(): boolean {
 function getStagedCodeFiles(): string[] {
   try {
     const out = execFileSync("git", ["diff", "--cached", "--name-only"], {
-      cwd: REPO_ROOT,
+      cwd: ENGINE_ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -133,17 +172,41 @@ function getStagedCodeFiles(): string[] {
     return []; // not a git repo / git failure → don't block on a broken probe
   }
 }
-function hasFreshPassMarker(): boolean {
+/**
+ * A fresh PASS marker. `sinceMs` (optional) requires the PASS to be NEWER than
+ * that timestamp — pass the last code-write time so a review cannot be reused to
+ * cover code written AFTER it.
+ */
+function hasFreshPassMarker(sinceMs = 0): boolean {
   try {
     if (!existsSync(MARKER_PATH)) return false;
     const raw = JSON.parse(readFileSync(MARKER_PATH, "utf-8"));
+    const at = Number(raw?.epoch_ms ?? 0);
     return (
       raw?.verdict === "PASS" &&
-      Date.now() - Number(raw?.epoch_ms ?? 0) < QUALITY_PASS_MAX_AGE_MS
+      Date.now() - at < QUALITY_PASS_MAX_AGE_MS &&
+      at >= Number(sinceMs ?? 0)
     );
   } catch {
     return false;
   }
+}
+
+/** Drop the pass marker so a stale PASS cannot cover a later review FAIL. */
+function clearPassMarker(): void {
+  try {
+    if (existsSync(MARKER_PATH)) unlinkSync(MARKER_PATH);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** True when the command contains a `git commit` invocation in any form:
+ *  bare, chained, quoted inside a wrapper (bash -c / cmd /c / powershell -c),
+ *  in a subshell, or with a path prefix or .exe suffix. Scans the whole command
+ *  rather than a segment's leading token, because wrappers hide the verb. */
+function containsGitCommit(command: string): boolean {
+  return /(?:^|[\s;&|()"'`{])(?:[^\s;&|()]*[\\/])?git(?:\.exe)?\s+commit(?:\s|$|"|')/i.test(String(command));
 }
 
 // --- Detection sets (verbatim from OpenCode plugins) ---
@@ -163,14 +226,6 @@ const CODE_EXTENSIONS = new Set([
 ]);
 
 const MEMORY_PATHS = ["user/", "glitch-memorycore/"];
-
-const CONFIG_FILES = new Set([
-  "opencode.json",
-  "config/opencode-normal.json",
-  "config/opencode-free.json",
-  "config/opencode-local.json",
-  "config/opencode-safe.json",
-]);
 
 const GIT_OPERATIONS = new Set([
   "git add", "git commit", "git push", "git pull", "git fetch",
@@ -210,7 +265,11 @@ function isMemoryFile(filePath: string): boolean {
 
 function isConfigFile(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, "/");
-  return CONFIG_FILES.has(normalized) || (normalized.startsWith("config/") && normalized.endsWith(".json"));
+  // Directory pattern only, no enumerated allowlist. Everything it matches is
+  // .json, which isCodeFile never accepts, so a listed filename could never
+  // change a gate outcome — the old OpenCode allowlist pointed at files this
+  // fork never had and was dead weight.
+  return normalized.startsWith("config/") && normalized.endsWith(".json");
 }
 
 function isExemptFile(filePath: string): boolean {
@@ -289,9 +348,9 @@ function isComplexTask(prompt: string, filePath?: string): boolean {
 }
 
 function planMarkerPath(sessionId: string | null): string {
-  // Session-scoped: data/plans/sessions/<sid>/current-plan.md under REPO_ROOT.
+  // Session-scoped: data/plans/sessions/<sid>/current-plan.md under ENGINE_ROOT.
   // sessionPlanPath is the single canonical builder (it sanitizes the id too).
-  return join(REPO_ROOT, sessionPlanPath(sessionId));
+  return join(ENGINE_ROOT, sessionPlanPath(sessionId));
 }
 
 function hasValidPlanMarker(sessionId: string | null): boolean {
@@ -306,12 +365,11 @@ function hasValidPlanMarker(sessionId: string | null): boolean {
 }
 
 function getNodeExecutable(): string {
-  // glitch-pi may not ship its own portable node; fall back to glitch-ai's then PATH.
+  // Root-local node only. The old list also probed a sibling glitch-ai checkout,
+  // which pointed outside the root and would break on any other machine.
   const candidates = [
-    join(REPO_ROOT, "data", "node", "node.exe"),
-    join(REPO_ROOT, "data", "node", "bin", "node"),
-    "E:/Glitch AI/glitch-ai/data/node/node.exe",
-    "E:/Glitch AI/glitch-ai/data/node/bin/node",
+    join(ENGINE_ROOT, "data", "node", "node.exe"),
+    join(ENGINE_ROOT, "data", "node", "bin", "node"),
   ];
   for (const p of candidates) {
     try {
@@ -340,8 +398,45 @@ function extractResultText(result: any): string {
 
 function isPassVerdict(text: string): boolean {
   if (!text) return false;
-  // Fail signals trump everything ("FIX THEN SHIP" contains "SHIP").
-  const fail = /FIX THEN SHIP|FIX AND RESHIP|REJECTED|\bFAILED\b|\bREJECT\b|\bDENIED\b|\bPASS\b\s+(?:with|but)\b/i.test(text);
+  // Scan a LEADING REGION, not just line 1. Real reviewers open with prose
+  // ("here is my verdict:") and state the verdict on a later line, while their
+  // evidence legitimately contains the words FAIL/REJECT. Reading line 1 alone
+  // fell through to the body scan, scored a real PASS as a FAIL, and so blocked
+  // every commit after that review.
+  const lead = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 5).join("\n");
+  const leadBare = lead.replace(/[*_`#>]/g, "");
+  // A qualified pass is not a pass. Scope this to the words IMMEDIATELY after the
+  // verdict token (the rest of its own line), not the whole region: a stray "but"
+  // in the evidence on a later line must not turn a PASS into a FAIL, which would
+  // re-create the deadlock.
+  const qualified = (idx: number, len: number): boolean =>
+    /\b(?:with|but|however|if|once|after|provided|assuming|unless)\b/i.test(leadBare.slice(idx + len).split("\n")[0]);
+
+  // 1. An explicit label wins outright. This protects the common
+  //    "this would FAIL without the fix. Verdict: PASS" shape.
+  const labelled = leadBare.match(/verdict\s*:\s*(PASS|PASSED|APPROVED|PROCEED|SHIP|FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)\b/i);
+  if (labelled) {
+    const v = labelled[1].toUpperCase();
+    if (/^(FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)$/.test(v)) return false;
+    return !qualified(labelled.index ?? 0, labelled[0].length);
+  }
+  if (/verdict\s*:\s*✅/.test(leadBare)) return true;
+
+  // A reship order in the region is an explicit fail signal. It must never be
+  // read as a standalone "SHIP" pass token by the scan below.
+  if (/FIX THEN SHIP|FIX AND RESHIP|\bDO NOT SHIP\b/i.test(leadBare)) return false;
+
+  // 2. Otherwise the EARLIEST standalone verdict token in the region decides.
+  const first = leadBare.match(/\b(PASS|PASSED|APPROVED|PROCEED|SHIP|FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)\b/i);
+  if (first) {
+    const v = first[1].toUpperCase();
+    if (/^(FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)$/.test(v)) return false;
+    return !qualified(first.index ?? 0, first[0].length);
+  }
+
+  // 3. No verdict token anywhere in the leading region — fall back to the body
+  //    scan, where fail signals trump.
+  const fail = /FIX THEN SHIP|FIX AND RESHIP|REJECTED|\bFAIL(?:ED|URE)?\b|\bREJECT\b|\bDENIED\b|\bDO NOT SHIP\b|\bPASS\b\s+(?:with|but)\b/i.test(text);
   if (fail) return false;
   return /\bPASSED\b|\bPASS\b|\bPROCEED\b|verdict\s*:\s*✅|\bSHIP\b|\bAPPROVED\b/i.test(text);
 }
@@ -364,7 +459,7 @@ function writeReviewPassMarker(agentName: string): void {
     if (!existsSync(markerDir)) mkdirSync(markerDir, { recursive: true });
     const nodeBin = getNodeExecutable();
     execFileSync(nodeBin, [REVIEW_PASS_SCRIPT, "--verdict", "PASS", "--agent", agentName], {
-      cwd: REPO_ROOT,
+      cwd: ENGINE_ROOT,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -471,6 +566,14 @@ export default function (pi: ExtensionAPI) {
   // per-agent map alone can never satisfy their window check.
   let lastDispatchTime = 0;
   let pendingReview = false;
+  let lastReviewVerdict: string | null = null;
+  // tool_execution_end carries NO args (the SDK emits only toolCallId, toolName,
+  // result, isError — verified in dist/core/agent-session.js). Reading the agent
+  // name from that event therefore always yielded "unknown", so pendingReview was
+  // NEVER set and no pass marker was EVER written: the review gate silently never
+  // fired. Recover the args from the matching tool_execution_start, where they DO
+  // exist, keyed by toolCallId (the stuck-detector v2 pattern).
+  const dispatchArgsByCallId = new Map<string, any>();
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
   let currentSessionID: string | null = null;
@@ -602,21 +705,21 @@ export default function (pi: ExtensionAPI) {
       console.error(`[routing] rename enforcer failed: ${e?.message || e}`);
     }
   });
+
   // --- Pre-tool gates: plan-first + dispatch-first + review gate ---
   pi.on(
     "tool_call",
-    async (event: ToolCallEvent): Promise<ToolCallEventResult | undefined> => {
+    async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | undefined> => {
       try {
-        // Sub-agent sessions (dispatcher-spawned, GLITCH_SUBAGENT=1) run without
-        // the primary's workflow gates — matches the OpenCode design where
-        // sub-agents were plugin-free.
-        if (process.env.GLITCH_SUBAGENT === "1") return undefined;
+        // Sub-agent sessions run without the primary's workflow gates, matching
+        // the OpenCode design where sub-agents were plugin-free.
+        if (isSubAgentSession({ ctx, env: process.env, underPiWebUi: underPiWebUi() })) return undefined;
 
         const agentName = extractAgentName((event as any).input);
         const isGlitchOmni = agentName === "glitch-omni" || isOmniPrimaryMode();
 
         // --- dispatch tracking on task-like custom tools ---
-        if (event.toolName === "task" || event.toolName === "dispatch" || event.toolName === "subagent_spawn" || event.toolName === "delegate_task") {
+        if (isDispatchToolCall(event.toolName, (event as any).input)) {
           // Hard no-dispatch gate for direct-execution modes (omni/lightweight).
           // The mode file is re-read per call, so mid-session /agent switches
           // take effect immediately.
@@ -630,7 +733,15 @@ export default function (pi: ExtensionAPI) {
                 "To use sub-agents, ask Troy to switch modes: /agent glitch.",
             };
           }
-          // task dispatch itself is allowed in dispatch-first modes; timestamp recorded after via tool_execution_end
+          // task dispatch itself is allowed in dispatch-first modes. Stamp the
+          // evidence HERE as well as in tool_execution_end, because that event
+          // carries only toolCallId, toolName, result and isError with no input,
+          // so it can never see the batch `subagent` tool's action and cannot
+          // tell a spawn from a list. tool_call is the only place the action is
+          // available.
+          const dispatchName = extractAgentName((event as any).input);
+          lastTaskTime.set(dispatchName, Date.now());
+          lastDispatchTime = Date.now();
         }
 
         // --- edit / write gates ---
@@ -664,7 +775,7 @@ export default function (pi: ExtensionAPI) {
                     `File: ${filePath}\n` +
                     `You MUST write a plan to ${sessionPlanPath(currentSessionID)} (via the plan-first skill) before editing code files.\n` +
                     "Plan template: Goal, Approach, Files to change, Risks, Verification.\n" +
-                    "Exempt: memory files (user/*.md), config files (config/*.json, opencode.json).\n" +
+                    "Exempt: memory files (user/*.md), config files (config/*.json).\n" +
                     'To force-skip for an intentionally simple task: include "quick task" in the prompt.',
                 };
               }
@@ -684,7 +795,7 @@ export default function (pi: ExtensionAPI) {
                   reason:
                     `⛔ Dispatch-First Violation: Direct edit on ${filePath} without prior subagent dispatch.\n` +
                     `You MUST dispatch to a sub-agent first (delegate_task or subagent_spawn, e.g. delegate_task with agent: "coder" for code) before editing files directly.\n` +
-                    "Exempt: memory files (user/*.md), config files (opencode.json), and git operations.",
+                    "Exempt: memory files (user/*.md), config files (config/*.json), and git operations.",
                 };
               }
             }
@@ -733,16 +844,23 @@ export default function (pi: ExtensionAPI) {
             }
           }
 
-          // Review gate on git commit
-          if (normalizedCmd.startsWith("git commit")) {
+          // Review gate on git commit, detected by SEGMENT rather than by
+          // prefix: a chained `cd <dir> && git commit ...` does not START with
+          // "git commit", and that hole bypassed this gate AND the quality gate
+          // below (commit 9b43289 landed through it).
+          if (containsGitCommit(command)) {
             if (normalizedCmd.includes("--no-verify")) return undefined; // Troy accepts the risk by naming it
-            if (pendingReview && lastCodeTaskTime > lastReviewTaskTime) {
+            if (pendingReview && !hasFreshPassMarker(lastCodeTaskTime)) {
+              const verdictNote =
+                lastReviewVerdict === "FAIL"
+                  ? "The last review returned FAIL. Fix the findings and re-review; a FAIL keeps this gate closed.\n"
+                  : "No passing review exists for the most recent code write.\n";
               return {
                 block: true,
                 reason:
-                  "⛔ Review Gate: Code was written by a sub-agent but no review has been performed since.\n" +
-                  "Dispatch @reviewer first and get a PASS before committing.\n" +
-                  "Reviewer agents: @reviewer (free), @reviewer-paid (paid fallback)\n" +
+                  "⛔ Review Gate: " + verdictNote +
+                  "A PASS is required before committing code written by a sub-agent, and the PASS must be NEWER than the last code write.\n" +
+                  "Dispatch @reviewer first. Reviewer agents: @reviewer (free), @reviewer-paid (paid fallback)\n" +
                   "To bypass: git commit --no-verify (only if you understand the risk)",
               };
             }
@@ -776,14 +894,35 @@ export default function (pi: ExtensionAPI) {
     },
   );
 
+  // Capture dispatch args at START; the END event has none, and the agent name
+  // lives in them.
+  pi.on("tool_execution_start", async (event) => {
+    try {
+      const args = (event as any).args;
+      if (!isDispatchToolCall((event as any).toolName, args)) return;
+      const id = (event as any).toolCallId;
+      if (!id) return;
+      dispatchArgsByCallId.set(String(id), args ?? {});
+      // Bound the map so a dropped END event cannot leak entries.
+      if (dispatchArgsByCallId.size > 200) {
+        const oldest = dispatchArgsByCallId.keys().next().value;
+        if (oldest !== undefined) dispatchArgsByCallId.delete(oldest);
+      }
+    } catch {
+      /* never break the tool loop */
+    }
+  });
+
   // --- Post-tool: track dispatches + review verdicts ---
   pi.on("tool_execution_end", async (event) => {
     try {
       const tool = event.toolName || "unknown";
 
-      if (tool === "task" || tool === "dispatch" || tool === "subagent_spawn" || tool === "delegate_task") {
-        const args = (event as any).args ?? (event as any).input ?? {};
-        const agentName = extractAgentName(args);
+      const callId = String((event as any).toolCallId ?? "");
+      const dispatchArgs = dispatchArgsByCallId.get(callId) ?? (event as any).args ?? (event as any).input ?? {};
+      if (callId) dispatchArgsByCallId.delete(callId);
+      if (isDispatchToolCall(tool, dispatchArgs)) {
+        const agentName = extractAgentName(dispatchArgs);
         lastTaskTime.set(agentName, Date.now());
         lastDispatchTime = Date.now();
 
@@ -793,13 +932,20 @@ export default function (pi: ExtensionAPI) {
         }
 
         if (REVIEW_AGENTS.has(agentName)) {
-          pendingReview = false;
           lastReviewTaskTime = Date.now();
           const text = extractResultText(event.result);
           if (isPassVerdict(text)) {
+            lastReviewVerdict = "PASS";
+            pendingReview = false;
             writeReviewPassMarker(agentName);
           } else {
-            console.warn(`[routing] Review verdict for ${agentName} not PASS — marker not written`);
+            // A FAIL must NOT clear pendingReview. Clearing it here made the
+            // commit gate unable to tell "reviewed and failed" from "never
+            // reviewed", so a FAIL behaved exactly like a PASS.
+            lastReviewVerdict = "FAIL";
+            pendingReview = true;
+            clearPassMarker();
+            console.warn(`[routing] Review verdict for ${agentName} was FAIL — commit gate stays closed until a PASS`);
           }
         }
       }

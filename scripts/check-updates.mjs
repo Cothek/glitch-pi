@@ -17,7 +17,9 @@ import {
   createWriteStream,
   readdirSync,
   renameSync,
-  utimesSync
+  utimesSync,
+  chmodSync,
+  symlinkSync
 } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
@@ -271,6 +273,19 @@ function bundledNpmDir(cwd) {
 // designed for runs the CLI; process.execPath is the fallback when the
 // bundle's node.exe is missing.
 function bundledNpmInvocation(cwd) {
+  // POSIX node bundles (nodejs.org tarballs for linux/darwin) unpack to
+  // <prefix>/bin/node and <prefix>/lib/node_modules/npm/... — the Windows
+  // zip puts node.exe and node_modules directly under the prefix. Probe the
+  // POSIX layout first on non-Windows platforms, else npm invocations die
+  // with "env: 'node': No such file or directory" (the shebang can't find
+  // node) and every engine install on macOS/Linux fails.
+  if (process.platform !== 'win32') {
+    const posixNpmCli = join(cwd, 'data', 'node', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    if (existsSync(posixNpmCli)) {
+      const posixNode = join(cwd, 'data', 'node', 'bin', 'node');
+      return [existsSync(posixNode) ? posixNode : process.execPath, [posixNpmCli]];
+    }
+  }
   const bundledNode = join(cwd, 'data', 'node', 'node.exe');
   const npmCli = join(cwd, 'data', 'node', 'node_modules', 'npm', 'bin', 'npm-cli.js');
   if (existsSync(npmCli)) {
@@ -305,6 +320,11 @@ function buildNpmEnv(cwd) {
   const sep = process.platform === 'win32' ? ';' : ':';
   const pathKey = process.platform === 'win32' ? 'Path' : 'PATH';
   const currentPath = process.env[pathKey] || process.env.PATH || '';
+  // POSIX node bundles (nodejs.org tarballs) keep node/npm in <prefix>/bin;
+  // prepending the bare prefix there leaves `node` unfindable for npm's
+  // #!/usr/bin/env shebangs and every npm child dies with
+  // "env: 'node': No such file or directory".
+  const binDirForPath = process.platform === 'win32' ? prefix : join(prefix, 'bin');
   // One entry per env var: setting both `Path` and `PATH` on Windows
   // silently duplicates the same value (Windows is case-insensitive on env
   // names) and on POSIX the two keys collapse to the same property, so a
@@ -312,7 +332,7 @@ function buildNpmEnv(cwd) {
   return {
     ...process.env,
     npm_config_prefix: prefix,
-    [pathKey]: `${prefix}${sep}${currentPath}`
+    [pathKey]: `${binDirForPath}${sep}${currentPath}`
   };
 }
 
@@ -583,6 +603,24 @@ function packageInstallDir(cwd, packageName) {
   return join(cwd, 'data', 'node', 'node_modules', packageName);
 }
 
+// POSIX npm installs land in <prefix>/lib/node_modules, but every consumer
+// path in this repo (packageInstallDir, launch-pi.mjs's cli.js, check-install.mjs,
+// the backup/rollback roots) resolves through data/node/node_modules — the
+// Windows layout. One relative symlink makes both shapes the same tree, so
+// nothing else has to grow platform branches. Idempotent: only links when
+// lib/node_modules exists and node_modules does not.
+function ensurePosixNpmLayout(cwd) {
+  if (process.platform === 'win32') return;
+  const libModules = join(cwd, 'data', 'node', 'lib', 'node_modules');
+  const nodeModules = join(cwd, 'data', 'node', 'node_modules');
+  try {
+    if (existsSync(libModules) && !existsSync(nodeModules)) {
+      symlinkSync('lib/node_modules', nodeModules, 'dir');
+      noteDim(`  linked data/node/node_modules -> lib/node_modules (POSIX npm layout)`);
+    }
+  } catch {}
+}
+
 // One source of truth for backup-directory naming. WHY: scoped packages
 // such as `@earendil-works/pi-coding-agent` carry a path separator in the
 // name. If the backup lives at `data/backups/npm/@earendil-works/<pkg>@<ver>`
@@ -770,6 +808,10 @@ async function applyNpmUpdate(tool, currentVersion, latestVersion, cwd) {
     }
     return { ok: false, error: `npm install failed (status ${res.status}): ${res.stderr || res.stdout || res.error}${rollbackNote}` };
   }
+
+  // POSIX: npm put the tree under lib/node_modules; link node_modules to it
+  // so the repo's Windows-layout paths resolve. No-op on Windows.
+  ensurePosixNpmLayout(cwd);
 
   // Verify the install actually landed. Without this, a system npm that
   // installed to the wrong prefix would silently leave the old version in
@@ -1014,7 +1056,14 @@ export async function applyBinaryUpdate(tool, latestVersion, cwd, latestTag = nu
     .replace(/\$\{version\}/g, String(latestVersion))
     .replace(/\$\{tag\}/g, tag)
     .replace(/\$\{arch\}/g, arch);
-  const target = join(cwd, tool.binary);
+  // Windows keeps the manifest's .exe name; on POSIX the platform entry
+  // names the extracted file without the extension (cloudflared), and every
+  // consumer (check-install.mjs, tunnel.mjs) resolves the extension-less
+  // name. Installing 'cloudflared.exe' on Linux left the binary present but
+  // invisible to every lookup, so the check reported it missing.
+  const posixName = (Array.isArray(platform.extract) && platform.extract[0]) || String(tool.binary).replace(/\.exe$/i, '');
+  const targetName = process.platform === 'win32' ? tool.binary : posixName;
+  const target = join(cwd, targetName);
   noteCyan(`  Updating ${tool.name}: -> ${latestVersion}`);
   noteDim(`  downloading ${url}`);
   const dlRes = await downloadToTemp(url, 0, (loaded, total) => {
@@ -1045,6 +1094,13 @@ export async function applyBinaryUpdate(tool, latestVersion, cwd, latestTag = nu
 // running executable's directory entry works even while it executes.
 async function applyDirectBinaryUpdate(tool, dlPath, target, cwd, latestVersion, platform) {
   noteDim('  verifying downloaded binary...');
+  // POSIX: downloaded files carry no exec bit (curl/writers don't set it),
+  // so the version probe fails with EACCES and every direct-binary install
+  // (cloudflared) reports 'downloaded binary failed version probe'. Set it
+  // before probing; the install copy below re-applies it to the target.
+  if (process.platform !== 'win32') {
+    try { chmodSync(dlPath, 0o755); } catch {}
+  }
   // The download temp file can lack the target's extension (redirect URLs
   // and name sanitizing); Windows needs .exe to execute it for the probe.
   let probePath = dlPath;
@@ -1086,6 +1142,11 @@ async function applyDirectBinaryUpdate(tool, dlPath, target, cwd, latestVersion,
   const oldTarget = `${target}.old`;
   try {
     copyFileSync(probePath, staging);
+    if (process.platform !== 'win32') {
+      // copyFileSync does not preserve the exec bit we set on the probe
+      // file; without this the installed binary cannot be spawned either.
+      try { chmodSync(staging, 0o755); } catch {}
+    }
     if (existsSync(target)) {
       try { rmSync(oldTarget, { force: true }); } catch {}
       renameSync(target, oldTarget);
@@ -1564,6 +1625,11 @@ export async function applyAllUpdates({
 async function main() {
   const opts = parseCliArgs(process.argv.slice(2));
   const cwd = DEFAULT_CWD;
+
+  // POSIX: the bundled node tarball unpacks to data/node/{bin,lib}; link
+  // node_modules -> lib/node_modules up front so version reads, installs,
+  // and every Windows-layout consumer path agree from the first moment.
+  ensurePosixNpmLayout(cwd);
 
   if (opts.checkOnly) {
     const status = await checkUpdatesOnly({ cwd });

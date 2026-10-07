@@ -5,8 +5,7 @@
       "spec": "86400000",
       "catchUp": "once",
       "label": "Model catalog sync + pricing table regeneration",
-      "lastRun": 1791076538908,
-      "createdAt": 1790817728075
+      "createdAt": 1791329094754
     }
   }
 }

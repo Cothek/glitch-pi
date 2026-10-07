@@ -2,7 +2,7 @@
 name: researcher
 description: "Web and docs researcher. Multi-angle search, primary sources, version-aware. Returns a cited, structured brief with gaps marked. Read network, never writes files."
 tools: read, webfetch, ls, find, grep
-model: commandcode/stealth/space-bunny-alpha
+model: commandcode/poolside/laguna-s-2.1-free
 ---
 
 

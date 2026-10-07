@@ -52,7 +52,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 // Session-scoped plan ownership rules — dependency-free lib, unit-tested in
@@ -172,17 +172,41 @@ function getStagedCodeFiles(): string[] {
     return []; // not a git repo / git failure → don't block on a broken probe
   }
 }
-function hasFreshPassMarker(): boolean {
+/**
+ * A fresh PASS marker. `sinceMs` (optional) requires the PASS to be NEWER than
+ * that timestamp — pass the last code-write time so a review cannot be reused to
+ * cover code written AFTER it.
+ */
+function hasFreshPassMarker(sinceMs = 0): boolean {
   try {
     if (!existsSync(MARKER_PATH)) return false;
     const raw = JSON.parse(readFileSync(MARKER_PATH, "utf-8"));
+    const at = Number(raw?.epoch_ms ?? 0);
     return (
       raw?.verdict === "PASS" &&
-      Date.now() - Number(raw?.epoch_ms ?? 0) < QUALITY_PASS_MAX_AGE_MS
+      Date.now() - at < QUALITY_PASS_MAX_AGE_MS &&
+      at >= Number(sinceMs ?? 0)
     );
   } catch {
     return false;
   }
+}
+
+/** Drop the pass marker so a stale PASS cannot cover a later review FAIL. */
+function clearPassMarker(): void {
+  try {
+    if (existsSync(MARKER_PATH)) unlinkSync(MARKER_PATH);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** True when the command contains a `git commit` invocation in any form:
+ *  bare, chained, quoted inside a wrapper (bash -c / cmd /c / powershell -c),
+ *  in a subshell, or with a path prefix or .exe suffix. Scans the whole command
+ *  rather than a segment's leading token, because wrappers hide the verb. */
+function containsGitCommit(command: string): boolean {
+  return /(?:^|[\s;&|()"'`{])(?:[^\s;&|()]*[\\/])?git(?:\.exe)?\s+commit(?:\s|$|"|')/i.test(String(command));
 }
 
 // --- Detection sets (verbatim from OpenCode plugins) ---
@@ -374,8 +398,45 @@ function extractResultText(result: any): string {
 
 function isPassVerdict(text: string): boolean {
   if (!text) return false;
-  // Fail signals trump everything ("FIX THEN SHIP" contains "SHIP").
-  const fail = /FIX THEN SHIP|FIX AND RESHIP|REJECTED|\bFAILED\b|\bREJECT\b|\bDENIED\b|\bPASS\b\s+(?:with|but)\b/i.test(text);
+  // Scan a LEADING REGION, not just line 1. Real reviewers open with prose
+  // ("here is my verdict:") and state the verdict on a later line, while their
+  // evidence legitimately contains the words FAIL/REJECT. Reading line 1 alone
+  // fell through to the body scan, scored a real PASS as a FAIL, and so blocked
+  // every commit after that review.
+  const lead = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 5).join("\n");
+  const leadBare = lead.replace(/[*_`#>]/g, "");
+  // A qualified pass is not a pass. Scope this to the words IMMEDIATELY after the
+  // verdict token (the rest of its own line), not the whole region: a stray "but"
+  // in the evidence on a later line must not turn a PASS into a FAIL, which would
+  // re-create the deadlock.
+  const qualified = (idx: number, len: number): boolean =>
+    /\b(?:with|but|however)\b/i.test(leadBare.slice(idx + len).split("\n")[0]);
+
+  // 1. An explicit label wins outright. This protects the common
+  //    "this would FAIL without the fix. Verdict: PASS" shape.
+  const labelled = leadBare.match(/verdict\s*:\s*(PASS|PASSED|APPROVED|PROCEED|SHIP|FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)\b/i);
+  if (labelled) {
+    const v = labelled[1].toUpperCase();
+    if (/^(FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)$/.test(v)) return false;
+    return !qualified(labelled.index ?? 0, labelled[0].length);
+  }
+  if (/verdict\s*:\s*✅/.test(leadBare)) return true;
+
+  // A reship order in the region is an explicit fail signal. It must never be
+  // read as a standalone "SHIP" pass token by the scan below.
+  if (/FIX THEN SHIP|FIX AND RESHIP|\bDO NOT SHIP\b/i.test(leadBare)) return false;
+
+  // 2. Otherwise the EARLIEST standalone verdict token in the region decides.
+  const first = leadBare.match(/\b(PASS|PASSED|APPROVED|PROCEED|SHIP|FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)\b/i);
+  if (first) {
+    const v = first[1].toUpperCase();
+    if (/^(FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)$/.test(v)) return false;
+    return !qualified(first.index ?? 0, first[0].length);
+  }
+
+  // 3. No verdict token anywhere in the leading region — fall back to the body
+  //    scan, where fail signals trump.
+  const fail = /FIX THEN SHIP|FIX AND RESHIP|REJECTED|\bFAIL(?:ED|URE)?\b|\bREJECT\b|\bDENIED\b|\bDO NOT SHIP\b|\bPASS\b\s+(?:with|but)\b/i.test(text);
   if (fail) return false;
   return /\bPASSED\b|\bPASS\b|\bPROCEED\b|verdict\s*:\s*✅|\bSHIP\b|\bAPPROVED\b/i.test(text);
 }
@@ -505,6 +566,7 @@ export default function (pi: ExtensionAPI) {
   // per-agent map alone can never satisfy their window check.
   let lastDispatchTime = 0;
   let pendingReview = false;
+  let lastReviewVerdict: string | null = null;
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
   let currentSessionID: string | null = null;
@@ -775,16 +837,23 @@ export default function (pi: ExtensionAPI) {
             }
           }
 
-          // Review gate on git commit
-          if (normalizedCmd.startsWith("git commit")) {
+          // Review gate on git commit, detected by SEGMENT rather than by
+          // prefix: a chained `cd <dir> && git commit ...` does not START with
+          // "git commit", and that hole bypassed this gate AND the quality gate
+          // below (commit 9b43289 landed through it).
+          if (containsGitCommit(command)) {
             if (normalizedCmd.includes("--no-verify")) return undefined; // Troy accepts the risk by naming it
-            if (pendingReview && lastCodeTaskTime > lastReviewTaskTime) {
+            if (pendingReview && !hasFreshPassMarker(lastCodeTaskTime)) {
+              const verdictNote =
+                lastReviewVerdict === "FAIL"
+                  ? "The last review returned FAIL. Fix the findings and re-review; a FAIL keeps this gate closed.\n"
+                  : "No passing review exists for the most recent code write.\n";
               return {
                 block: true,
                 reason:
-                  "⛔ Review Gate: Code was written by a sub-agent but no review has been performed since.\n" +
-                  "Dispatch @reviewer first and get a PASS before committing.\n" +
-                  "Reviewer agents: @reviewer (free), @reviewer-paid (paid fallback)\n" +
+                  "⛔ Review Gate: " + verdictNote +
+                  "A PASS is required before committing code written by a sub-agent, and the PASS must be NEWER than the last code write.\n" +
+                  "Dispatch @reviewer first. Reviewer agents: @reviewer (free), @reviewer-paid (paid fallback)\n" +
                   "To bypass: git commit --no-verify (only if you understand the risk)",
               };
             }
@@ -835,13 +904,20 @@ export default function (pi: ExtensionAPI) {
         }
 
         if (REVIEW_AGENTS.has(agentName)) {
-          pendingReview = false;
           lastReviewTaskTime = Date.now();
           const text = extractResultText(event.result);
           if (isPassVerdict(text)) {
+            lastReviewVerdict = "PASS";
+            pendingReview = false;
             writeReviewPassMarker(agentName);
           } else {
-            console.warn(`[routing] Review verdict for ${agentName} not PASS — marker not written`);
+            // A FAIL must NOT clear pendingReview. Clearing it here made the
+            // commit gate unable to tell "reviewed and failed" from "never
+            // reviewed", so a FAIL behaved exactly like a PASS.
+            lastReviewVerdict = "FAIL";
+            pendingReview = true;
+            clearPassMarker();
+            console.warn(`[routing] Review verdict for ${agentName} was FAIL — commit gate stays closed until a PASS`);
           }
         }
       }

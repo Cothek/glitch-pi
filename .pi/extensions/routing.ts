@@ -567,6 +567,13 @@ export default function (pi: ExtensionAPI) {
   let lastDispatchTime = 0;
   let pendingReview = false;
   let lastReviewVerdict: string | null = null;
+  // tool_execution_end carries NO args (the SDK emits only toolCallId, toolName,
+  // result, isError — verified in dist/core/agent-session.js). Reading the agent
+  // name from that event therefore always yielded "unknown", so pendingReview was
+  // NEVER set and no pass marker was EVER written: the review gate silently never
+  // fired. Recover the args from the matching tool_execution_start, where they DO
+  // exist, keyed by toolCallId (the stuck-detector v2 pattern).
+  const dispatchArgsByCallId = new Map<string, any>();
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
   let currentSessionID: string | null = null;
@@ -887,12 +894,33 @@ export default function (pi: ExtensionAPI) {
     },
   );
 
+  // Capture dispatch args at START; the END event has none, and the agent name
+  // lives in them.
+  pi.on("tool_execution_start", async (event) => {
+    try {
+      const args = (event as any).args;
+      if (!isDispatchToolCall((event as any).toolName, args)) return;
+      const id = (event as any).toolCallId;
+      if (!id) return;
+      dispatchArgsByCallId.set(String(id), args ?? {});
+      // Bound the map so a dropped END event cannot leak entries.
+      if (dispatchArgsByCallId.size > 200) {
+        const oldest = dispatchArgsByCallId.keys().next().value;
+        if (oldest !== undefined) dispatchArgsByCallId.delete(oldest);
+      }
+    } catch {
+      /* never break the tool loop */
+    }
+  });
+
   // --- Post-tool: track dispatches + review verdicts ---
   pi.on("tool_execution_end", async (event) => {
     try {
       const tool = event.toolName || "unknown";
 
-      const dispatchArgs = (event as any).args ?? (event as any).input ?? {};
+      const callId = String((event as any).toolCallId ?? "");
+      const dispatchArgs = dispatchArgsByCallId.get(callId) ?? (event as any).args ?? (event as any).input ?? {};
+      if (callId) dispatchArgsByCallId.delete(callId);
       if (isDispatchToolCall(tool, dispatchArgs)) {
         const agentName = extractAgentName(dispatchArgs);
         lastTaskTime.set(agentName, Date.now());

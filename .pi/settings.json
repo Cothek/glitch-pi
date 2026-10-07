@@ -10,7 +10,8 @@
     "+.pi/extensions/nvidia-model-sync.ts",
     "+.pi/extensions/tunnel-keeper.ts",
     "+.pi/extensions/commandcode-usage.ts",
-    "+.pi/extensions/compaction-diary.ts"
+    "+.pi/extensions/compaction-diary.ts",
+    "+.pi/extensions/subagent-watchdog.ts"
   ],
   "packages": [
     "npm:pi-mcp-adapter"

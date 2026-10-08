@@ -1,10 +1,10 @@
 <# 
 .SYNOPSIS
-    Glitch Pie Installer for Windows (PowerShell 5.1+)
+    Glitch Pi Installer for Windows (PowerShell 5.1+)
     Standalone installer - download and run directly from GitHub.
 
 .DESCRIPTION
-    This script installs Glitch Pie by cloning the repository and running the
+    This script installs Glitch Pi by cloning the repository and running the
     bootstrap script, which downloads the dependencies the Pi engine needs:
     Node.js, the pi CLI + pi-web-ui stack, engine skills, and the Cloudflare
     tunnel binary. Optionally sets up a user profile from GitHub, and launches
@@ -25,19 +25,19 @@
     When provided, skips the interactive sync prompt and uses this repo directly.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.ps1 | iex
+    irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.ps1 | iex
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.ps1 | iex -InstallDir "D:\glitch-pi"
+    irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.ps1 | iex -InstallDir "D:\glitch-pi"
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.ps1 | iex -NoLaunch
+    irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.ps1 | iex -NoLaunch
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/Cothek/glitch-pi/develop/scripts/install-pie.ps1 -OutFile "$env:TEMP\glitch-install.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\glitch-install.ps1" -Branch develop
+    irm https://raw.githubusercontent.com/Cothek/glitch-pi/develop/scripts/install-pi.ps1 -OutFile "$env:TEMP\glitch-install.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\glitch-install.ps1" -Branch develop
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.ps1 | iex -UserRepo "https://github.com/Cothek/glitch-user-cothek.git"
+    irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.ps1 | iex -UserRepo "https://github.com/Cothek/glitch-user-cothek.git"
 #>
 
 param(
@@ -57,15 +57,297 @@ param(
     [string]$UserRepo,
 
     [Parameter(Mandatory=$false)]
-    [switch]$NoShortcut
+    [switch]$NoShortcut,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$ProvisionGitDryRun,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$ProvisionGitLive
 )
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-$InstallerVersion = "1.1.0-pie.5"
+$InstallerVersion = "1.1.0-pi.5"
 
 # Set up logging - captures all output to a file for diagnosis
 # Log starts in TEMP (always exists) and is relocated into the install directory
 # AFTER the clone succeeds. Nothing is written inside $InstallDir before clone.
+# Color output helpers
+function Write-Header { param([string]$msg) Write-Host "
+$msg" -ForegroundColor Magenta }
+function Write-Step   { param([string]$msg) Write-Host "  $msg" -ForegroundColor Cyan }
+function Write-Success{ param([string]$msg) Write-Host "  $msg" -ForegroundColor Green }
+function Write-Warn   { param([string]$msg) Write-Host "  $msg" -ForegroundColor Yellow }
+function Write-Error  { param([string]$msg) Write-Host "  $msg" -ForegroundColor Red }
+function Write-Prompt { param([string]$msg) Write-Host "  $msg" -NoNewline -ForegroundColor Cyan }
+# -- Shared Git provisioning helpers --
+# Used by both the -ProvisionGitDryRun/-ProvisionGitLive early-exit
+# switches and the main installer provisioning block. Defined once so
+# the download/extract/probe recipe is never duplicated.
+
+# Probe the staging dir: bash-capable tiers require BOTH cmd\git.exe
+# AND usr\bin\bash.exe; the MinGit tier accepts git.exe alone.
+function Test-GitStagedTree {
+    param([string]$StagedDir)
+    $probeGit  = Join-Path $StagedDir "cmd\git.exe"
+    $probeBash = Join-Path $StagedDir "usr\bin\bash.exe"
+    return [pscustomobject]@{
+        Git  = (Test-Path $probeGit)
+        Bash = (Test-Path $probeBash)
+        GitExePath  = if (Test-Path $probeGit)  { $probeGit }  else { $null }
+        BashExePath = if (Test-Path $probeBash) { $probeBash } else { $null }
+    }
+}
+
+# Wipe any leftovers from a prior tier so a half-extracted archive
+# does not fool the probe.
+function Reset-StagingDir {
+    param([string]$Dir)
+    if (Test-Path $Dir) { Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+}
+
+# Build an ordered tier list from GitHub API assets plus pinned fallbacks.
+# WHY bashzip pinned URL is $null: git-for-windows does not publish a
+# PortableGit *.zip at the pinned tag, so a pinned URL would be a known-
+# dead 404. When the API returns a matching asset the tier is included;
+# otherwise it is omitted (the loop and dry-run skip $null URLs).
+function Build-GitTierList {
+    param($Assets, $PinnedBaseUrl, $PinnedGitVer4)
+    $t1Api = $Assets | Where-Object {
+        $_.name -like "PortableGit-*-64-bit.zip" -or $_.name -like "Git-*-64-bit.zip"
+    } | Where-Object { $_.name -notlike "*busybox*" -and $_.name -notlike "*arm64*" } | Select-Object -First 1
+    $t1Url  = if ($t1Api) { [string]$t1Api.browser_download_url } else { $null }
+    $t1Name = if ($t1Api) { $t1Api.name } else { $null }
+
+    $t2Api = $Assets | Where-Object {
+        $_.name -like "PortableGit-*-64-bit.7z.exe" -and $_.name -notlike "*arm64*"
+    } | Select-Object -First 1
+    $t2Url  = if ($t2Api) { [string]$t2Api.browser_download_url } else { "$PinnedBaseUrl/PortableGit-$PinnedGitVer4-64-bit.7z.exe" }
+    $t2Name = if ($t2Api) { $t2Api.name } else { "PortableGit-$PinnedGitVer4-64-bit.7z.exe" }
+
+    $t3Api = $Assets | Where-Object {
+        $_.name -like "Git-*-64-bit.exe" -and $_.name -notlike "*arm64*"
+    } | Select-Object -First 1
+    $t3Url  = if ($t3Api) { [string]$t3Api.browser_download_url } else { "$PinnedBaseUrl/Git-$PinnedGitVer4-64-bit.exe" }
+    $t3Name = if ($t3Api) { $t3Api.name } else { "Git-$PinnedGitVer4-64-bit.exe" }
+
+    $t4Api = $Assets | Where-Object {
+        $_.name -like "MinGit-*-64-bit.zip" -and $_.name -notlike "*busybox*"
+    } | Select-Object -First 1
+    $t4Url  = if ($t4Api) { [string]$t4Api.browser_download_url } else { "$PinnedBaseUrl/MinGit-$PinnedGitVer4-64-bit.zip" }
+    $t4Name = if ($t4Api) { $t4Api.name } else { "MinGit-$PinnedGitVer4-64-bit.zip" }
+
+    return @(
+        [pscustomobject]@{ Kind='bashzip'; Name=$t1Name; Url=$t1Url; RequiresBash=$true }
+        [pscustomobject]@{ Kind='sfx';     Name=$t2Name; Url=$t2Url; RequiresBash=$true }
+        [pscustomobject]@{ Kind='nsis';    Name=$t3Name; Url=$t3Url; RequiresBash=$true }
+        [pscustomobject]@{ Kind='mingit';  Name=$t4Name; Url=$t4Url; RequiresBash=$false }
+    )
+}
+
+# Run the tier loop: download, extract, probe each tier in order.
+# Returns [pscustomobject]@{ Accepted; AcceptedName; IsGitOnly }.
+# Both the installer and -ProvisionGitLive call this single function,
+# so the $using: plumbing is exercised by the same code in both paths.
+function Invoke-GitTierProvision {
+    param(
+        [array]$TierList,
+        [string]$StagedDir,
+        [string]$TempDir,
+        [switch]$BashOnly
+    )
+    $tierAccepted     = $false
+    $tierAcceptedName = $null
+    $tierIsGitOnly    = $false
+
+    foreach ($tier in $TierList) {
+        # Skip tiers with no URL (e.g. bashzip when API returned no asset
+        # and no pinned fallback exists for that tag).
+        if ([string]::IsNullOrWhiteSpace($tier.Url)) { continue }
+        # In BashOnly mode, skip git-only tiers (mingit).
+        if ($BashOnly -and -not $tier.RequiresBash) { continue }
+
+        # Snapshot tier fields into plain scalars so $using: captures
+        # them correctly inside Start-Job's child process.
+        $tKind         = $tier.Kind
+        $tName         = $tier.Name
+        $tUrl          = $tier.Url
+        $tRequiresBash = $tier.RequiresBash
+
+        Write-Step "Trying tier $tKind ($tName)"
+
+        # -- Download --
+        $tempFile = Join-Path $TempDir "glitch-git-$tKind.bin"
+        $dlOk = $false
+        try {
+            Invoke-WithSpinner -Label "Downloading $tName" -DoneMessage "Download" -ScriptBlock {
+                Invoke-WebRequest -Uri $using:tUrl -OutFile $using:tempFile -UseBasicParsing -TimeoutSec 120
+            }
+            $dlOk = $true
+        } catch {
+            $errMsg = $_.Exception.Message
+            if ($tRequiresBash) {
+                Write-Step "Tier $tKind failed: download error - $errMsg - trying next option"
+            } else {
+                Write-Step "Tier $tKind failed: download error - $errMsg"
+            }
+        }
+        if (-not $dlOk) { continue }
+
+        # -- Extract --
+        try {
+            Reset-StagingDir $StagedDir
+
+            if ($tKind -eq 'bashzip') {
+                Invoke-WithSpinner -Label "Extracting $tName" -DoneMessage "Extract" -ScriptBlock {
+                    Expand-Archive -Path $using:tempFile -DestinationPath $using:StagedDir -Force
+                }
+            }
+            elseif ($tKind -eq 'sfx') {
+                # 7-Zip SFX supports -y (auto-confirm) and -o<dir>.
+                $sfxProc = Start-Process -FilePath $tempFile -ArgumentList @('-y', "-o$StagedDir") -Wait -PassThru -NoNewWindow
+                if ($sfxProc.ExitCode -ne 0) {
+                    throw "7-Zip SFX exited with code $($sfxProc.ExitCode)"
+                }
+            }
+            elseif ($tKind -eq 'nsis') {
+                # NSIS silent install. /VERYSILENT suppresses most
+                # dialogs; /NORESTART prevents reboot prompts; /SP-
+                # skips the welcome page. One UAC prompt may appear.
+                $nsisTargetDir = Join-Path $TempDir "glitch-git-nsis-install"
+                if (Test-Path $nsisTargetDir) { Remove-Item $nsisTargetDir -Recurse -Force -ErrorAction SilentlyContinue }
+                New-Item -ItemType Directory -Path $nsisTargetDir -Force | Out-Null
+                Write-Step "  Note: the installer may raise ONE UAC prompt to elevate."
+                $nsisArgs = @(
+                    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
+                    '/NOCANCEL', '/SP-', "/DIR=`"$nsisTargetDir`""
+                )
+                $nsisProc = Start-Process -FilePath $tempFile -ArgumentList $nsisArgs -Wait -PassThru
+                if ($nsisProc.ExitCode -ne 0) {
+                    throw "Git NSIS returned exit code $($nsisProc.ExitCode)"
+                }
+                if (Test-Path $nsisTargetDir) {
+                    Copy-Item "$nsisTargetDir\*" $StagedDir -Recurse -Force
+                }
+                Remove-Item $nsisTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            elseif ($tKind -eq 'mingit') {
+                Invoke-WithSpinner -Label "Extracting $tName" -DoneMessage "Extract" -ScriptBlock {
+                    Expand-Archive -Path $using:tempFile -DestinationPath $using:StagedDir -Force
+                }
+            }
+
+            # -- Probe --
+            $probe = Test-GitStagedTree -StagedDir $StagedDir
+            if ($tRequiresBash) {
+                if ($probe.Git -and $probe.Bash) {
+                    $tierAccepted = $true
+                    $tierAcceptedName = $tName
+                    break
+                } else {
+                    Write-Step "Tier $tKind failed: extracted archive missing cmd\git.exe or usr\bin\bash.exe - trying next option"
+                }
+            } else {
+                if ($probe.Git) {
+                    $tierAccepted = $true
+                    $tierAcceptedName = $tName
+                    $tierIsGitOnly = $true
+                    break
+                } else {
+                    Write-Step "Tier $tKind failed: extracted archive missing cmd\git.exe"
+                }
+            }
+        } catch {
+            $errMsg = $_.Exception.Message
+            if ($tRequiresBash) {
+                Write-Step "Tier $tKind failed: $errMsg - trying next option"
+            } else {
+                Write-Step "Tier $tKind failed: $errMsg"
+            }
+        } finally {
+            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    return [pscustomobject]@{
+        Accepted     = $tierAccepted
+        AcceptedName = $tierAcceptedName
+        IsGitOnly    = $tierIsGitOnly
+    }
+}
+
+
+# -- Early-exit switches for Git provisioning tests --
+# These bypass transcript logging and all prerequisite checks so they can
+# run on any machine (including CI) without side effects.
+if ($ProvisionGitDryRun -or $ProvisionGitLive) {
+    # Pinned constants (same as the main provisioning block below)
+    $PinnedGitTag     = 'v2.47.0.windows.2'
+    $PinnedGitVer4    = '2.47.0.2'
+    $PinnedGitBaseUrl = "https://github.com/git-for-windows/git/releases/download/$PinnedGitTag"
+
+    $earlyApiAssets = @()
+    try {
+        $earlyRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -UseBasicParsing -TimeoutSec 10
+        $earlyApiAssets = $earlyRelease.assets
+    } catch { }
+
+    $tierList = Build-GitTierList -Assets $earlyApiAssets `
+        -PinnedBaseUrl $PinnedGitBaseUrl -PinnedGitVer4 $PinnedGitVer4
+
+    if ($ProvisionGitDryRun) {
+        foreach ($t in $tierList) {
+            if ([string]::IsNullOrWhiteSpace($t.Url)) { continue }
+            Write-Host "$($t.Kind)|$($t.Name)|$($t.Url)"
+        }
+        exit 0
+    }
+
+    if ($ProvisionGitLive) {
+        Write-Host "Git Provision Live Test" -ForegroundColor Cyan
+
+        # Invoke-WithSpinner must exist for the live path; define a minimal
+        # version if the main script hasn't loaded it yet (e.g. piped via iex).
+        if (-not (Get-Command Invoke-WithSpinner -ErrorAction SilentlyContinue)) {
+            function Invoke-WithSpinner {
+                param([string]$Label, [scriptblock]$ScriptBlock, [string]$DoneMessage = "")
+                $job = Start-Job -ScriptBlock $ScriptBlock 2>$null
+                while ($job.State -eq 'Running') { Start-Sleep -Milliseconds 200 }
+                if ($job.State -eq 'Failed') {
+                    $reason = $job.ChildJobs[0].JobStateInfo.Reason
+                    $err = if ($reason -ne $null) { $reason.Message } else { $job.ChildJobs[0].Error[0].Exception.Message }
+                    $null = Receive-Job $job -Wait -AutoRemoveJob 2>$null
+                    throw $err
+                }
+                $null = Receive-Job $job -Wait -AutoRemoveJob 2>$null
+            }
+        }
+
+        $liveDir = Join-Path $env:TEMP "glitch-git-live-test"
+        if (Test-Path $liveDir) { Remove-Item $liveDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $liveDir -Force | Out-Null
+        $liveStagedDir = Join-Path $liveDir "staged"
+        New-Item -ItemType Directory -Path $liveStagedDir -Force | Out-Null
+
+        # Use the SAME function as the installer: exercises the real
+        # download/extract/probe plumbing with $using: on plain scalars.
+        $result = Invoke-GitTierProvision -TierList $tierList `
+            -StagedDir $liveStagedDir -TempDir $liveDir -BashOnly
+
+        if ($result.Accepted) {
+            Write-Host "  PASS: cmd\git.exe and usr\bin\bash.exe present" -ForegroundColor Green
+            Remove-Item $liveDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "LIVE TEST PASSED" -ForegroundColor Green
+            exit 0
+        } else {
+            Write-Host "LIVE TEST FAILED: no bash-capable tier succeeded" -ForegroundColor Red
+            Remove-Item $liveDir -Recurse -Force -ErrorAction SilentlyContinue
+            exit 1
+        }
+    }
+}
+
 $script:LogFile = $null
 try {
     $script:LogFile = Join-Path $env:TEMP "glitch-install.log"
@@ -78,7 +360,7 @@ try {
 }
 
 Write-Host ""
-Write-Host "  Glitch Pie Installer v$InstallerVersion (Windows)" -ForegroundColor Cyan
+Write-Host "  Glitch Pi Installer v$InstallerVersion (Windows)" -ForegroundColor Cyan
 Write-Host "  Install dir : $InstallDir" -ForegroundColor DarkGray
 Write-Host "  Branch      : $Branch" -ForegroundColor DarkGray
 Write-Host "  PowerShell  : $($PSVersionTable.PSVersion)" -ForegroundColor DarkGray
@@ -111,13 +393,6 @@ function Resolve-RepoScript([string]$relative) {
     return ''
 }
 
-# Color output helpers
-function Write-Header { param([string]$msg) Write-Host "`n$msg" -ForegroundColor Magenta }
-function Write-Step   { param([string]$msg) Write-Host "  $msg" -ForegroundColor Cyan }
-function Write-Success{ param([string]$msg) Write-Host "  $msg" -ForegroundColor Green }
-function Write-Warn   { param([string]$msg) Write-Host "  $msg" -ForegroundColor Yellow }
-function Write-Error  { param([string]$msg) Write-Host "  $msg" -ForegroundColor Red }
-function Write-Prompt { param([string]$msg) Write-Host "  $msg" -NoNewline -ForegroundColor Cyan }
 
 # Find git.exe via the PERSISTED (global) PATH -- the source of truth for
 # whether git will be available in FUTURE terminals. The session $env:PATH is
@@ -280,6 +555,7 @@ function Invoke-WithSpinner {
   }
 }
 
+
 # Ask whether to persist git's directory on the user PATH so it works in any
 # terminal. Takes the FINAL git directory (system git dir, or
 # $InstallDir\data\mingit\cmd once the staged MinGit is moved).
@@ -358,7 +634,7 @@ function Ask-DesktopShortcut {
             $sc.TargetPath = $launcherPath
             $sc.WorkingDirectory = $InstallDir
             $sc.WindowStyle = 1   # normal window
-            $sc.Description = "Launch Glitch Pie"
+            $sc.Description = "Launch Glitch Pi"
             $iconPath = Join-Path $InstallDir 'assets\glitch-icon.ico'
             if (Test-Path $iconPath) { $sc.IconLocation = "$iconPath,0" }
             $sc.Save()
@@ -376,10 +652,10 @@ function Ask-DesktopShortcut {
 # Show help
 if ($Help) {
     Write-Host @"
-Glitch Pie Installer for Windows
+Glitch Pi Installer for Windows
 
 Usage:
-  irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.ps1 | iex [-InstallDir <path>] [-NoLaunch] [-NoShortcut] [-Help] [-UserRepo <url>]
+  irm https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.ps1 | iex [-InstallDir <path>] [-NoLaunch] [-NoShortcut] [-Help] [-UserRepo <url>]
 
 Parameters:
   -InstallDir <path>   Custom install directory (default: $HOME\glitch-pi)
@@ -401,7 +677,7 @@ Node.js is NOT required - the bootstrap script downloads a portable Node.js bund
 # Resolve the last commit that touched this installer on the selected branch (best-effort, for issue identification)
 $InstallerCommit = ""
 try {
-    $commitApi = Invoke-RestMethod -Uri "https://api.github.com/repos/Cothek/glitch-pi/commits?path=scripts/install-pie.ps1&sha=$Branch" -Headers @{ "User-Agent" = "glitch-installer" } -TimeoutSec 10 -ErrorAction Stop
+    $commitApi = Invoke-RestMethod -Uri "https://api.github.com/repos/Cothek/glitch-pi/commits?path=scripts/install-pi.ps1&sha=$Branch" -Headers @{ "User-Agent" = "glitch-installer" } -TimeoutSec 10 -ErrorAction Stop
     if ($commitApi -and $commitApi.Count -gt 0 -and $commitApi[0].sha) {
         $InstallerCommit = $commitApi[0].sha
         if ($InstallerCommit.Length -gt 7) { $InstallerCommit = $InstallerCommit.Substring(0, 7) }
@@ -420,7 +696,7 @@ function Format-BannerLine([string]$text) {
     $left = [Math]::Floor($padTotal / 2)
     return "|" + (" " * $left) + $text + (" " * ($padTotal - $left)) + "|"
 }
-$BannerLine1 = Format-BannerLine "GLITCH PIE INSTALLER (Windows)"
+$BannerLine1 = Format-BannerLine "GLITCH PI INSTALLER (Windows)"
 $BannerLine2 = Format-BannerLine "Personal AI Companion - Persistent Memory"
 $BannerVersionLine = Format-BannerLine $BannerVersionContent
 Write-Host @"
@@ -444,7 +720,7 @@ Write-Success "PowerShell $($PSVersionTable.PSVersion) OK"
 # 2. Choose install location
 Write-Header "Installation location"
 if (-not $PSBoundParameters.ContainsKey('InstallDir')) {
-    Write-Host "  Where should Glitch Pie be installed?" -ForegroundColor White
+    Write-Host "  Where should Glitch Pi be installed?" -ForegroundColor White
     Write-Host ""
     Write-Host "  [1] Current directory: $(Join-Path (Get-Location).Path "glitch-pi")" -ForegroundColor White
     Write-Host "  [2] User home directory: $HOME\glitch-pi (default)" -ForegroundColor White
@@ -513,283 +789,57 @@ if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
             Write-Step "Provisioning Git (ordered tier list: ZIP -> 7-Zip SFX -> NSIS -> MinGit)..."
 
             $gitStagedDir = Join-Path $env:TEMP "glitch-mingit"
-            $gitBin = Join-Path $gitStagedDir "cmd\git.exe"
+            $gitBin  = Join-Path $gitStagedDir "cmd\git.exe"
             $gitBash = Join-Path $gitStagedDir "usr\bin\bash.exe"
 
-            # Probe the staging dir: bash-capable tiers require BOTH cmd\git.exe
-            # AND usr\bin\bash.exe; tier 4 (MinGit) accepts git.exe alone.
-            function Test-GitStagedTree {
-                    param([string]$StagedDir)
-                    $probeGit  = Join-Path $StagedDir "cmd\git.exe"
-                    $probeBash = Join-Path $StagedDir "usr\bin\bash.exe"
-                    return [pscustomobject]@{
-                        Git  = (Test-Path $probeGit)
-                        Bash = (Test-Path $probeBash)
-                        GitExePath  = if (Test-Path $probeGit)  { $probeGit }  else { $null }
-                        BashExePath = if (Test-Path $probeBash) { $probeBash } else { $null }
-                    }
-                }
+            # -- Pinned Git release constants --
+            # Single source of truth for fallback URLs. A future version bump
+            # is one edit here. The GitHub API lookup below is an OPTIONAL
+            # upgrade path; when it fails (rate limit, outage) pinned URLs
+            # are used. WHY bashzip has no pinned URL: git-for-windows does
+            # not publish a PortableGit *.zip at this tag (404 verified), so
+            # that tier is omitted when the API is unavailable.
+            $PinnedGitTag     = 'v2.47.0.windows.2'
+            $PinnedGitVer4    = '2.47.0.2'
+            $PinnedGitBaseUrl = "https://github.com/git-for-windows/git/releases/download/$PinnedGitTag"
 
-            # Resolve the latest release once. Asset NAMES use the 3-part
-            # version (e.g. "2.56.0") while the tag uses 4-part
-            # (v2.56.0.windows.1). The download URLs embed the tag, but the
-            # asset filenames we pattern-match embed the 3-part form.
+            # Resolve latest release via GitHub API (optional enhancement).
+            $apiAssets = @()
             try {
                 $apiUrl = "https://api.github.com/repos/git-for-windows/git/releases/latest"
-                $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10
-                $tagName = $release.tag_name
-                $assets  = $release.assets
+                $apiRelease = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10
+                $apiAssets = $apiRelease.assets
             } catch {
-                $tagName = $null
-                $assets  = @()
-            }
-            $ver3 = if ($tagName) { ($tagName -replace '^v','') -replace '\.windows\.','.' } else { '2.56.0' }
-            $fallbackTag = 'v2.47.0.windows.2'
-            $fallbackVer3 = '2.47.0'
-
-            # Helper: emit a fresh staging dir per tier; wipe any leftovers from
-            # a prior tier so a half-extracted archive does not fool the probe.
-            $tierAttempt = 0
-            function Reset-StagingDir {
-                    param([string]$Dir)
-                    if (Test-Path $Dir) { Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue }
-                    New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-                }
-
-            # TIER 1: a plain bash-capable ZIP (rare today, kept for future
-            # PortableGit-*-64-bit.zip releases). Expand-Archive only.
-            $tier1Asset = $assets | Where-Object {
-                $_.name -like "PortableGit-*-64-bit.zip" -or
-                $_.name -like "Git-*-64-bit.zip"
-            } | Where-Object { $_.name -notlike "*busybox*" -and $_.name -notlike "*arm64*" } | Select-Object -First 1
-            $tierAccepted = $false
-            $tierAcceptedName = $null
-            $tierIsGitOnly = $false
-
-            if ($tier1Asset) {
-                $tierAttempt++
-                Write-Step "Trying tier 1 (bash-capable ZIP): $($tier1Asset.name)"
-                $tempZip = Join-Path $env:TEMP "glitch-git-tier1.zip"
-                $dlOk = $false
-                try {
-                    Invoke-WithSpinner -Label "Downloading $($tier1Asset.name)" -DoneMessage "Download" -ScriptBlock {
-                        Invoke-WebRequest -Uri $using:tier1Asset.browser_download_url -OutFile $using:tempZip -UseBasicParsing -TimeoutSec 120
-                    }
-                    $dlOk = $true
-                } catch {
-                    Write-Step "Tier 1 failed: download error - $($_.Exception.Message) - trying next option"
-                }
-                if ($dlOk) {
-                    try {
-                        Reset-StagingDir $gitStagedDir
-                        Invoke-WithSpinner -Label "Extracting $($tier1Asset.name)" -DoneMessage "Extract" -ScriptBlock {
-                            Expand-Archive -Path $using:tempZip -DestinationPath $using:gitStagedDir -Force
-                        }
-                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
-                        if ($probe.Git -and $probe.Bash) {
-                            $tierAccepted = $true
-                            $tierAcceptedName = $tier1Asset.name
-                        } else {
-                            Write-Step "Tier 1 failed: extracted archive missing cmd\git.exe or usr\bin\bash.exe - trying next option"
-                        }
-                    } catch {
-                        Write-Step "Tier 1 failed: $($_.Exception.Message) - trying next option"
-                    } finally {
-                        Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
-                    }
-                }
+                # API failure is fine; pinned fallbacks will be used below.
             }
 
-            # TIER 2: PortableGit-<ver>-64-bit.7z.exe (7-Zip SFX). 7z.sfx honours
-            # `-y` (auto-confirm overwrite) and `-o<dir>` (output). Run via the
-            # call operator with an argument array so quoting is safe.
-            if (-not $tierAccepted) {
-                $tier2Asset = $assets | Where-Object {
-                    $_.name -like "PortableGit-*-64-bit.7z.exe" -and $_.name -notlike "*arm64*"
-                } | Select-Object -First 1
-                if (-not $tier2Asset) {
-                    # Synthesize the URL from the tag if the API list was empty
-                    $tier2Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/PortableGit-$fallbackVer3-64-bit.7z.exe"
-                    $tier2Name = "PortableGit-$fallbackVer3-64-bit.7z.exe (fallback)"
-                } else {
-                    $tier2Url  = $tier2Asset.browser_download_url
-                    $tier2Name = $tier2Asset.name
-                }
-                $tierAttempt++
-                Write-Step "Trying tier 2 (7-Zip SFX): $tier2Name"
-                $tempSfx = Join-Path $env:TEMP "glitch-git-tier2.7z.exe"
-                $dlOk = $false
-                try {
-                    Invoke-WithSpinner -Label "Downloading $tier2Name" -DoneMessage "Download" -ScriptBlock {
-                        Invoke-WebRequest -Uri $tier2Url -OutFile $using:tempSfx -UseBasicParsing -TimeoutSec 120
-                    }
-                    $dlOk = $true
-                } catch {
-                    Write-Step "Tier 2 failed: download error - $($_.Exception.Message) - trying next option"
-                }
-                if ($dlOk) {
-                    try {
-                        Reset-StagingDir $gitStagedDir
-                        # 7-Zip SFX supports -y and -o<dir>. Wait for completion
-                        # so the probe below sees the extracted tree.
-                        $sfxProc = Start-Process -FilePath $tempSfx -ArgumentList @('-y', "-o$gitStagedDir") -Wait -PassThru -NoNewWindow
-                        if ($sfxProc.ExitCode -ne 0) {
-                            throw "7-Zip SFX exited with code $($sfxProc.ExitCode)"
-                        }
-                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
-                        if ($probe.Git -and $probe.Bash) {
-                            $tierAccepted = $true
-                            $tierAcceptedName = $tier2Name
-                        } else {
-                            Write-Step "Tier 2 failed: extracted SFX missing cmd\git.exe or usr\bin\bash.exe - trying next option"
-                        }
-                    } catch {
-                        Write-Step "Tier 2 failed: $($_.Exception.Message) - trying next option"
-                    } finally {
-                        Remove-Item $tempSfx -Force -ErrorAction SilentlyContinue
-                    }
-                }
-            }
+            # Build tier list using the shared function. Each descriptor
+            # carries a plain-string URL so Invoke-WithSpinner's Start-Job
+            # can capture it via $using: on a scalar variable.
+            $tierList = Build-GitTierList -Assets $apiAssets `
+                -PinnedBaseUrl $PinnedGitBaseUrl -PinnedGitVer4 $PinnedGitVer4
 
-            # TIER 3: Git-<ver>-64-bit.exe (silent NSIS). /VERYSILENT suppresses
-            # most dialogs; /NORESTART prevents reboot prompts; /NOCANCEL
-            # prevents the abort button; /SP- skips the "welcome" page so no
-            # UAC pre-prompt beyond the elevation the installer always
-            # requires. /DIR installs into our bundled mingit dir.
-            if (-not $tierAccepted) {
-                $tier3Asset = $assets | Where-Object {
-                    $_.name -like "Git-*-64-bit.exe" -and $_.name -notlike "*arm64*"
-                } | Select-Object -First 1
-                if (-not $tier3Asset) {
-                    $tier3Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/Git-$fallbackVer3-64-bit.exe"
-                    $tier3Name = "Git-$fallbackVer3-64-bit.exe (fallback)"
-                } else {
-                    $tier3Url  = $tier3Asset.browser_download_url
-                    $tier3Name = $tier3Asset.name
-                }
-                $tierAttempt++
-                Write-Step "Trying tier 3 (NSIS silent): $tier3Name"
-                $tempNsis = Join-Path $env:TEMP "glitch-git-tier3.exe"
-                $nsisTargetDir = Join-Path $env:TEMP "glitch-git-nsis-install"
-                if (Test-Path $nsisTargetDir) { Remove-Item $nsisTargetDir -Recurse -Force -ErrorAction SilentlyContinue }
-                New-Item -ItemType Directory -Path $nsisTargetDir -Force | Out-Null
-                $dlOk = $false
-                try {
-                    Invoke-WithSpinner -Label "Downloading $tier3Name" -DoneMessage "Download" -ScriptBlock {
-                        Invoke-WebRequest -Uri $tier3Url -OutFile $using:tempNsis -UseBasicParsing -TimeoutSec 120
-                    }
-                    $dlOk = $true
-                } catch {
-                    Write-Step "Tier 3 failed: download error - $($_.Exception.Message) - trying next option"
-                }
-                if ($dlOk) {
-                    try {
-                        Reset-StagingDir $gitStagedDir
-                        # NSIS will raise ONE UAC dialog (Elevation) which we
-                        # cannot suppress without UAC disabled. The installer's
-                        # own elevation elsewhere makes this acceptable.
-                        $nsisArgs = @(
-                            '/VERYSILENT',
-                            '/SUPPRESSMSGBOXES',
-                            '/NORESTART',
-                            '/NOCANCEL',
-                            '/SP-',
-                            "/DIR=`"$nsisTargetDir`""
-                        )
-                        Write-Step "  Note: the installer may raise ONE UAC prompt to elevate."
-                        $nsisProc = Start-Process -FilePath $tempNsis -ArgumentList $nsisArgs -Wait -PassThru
-                        if ($nsisProc.ExitCode -ne 0) {
-                            throw "Git NSIS returned exit code $($nsisProc.ExitCode)"
-                        }
-                        # NSIS installs into $nsisTargetDir\cmd\git.exe (and a
-                        # usr\bin/bash.exe beside it). Copy the whole tree into
-                        # the staging dir for a uniform downstream probe.
-                        if (Test-Path $nsisTargetDir) {
-                            Copy-Item "$nsisTargetDir\*" $gitStagedDir -Recurse -Force
-                        }
-                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
-                        if ($probe.Git -and $probe.Bash) {
-                            $tierAccepted = $true
-                            $tierAcceptedName = $tier3Name
-                        } else {
-                            Write-Step "Tier 3 failed: installed Git missing cmd\git.exe or usr\bin\bash.exe - trying next option"
-                        }
-                    } catch {
-                        Write-Step "Tier 3 failed: $($_.Exception.Message) - trying next option"
-                    } finally {
-                        Remove-Item $tempNsis -Force -ErrorAction SilentlyContinue
-                        Remove-Item $nsisTargetDir -Recurse -Force -ErrorAction SilentlyContinue
-                    }
-                }
-            }
+            # Run the shared tier loop: download, extract, probe each tier.
+            $result = Invoke-GitTierProvision -TierList $tierList `
+                -StagedDir $gitStagedDir -TempDir $env:TEMP
 
-            # TIER 4 (last resort, git-ONLY): the non-busybox MinGit zip.
-            # MinGit ships git.exe but NO usr\bin\bash.exe -- so this tier
-            # accepts git.exe alone and warns loudly that bash is absent.
-            # The install MUST CONTINUE (Glitch works for git operations; only
-            # bash-dependent features like shell tools and some skills will
-            # not run).
-            if (-not $tierAccepted) {
-                $tier4Asset = $assets | Where-Object {
-                    $_.name -like "MinGit-*-64-bit.zip" -and $_.name -notlike "*busybox*"
-                } | Select-Object -First 1
-                if (-not $tier4Asset) {
-                    $tier4Url = "https://github.com/git-for-windows/git/releases/download/$fallbackTag/MinGit-$fallbackVer3.2-64-bit.zip"
-                    $tier4Name = "MinGit-$fallbackVer3.2-64-bit.zip (fallback)"
-                } else {
-                    $tier4Url  = $tier4Asset.browser_download_url
-                    $tier4Name = $tier4Asset.name
-                }
-                $tierAttempt++
-                Write-Step "Trying tier 4 (MinGit git-only last resort): $tier4Name"
-                $tempZip4 = Join-Path $env:TEMP "glitch-git-tier4.zip"
-                $dlOk = $false
-                try {
-                    Invoke-WithSpinner -Label "Downloading $tier4Name" -DoneMessage "Download" -ScriptBlock {
-                        Invoke-WebRequest -Uri $tier4Url -OutFile $using:tempZip4 -UseBasicParsing -TimeoutSec 120
-                    }
-                    $dlOk = $true
-                } catch {
-                    Write-Step "Tier 4 failed: download error - $($_.Exception.Message)"
-                }
-                if ($dlOk) {
-                    try {
-                        Reset-StagingDir $gitStagedDir
-                        Invoke-WithSpinner -Label "Extracting $tier4Name" -DoneMessage "Extract" -ScriptBlock {
-                            Expand-Archive -Path $using:tempZip4 -DestinationPath $using:gitStagedDir -Force
-                        }
-                        $probe = Test-GitStagedTree -StagedDir $gitStagedDir
-                        if ($probe.Git) {
-                            $tierAccepted = $true
-                            $tierAcceptedName = $tier4Name
-                            $tierIsGitOnly = $true
-                        } else {
-                            Write-Step "Tier 4 failed: extracted archive missing cmd\git.exe"
-                        }
-                    } catch {
-                        Write-Step "Tier 4 failed: $($_.Exception.Message)"
-                    } finally {
-                        Remove-Item $tempZip4 -Force -ErrorAction SilentlyContinue
-                    }
-                }
-            }
-
-            # No tier yielded even git.exe -- give the user an actionable path
-            # instead of silently continuing with no git at all.
-            if (-not $tierAccepted) {
+            # No tier yielded even git.exe -- give the user an actionable
+            # path instead of silently continuing with no git at all.
+            if (-not $result.Accepted) {
                 throw "Could not provision Git at all. Install Git for Windows from https://git-scm.com/download/win and re-run this installer."
             }
 
-            if (-not $tierIsGitOnly) {
-                # Bashful tiers: require bash at staging (probe above already
-                # enforced this for tier 1-3). Belt-and-braces check.
+            if (-not $result.IsGitOnly) {
+                # Bashful tiers: require bash at staging (probe inside
+                # Invoke-GitTierProvision already enforced this).
+                # Belt-and-braces check.
                 if (-not (Test-Path $gitBash)) {
                     Remove-Item $gitStagedDir -Recurse -Force -ErrorAction SilentlyContinue
-                    throw "Provisioned Git tier ($tierAcceptedName) unexpectedly lacks bash. Install Git for Windows from https://git-scm.com/download/win"
+                    throw "Provisioned Git tier ($($result.AcceptedName)) unexpectedly lacks bash. Install Git for Windows from https://git-scm.com/download/win"
                 }
             } else {
-                # Tier 4 (MinGit) is git-only by design. Warn loudly and let
-                # the install continue -- Glitch's git operations work; only
+                # MinGit is git-only by design. Warn loudly and let the
+                # install continue -- Glitch's git operations work; only
                 # bash-dependent features (skills, shell tools) will not run.
                 Write-Warn "Installed git-only MinGit (no bash). Glitch works, but shell features and skills that call bash will not run. Re-run the installer or install Git for Windows to enable bash."
             }
@@ -798,7 +848,7 @@ if ((Test-GitInPersistedPath) -and (Test-BashBesideGit -GitExe $gitPath)) {
             $gitPath = $gitBin
             $gitProvisioned = $true
             $gitNeedsPersistence = $true
-            Write-Success "Git staged from $tierAcceptedName to $gitStagedDir (will be moved after clone)"
+            Write-Success "Git staged from $($result.AcceptedName) to $gitStagedDir (will be moved after clone)"
         }
     } else {
         # gitPath was found via session PATH
@@ -818,7 +868,7 @@ Write-Header "Installation directory: $InstallDir"
 
 if (Test-Path "$InstallDir\.git") {
     # Existing git repo -- offer update
-    Write-Warn "Glitch Pie already installed at $InstallDir"
+    Write-Warn "Glitch Pi already installed at $InstallDir"
     Write-Prompt "Update to latest version? (Y/n): "
     $update = Read-Host
     if ($update -eq '' -or $update -like 'y*') {
@@ -894,7 +944,7 @@ if (-not (Test-Path "$InstallDir\.git")) {
     $script:CloneSucceeded = $false
 
     try {
-      Invoke-WithSpinner -Label "Cloning Glitch Pie repository" -DoneMessage "Repository" -ScriptBlock {
+      Invoke-WithSpinner -Label "Cloning Glitch Pi repository" -DoneMessage "Repository" -ScriptBlock {
         # cothek@ prefix: the repo is private and GCM stores credentials under
         # the username. A username-less URL leaves GCM waiting for an interactive
         # username prompt, which hangs headless installs. Verified: the plain URL
@@ -1862,15 +1912,15 @@ if (-not $NoShortcut) {
 
 # 7. Launch
 if (-not $NoLaunch) {
-    Write-Header "Launch Glitch Pie"
+    Write-Header "Launch Glitch Pi"
     Write-Prompt "Launch Glitch now? (Y/n): "
     $launch = Read-Host
     if ($launch -eq '' -or $launch -like 'y*') {
-        Write-Step "Starting Glitch Pie..."
+        Write-Step "Starting Glitch Pi..."
         Push-Location $InstallDir
         # Use Start-Process to launch in a new window (detached)
         $proc = Start-Process -FilePath "launch-glitch.bat" -WindowStyle Normal -PassThru
-        Write-Success "Glitch Pie launched (PID: $($proc.Id))"
+        Write-Success "Glitch Pi launched (PID: $($proc.Id))"
         Write-Host ""
         Write-Host "  To launch again later, run:" -ForegroundColor Cyan
         Write-Host "    cd $InstallDir" -ForegroundColor Gray
@@ -1891,7 +1941,7 @@ if ($script:SubmoduleFailures.Count -gt 0) {
 
 Write-Header "Installation Complete!"
 Write-Host @"
-Glitch Pie is installed at: $InstallDir
+Glitch Pi is installed at: $InstallDir
 
 Next steps:
   * Launch:        cd $InstallDir && .\launch-glitch.bat

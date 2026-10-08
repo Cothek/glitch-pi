@@ -309,7 +309,7 @@ function persistedPathDirs() {
   return dirs;
 }
 // Walk up to 4 ancestors from git.exe probing usr\bin\bash.exe then
-// bin\bash.exe at each level. Mirrors Test-BashBesideGit in install-pie.ps1
+// bin\bash.exe at each level. Mirrors Test-BashBesideGit in install-pi.ps1
 // so the installer and the checker agree on every git layout (cmd\,
 // mingw64\bin, bin\, scoop, chocolatey shim, portable git).
 function bashBesideGitExe(gitExe) {
@@ -420,7 +420,7 @@ function findBashViaSystemGit() {
 }
 
 // Execution probe: bash.exe being on disk is necessary, not sufficient.
-// Mirrors the install-pie.ps1 self-test that runs `bash --version` after
+// Mirrors the install-pi.ps1 self-test that runs `bash --version` after
 // MinGit is finalized: a file that exists may still fail to launch (busybox
 // shim that exits immediately, DLL search-path mismatch, blocked by AV, etc.).
 // Returns { ok, shortVersion, error }. shortVersion is X.Y[.Z]; error is a
@@ -861,7 +861,7 @@ check('User Memory Link', 'Config', () => {
 });
 
 // Informational only (never a failure): the install-time root record written
-// by scripts/write-root-record.mjs (called from install-pie.ps1 near the end
+// by scripts/write-root-record.mjs (called from install-pi.ps1 near the end
 // of a successful install) so a Glitch install can be located from inside
 // itself. Reports whether the record exists and whether its recorded root
 // matches the actual root.

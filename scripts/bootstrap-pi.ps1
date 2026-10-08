@@ -5,7 +5,7 @@
 # ============================================================================
 # bootstrap-pi.ps1 -- Pi-engine bootstrap for the glitch-pi fork (Gap G5,
 # docs/startup-chain-plan.md). Replaces the OpenCode-era bootstrap.ps1 in the
-# install chain (install-pie.ps1 step 4 + launch-glitch.bat auto-bootstrap).
+# install chain (install-pi.ps1 step 4 + launch-glitch.bat auto-bootstrap).
 #
 # Difference vs bootstrap.ps1: this fork's ONLY engine is the Pi CLI
 # (@earendil-works/pi-coding-agent) served from data/node, plus pi-web-ui for

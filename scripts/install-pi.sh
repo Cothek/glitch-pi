@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Glitch Pie Installer for macOS/Linux (POSIX-compatible)
+# Glitch Pi Installer for macOS/Linux (POSIX-compatible)
 # Standalone installer - download and run directly from GitHub.
 #
 # Usage:
-#   curl -sL https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.sh | bash
-#   wget -qO- https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.sh | bash
+#   curl -sL https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.sh | bash
+#   wget -qO- https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.sh | bash
 #   bash install.sh [install_dir] [--no-launch]
-#   curl -sL https://raw.githubusercontent.com/Cothek/glitch-pi/develop/scripts/install-pie.sh -o /tmp/glitch-install.sh && bash /tmp/glitch-install.sh --branch develop
+#   curl -sL https://raw.githubusercontent.com/Cothek/glitch-pi/develop/scripts/install-pi.sh -o /tmp/glitch-install.sh && bash /tmp/glitch-install.sh --branch develop
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ USER_REPO=""
 BRANCH=""
 
 # Bump this whenever installer behavior changes -- printed at startup for issue identification
-INSTALLER_VERSION="1.1.0-pie.4"
+INSTALLER_VERSION="1.1.0-pi.4"
 
 # Set up logging - captures all output to a file for diagnosis.
 # Logs to /tmp first (the install dir may not exist yet and must not be
@@ -33,7 +33,7 @@ setup_logging
 
 _BRANCH_DISPLAY="${BRANCH:-(default main)}"
 echo ""
-echo "  Glitch Pie Installer v${INSTALLER_VERSION}"
+echo "  Glitch Pi Installer v${INSTALLER_VERSION}"
 echo "  Install dir : $INSTALL_DIR"
 echo "  Branch      : $_BRANCH_DISPLAY"
 echo "  Platform    : $(uname -s)"
@@ -55,11 +55,11 @@ for arg in "$@"; do
         --branch=*) BRANCH="${arg#*=}" ;;
         --help|-h)
             cat <<'EOF'
-Glitch Pie Installer for macOS/Linux
+Glitch Pi Installer for macOS/Linux
 
 Usage:
-  curl -sL https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.sh | bash [install_dir] [--no-launch] [--no-shortcut] [--user-repo <url>] [--branch <name>]
-  wget -qO- https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pie.sh | bash [install_dir] [--no-launch] [--no-shortcut] [--user-repo <url>] [--branch <name>]
+  curl -sL https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.sh | bash [install_dir] [--no-launch] [--no-shortcut] [--user-repo <url>] [--branch <name>]
+  wget -qO- https://raw.githubusercontent.com/Cothek/glitch-pi/main/scripts/install-pi.sh | bash [install_dir] [--no-launch] [--no-shortcut] [--user-repo <url>] [--branch <name>]
 
 Arguments:
   install_dir              Custom install directory (default: $HOME/glitch-pi)
@@ -184,7 +184,7 @@ offer_desktop_shortcut() {
         if [ -z "$answer" ] || [[ "$answer" =~ ^[Yy] ]]; then
             if {
                 printf '#!/usr/bin/env bash\n'
-                printf '# Launch Glitch Pie — double-click to start.\n'
+                printf '# Launch Glitch Pi — double-click to start.\n'
                 printf 'cd %q || exit 1\n' "$INSTALL_DIR"
                 printf 'exec %q "$@"\n' "$launcher"
             } > "$shortcut" && chmod +x "$shortcut"; then
@@ -215,7 +215,7 @@ offer_desktop_shortcut() {
                 printf '[Desktop Entry]\n'
                 printf 'Type=Application\n'
                 printf 'Name=Glitch\n'
-                printf 'Comment=Launch Glitch Pie\n'
+                printf 'Comment=Launch Glitch Pi\n'
                 printf 'Exec=%q\n' "$launcher"
                 printf 'Terminal=true\n'
                 printf 'Categories=Development;\n'
@@ -234,7 +234,7 @@ offer_desktop_shortcut() {
 # Resolve the last commit that touched this installer on the selected branch (best-effort, for issue identification)
 INSTALLER_COMMIT=""
 if command -v curl >/dev/null 2>&1; then
-  COMMIT_API_JSON=$(curl -s --max-time 10 "https://api.github.com/repos/Cothek/glitch-pi/commits?path=scripts/install-pie.sh&sha=${BRANCH:-main}" 2>/dev/null || true)
+  COMMIT_API_JSON=$(curl -s --max-time 10 "https://api.github.com/repos/Cothek/glitch-pi/commits?path=scripts/install-pi.sh&sha=${BRANCH:-main}" 2>/dev/null || true)
   if [ -n "$COMMIT_API_JSON" ]; then
     if command -v jq >/dev/null 2>&1; then
       INSTALLER_COMMIT=$(printf '%s' "$COMMIT_API_JSON" | jq -r '.[0].sha // empty' 2>/dev/null | head -c 7)
@@ -266,7 +266,7 @@ banner_line() {
 }
 cat <<EOF
 ╔$(printf '═%.0s' {1..77})╗
-$(banner_line "GLITCH PIE INSTALLER (macOS/Linux)")
+$(banner_line "GLITCH PI INSTALLER (macOS/Linux)")
 $(banner_line "Personal AI Companion - Persistent Memory")
 $BANNER_VERSION_LINE
 ╚$(printf '═%.0s' {1..77})╝
@@ -392,7 +392,7 @@ header "Installation directory: $INSTALL_DIR"
 
 if [ -d "$INSTALL_DIR/.git" ]; then
     # Existing git repo — offer update
-    warn "Glitch Pie already installed at $INSTALL_DIR"
+    warn "Glitch Pi already installed at $INSTALL_DIR"
     prompt "Update to latest version? (Y/n): "
     read -r update </dev/tty
     if [ -z "$update" ] || [[ "$update" =~ ^[Yy] ]]; then
@@ -448,7 +448,7 @@ if [ ! -d "$INSTALL_DIR/.git" ]; then
     mkdir -p "$parent_dir" 2>/dev/null || true
     
     # Two-step clone: repo first, submodules individually so one failure doesn't kill install
-    if spinner "Cloning Glitch Pie repository" git clone https://github.com/Cothek/glitch-pi.git "$INSTALL_DIR"; then
+    if spinner "Cloning Glitch Pi repository" git clone https://github.com/Cothek/glitch-pi.git "$INSTALL_DIR"; then
         success "Repository cloned to $INSTALL_DIR"
     else
         error "Clone failed"
@@ -779,7 +779,7 @@ fi
 # 5. User profile setup
 header "User Profile Setup"
 cat <<'EOF'
-Glitch Pie stores your personal memory, preferences, and projects in a separate directory.
+Glitch Pi stores your personal memory, preferences, and projects in a separate directory.
 This lets your AI companion remember you across sessions.
 EOF
 
@@ -1070,11 +1070,11 @@ fi
 
 # 7. Launch
 if [ "$NO_LAUNCH" = false ]; then
-    header "Launch Glitch Pie"
+    header "Launch Glitch Pi"
     prompt "Launch Glitch now? (Y/n): "
     read -r launch </dev/tty
     if [ -z "$launch" ] || [[ "$launch" =~ ^[Yy] ]]; then
-        step "Starting Glitch Pie..."
+        step "Starting Glitch Pi..."
         cd "$INSTALL_DIR"
         echo ""
         echo "First launch note: Node.js and the Pi engine are installed now"
@@ -1087,7 +1087,7 @@ if [ "$NO_LAUNCH" = false ]; then
         # missing. When the TUI exits, control returns to this installer.
         ./launch-glitch.sh --mode pi
         echo ""
-        success "Glitch Pie exited. To launch again: cd $INSTALL_DIR && ./launch-glitch.sh"
+        success "Glitch Pi exited. To launch again: cd $INSTALL_DIR && ./launch-glitch.sh"
     fi
 fi
 
@@ -1109,7 +1109,7 @@ fi
 
 header "Installation Complete!"
 cat <<EOF
-Glitch Pie is installed at: $INSTALL_DIR
+Glitch Pi is installed at: $INSTALL_DIR
 
 Next steps:
   • Launch:        cd $INSTALL_DIR && ./launch-glitch.sh

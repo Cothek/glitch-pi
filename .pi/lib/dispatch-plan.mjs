@@ -29,12 +29,19 @@
 /** Providers that exist in the OpenCode config but not on pi. */
 export const DROPPED_MODEL_RE = /^opencode(-go)?\//;
 
-/** Trim + drop-dead-provider guard shared by the pin and every fallback. */
-function usableId(value, dropped) {
+/**
+ * Trim + drop-dead-provider guard shared by the pin and every fallback.
+ * When `available` is a non-empty Set, also rejects ids not in the catalog.
+ */
+function usableId(value, dropped, unresolved, available) {
 	const id = typeof value === "string" ? value.trim() : "";
 	if (!id) return undefined;
 	if (DROPPED_MODEL_RE.test(id)) {
 		dropped.push(id);
+		return undefined;
+	}
+	if (available && available.size > 0 && !available.has(id)) {
+		unresolved.push(id);
 		return undefined;
 	}
 	return id;
@@ -54,21 +61,27 @@ function fallbackList(agentFallbacks) {
  * @param {string|undefined|null} input.agentThinking   frontmatter `thinkingLevel:`
  * @param {string|undefined|null} input.parentModel     the dispatching session's model
  * @param {string|undefined|null} input.parentThinking  the dispatching session's level
+ * @param {Set<string>|undefined|null} input.availableModels  live model catalog ids; when
+ *   non-empty, any pin/fallback/parent not in the set is filtered out and reported in
+ *   `unresolved`. Omit or pass an empty set to skip validation (backward compatible).
  * @returns {{
  *   chain: string[],          // models in dispatch order; entry 0 is the pin
  *   model: string|undefined,  // the primary (chain[0])
  *   thinking: string|undefined,
  *   inherits: boolean,        // true when the first hop IS the parent because nothing usable was declared
  *   dropped: string[],        // ids skipped because their provider does not exist
+ *   unresolved: string[],     // ids skipped because they are not in availableModels
  * }}
  */
-export function planDispatch({ agentModel, agentFallbacks, agentThinking, parentModel, parentThinking } = {}) {
+export function planDispatch({ agentModel, agentFallbacks, agentThinking, parentModel, parentThinking, availableModels } = {}) {
 	const dropped = [];
-	const pin = usableId(agentModel, dropped);
+	const unresolved = [];
+	const available = availableModels instanceof Set ? availableModels : null;
+	const pin = usableId(agentModel, dropped, unresolved, available);
 
 	const fallbacks = [];
 	for (const entry of fallbackList(agentFallbacks)) {
-		const id = usableId(entry, dropped);
+		const id = usableId(entry, dropped, unresolved, available);
 		if (id && id !== pin && !fallbacks.includes(id)) fallbacks.push(id);
 	}
 
@@ -82,7 +95,15 @@ export function planDispatch({ agentModel, agentFallbacks, agentThinking, parent
 	const inherits = !pin && !fallbacks.length;
 	if (inherits) {
 		const parent = typeof parentModel === "string" ? parentModel.trim() : "";
-		if (parent) chain.push(parent);
+		if (parent) {
+			// Validate the parent model against the catalog too — it is no good inheriting
+			// to a model that does not exist either.
+			if (available && available.size > 0 && !available.has(parent)) {
+				unresolved.push(parent);
+			} else {
+				chain.push(parent);
+			}
+		}
 	}
 
 	const declared = typeof agentThinking === "string" ? agentThinking.trim() : "";
@@ -94,5 +115,6 @@ export function planDispatch({ agentModel, agentFallbacks, agentThinking, parent
 		thinking: thinking || undefined,
 		inherits,
 		dropped,
+		unresolved,
 	};
 }

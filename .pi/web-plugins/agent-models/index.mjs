@@ -77,7 +77,7 @@ const STATE_TTL_MS = 5000;
  */
 const CONFIGS_PATH = ".pi/agent-models/configs.json";
 
-const EXCLUDED_AGENTS = new Set(["glitch-omni", "memory-paid"]);
+const EXCLUDED_AGENTS = new Set(["glitch-omni"]);
 
 async function listAgentFiles(host) {
 	try {

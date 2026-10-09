@@ -118,7 +118,7 @@ function buildCatalog(agentDir) {
 	return { ids, source, configured: configured.size, official: official.size };
 }
 
-const EXCLUDED_AGENTS = new Set(["glitch-omni", "memory-paid"]);
+const EXCLUDED_AGENTS = new Set(["glitch-omni"]);
 
 function readAgents(repoRoot) {
 	const dir = join(repoRoot, PROJECT_AGENTS_DIR);

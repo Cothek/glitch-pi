@@ -120,3 +120,91 @@ describe("dispatch plan: thinking level", () => {
 		assert.equal(inherited.thinking, "minimal");
 	});
 });
+
+describe("dispatch plan: availableModels validation", () => {
+	const catalog = new Set([
+		"commandcode/z-ai/glm-5.3-flash",
+		"nvidia/moonshotai/kimi-k3",
+		"nvidia/llama-3.1-nemotron-51b-instruct",
+		"commandcode/poolside/laguna-s-2.1-free",
+	]);
+
+	it("is backward compatible when availableModels is omitted", () => {
+		const p = planDispatch({ agentModel: "fake/provider/model", parentModel: "nvidia/kimi-k3" });
+		assert.equal(p.model, "fake/provider/model");
+		assert.deepEqual(p.unresolved, []);
+	});
+
+	it("is backward compatible when availableModels is an empty Set", () => {
+		const p = planDispatch({ agentModel: "fake/provider/model", parentModel: "nvidia/kimi-k3", availableModels: new Set() });
+		assert.equal(p.model, "fake/provider/model");
+		assert.deepEqual(p.unresolved, []);
+	});
+
+	it("keeps a pin that is in the catalog", () => {
+		const p = planDispatch({ agentModel: "commandcode/z-ai/glm-5.3-flash", parentModel: "nvidia/kimi-k3", availableModels: catalog });
+		assert.equal(p.model, "commandcode/z-ai/glm-5.3-flash");
+		assert.deepEqual(p.chain, ["commandcode/z-ai/glm-5.3-flash"]);
+		assert.deepEqual(p.unresolved, []);
+	});
+
+	it("rejects a pin not in the catalog and falls through to fallbacks", () => {
+		const p = planDispatch({
+			agentModel: "fake/unavailable/model",
+			agentFallbacks: ["commandcode/z-ai/glm-5.3-flash", "nvidia/llama-3.1-nemotron-51b-instruct"],
+			parentModel: "nvidia/kimi-k3",
+			availableModels: catalog,
+		});
+		assert.equal(p.model, "commandcode/z-ai/glm-5.3-flash");
+		assert.deepEqual(p.chain, ["commandcode/z-ai/glm-5.3-flash", "nvidia/llama-3.1-nemotron-51b-instruct"]);
+		assert.deepEqual(p.unresolved, ["fake/unavailable/model"]);
+		assert.equal(p.inherits, false);
+	});
+
+	it("filters unavailable fallbacks out of the chain", () => {
+		const p = planDispatch({
+			agentModel: "commandcode/z-ai/glm-5.3-flash",
+			agentFallbacks: ["fake/gone/model", "nvidia/llama-3.1-nemotron-51b-instruct"],
+			parentModel: "nvidia/kimi-k3",
+			availableModels: catalog,
+		});
+		assert.deepEqual(p.chain, ["commandcode/z-ai/glm-5.3-flash", "nvidia/llama-3.1-nemotron-51b-instruct"]);
+		assert.deepEqual(p.unresolved, ["fake/gone/model"]);
+	});
+
+	it("inherits the parent when pin and all fallbacks are unavailable", () => {
+		const p = planDispatch({
+			agentModel: "fake/pin/gone",
+			agentFallbacks: ["fake/fb1/gone", "fake/fb2/gone"],
+			parentModel: "nvidia/moonshotai/kimi-k3",
+			availableModels: catalog,
+		});
+		assert.deepEqual(p.chain, ["nvidia/moonshotai/kimi-k3"]);
+		assert.equal(p.inherits, true);
+		assert.deepEqual(p.unresolved, ["fake/pin/gone", "fake/fb1/gone", "fake/fb2/gone"]);
+	});
+
+	it("rejects the parent model too when inheriting and parent is unavailable", () => {
+		const p = planDispatch({
+			agentModel: "fake/pin/gone",
+			parentModel: "fake/parent/gone",
+			availableModels: catalog,
+		});
+		assert.deepEqual(p.chain, []);
+		assert.equal(p.model, undefined);
+		assert.equal(p.inherits, true);
+		assert.deepEqual(p.unresolved, ["fake/pin/gone", "fake/parent/gone"]);
+	});
+
+	it("combines dropped (dead provider) and unresolved (not in catalog) independently", () => {
+		const p = planDispatch({
+			agentModel: "opencode/mimo-v2.5-free",
+			agentFallbacks: ["fake/gone/model", "commandcode/z-ai/glm-5.3-flash"],
+			parentModel: "nvidia/kimi-k3",
+			availableModels: catalog,
+		});
+		assert.deepEqual(p.chain, ["commandcode/z-ai/glm-5.3-flash"]);
+		assert.deepEqual(p.dropped, ["opencode/mimo-v2.5-free"]);
+		assert.deepEqual(p.unresolved, ["fake/gone/model"]);
+	});
+});

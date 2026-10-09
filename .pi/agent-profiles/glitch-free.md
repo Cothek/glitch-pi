@@ -39,7 +39,7 @@ model: nvidia/moonshotai/kimi-k3
 
 ## Worker roles
 - Reuse the specialized roles when the task fits: coder, testing, reviewer, vision, vision-alt, general. Always pass the model explicitly. The per-call override beats template pins.
-- Use free-worker for everything else.
+- Use @general for everything else.
 - Workers never nest. They execute directly and report.
 
 ## Memory

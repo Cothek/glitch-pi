@@ -244,11 +244,11 @@ const DESTRUCTIVE_BASH_COMMANDS = new Set([
 ]);
 
 const CODE_WRITING_AGENTS = new Set([
-  "coder", "coder-paid", "ui-designer", "ui-designer-paid",
-  "testing", "testing-paid", "pentester", "pentester-paid",
+  "coder", "coder-alt", "ui-designer", "ui-designer-alt",
+  "testing", "testing-alt", "pentester", "pentester-alt",
 ]);
 
-const REVIEW_AGENTS = new Set(["reviewer", "reviewer-paid"]);
+const REVIEW_AGENTS = new Set(["reviewer", "reviewer-alt"]);
 
 // --- Pure helpers ---
 
@@ -860,7 +860,7 @@ export default function (pi: ExtensionAPI) {
                 reason:
                   "⛔ Review Gate: " + verdictNote +
                   "A PASS is required before committing code written by a sub-agent, and the PASS must be NEWER than the last code write.\n" +
-                  "Dispatch @reviewer first. Reviewer agents: @reviewer (free), @reviewer-paid (paid fallback)\n" +
+                  "Dispatch @reviewer first. Reviewer agents: @reviewer (free), @reviewer-alt (alt fallback)\n" +
                   "To bypass: git commit --no-verify (only if you understand the risk)",
               };
             }

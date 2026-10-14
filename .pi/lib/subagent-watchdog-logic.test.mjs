@@ -20,6 +20,10 @@ import {
   sweep,
   buildDirective,
   parseRunIdFromResult,
+  extractSpawnInfo,
+  extractRunStatus,
+  resolveEntryKey,
+  filterLiveDirectives,
 } from "./subagent-watchdog-logic.mts";
 
 const MIN = 60_000;
@@ -371,4 +375,132 @@ test("evaluate: unknown runId in observation is a no-op", () => {
   const s = createEmptyState();
   recordObservation(s, "sa-nonexistent", undefined, "hello", NOW);
   assert.equal(Object.keys(s.entries).length, 0);
+});
+
+// --- extractSpawnInfo ---
+
+test("extractSpawnInfo: real ack shape with Template line", () => {
+  const info = extractSpawnInfo(
+    "Delegated: sa-ed5e1e55\nTemplate: reviewer · model: x\nUse this runId...",
+  );
+  assert.deepEqual(info, { runId: "sa-ed5e1e55", template: "reviewer" });
+});
+
+test("extractSpawnInfo: Spawned ack without Template", () => {
+  const info = extractSpawnInfo("Spawned: sa-abc12345def");
+  assert.deepEqual(info, { runId: "sa-abc12345def", template: null });
+});
+
+test("extractSpawnInfo: null on validation-error dump (phantom regression)", () => {
+  const dump =
+    'Validation failed for tool "delegate_task":\n' +
+    "  - must_do: must be string\n\n" +
+    "Received arguments:\n" +
+    '{..."context": "...Delegated: sa-ed5e1e55\\nTemplate: reviewer..."...}';
+  assert.equal(extractSpawnInfo(dump), null);
+});
+
+test("extractSpawnInfo: null on empty / non-verb text", () => {
+  assert.equal(extractSpawnInfo(""), null);
+  assert.equal(extractSpawnInfo("hello sa-abcdef01"), null);
+  assert.equal(extractSpawnInfo("  no match here"), null);
+});
+
+// --- extractRunStatus ---
+
+test("extractRunStatus: done from header line", () => {
+  const text =
+    "- sa-fec2e1（delegate · done · # reviewer: approved）:\n  Review body text";
+  assert.equal(extractRunStatus(text, "sa-fec2e1"), "done");
+});
+
+test("extractRunStatus: error from header line", () => {
+  const text = "- sa-bfdac（delegate · error · # coder: failed）:";
+  assert.equal(extractRunStatus(text, "sa-bfdac"), "error");
+});
+
+test("extractRunStatus: null when status word only in body text", () => {
+  const text =
+    "- sa-fec2e1（delegate · running · # reviewer）:\n  The agent said it is done with the task.";
+  assert.equal(extractRunStatus(text, "sa-fec2e1"), null);
+});
+
+test("extractRunStatus: null when run prefix absent", () => {
+  const text = "- sa-fec2e1（delegate · done · # reviewer）:";
+  assert.equal(extractRunStatus(text, "sa-zzzzzz"), null);
+  assert.equal(extractRunStatus("", "sa-fec2e1"), null);
+});
+
+test("extractRunStatus: 8-char truncation wiring shape (extension pins this)", () => {
+  // Collected wait_all headers truncate run ids to their first 8 CHARACTERS
+  // TOTAL: "sa-fec2e（" for full id "sa-fec2e1bc". The extension calls
+  // extractRunStatus(text, key.slice(0, 8)) — this test pins that contract.
+  const text = "- sa-fec2e（delegate · done · # reviewer: approved）:\n  body";
+  assert.equal(extractRunStatus(text, "sa-fec2e1bc".slice(0, 8)), "done");
+  // 9+ chars would miss the header — guard against regression to a longer slice.
+  assert.equal(extractRunStatus(text, "sa-fec2e1bc".slice(0, 9)), null);
+});
+
+// --- resolveEntryKey ---
+
+test("resolveEntryKey: exact match", () => {
+  const s = createEmptyState();
+  recordSpawn(s, "sa-fec2e1bc", "coder", NOW);
+  assert.equal(resolveEntryKey(s, "sa-fec2e1bc"), "sa-fec2e1bc");
+});
+
+test("resolveEntryKey: unique prefix match both directions", () => {
+  const s = createEmptyState();
+  recordSpawn(s, "sa-fec2e1bc", "coder", NOW);
+  assert.equal(resolveEntryKey(s, "sa-fec2e1"), "sa-fec2e1bc");
+  assert.equal(resolveEntryKey(s, "sa-fec2e1bc99"), "sa-fec2e1bc");
+});
+
+test("resolveEntryKey: null on ambiguous", () => {
+  const s = createEmptyState();
+  recordSpawn(s, "sa-aa0011", "coder", NOW);
+  recordSpawn(s, "sa-aa0022", "reviewer", NOW);
+  assert.equal(resolveEntryKey(s, "sa-aa"), null);
+});
+
+test("resolveEntryKey: null on absent", () => {
+  const s = createEmptyState();
+  recordSpawn(s, "sa-aa0011", "coder", NOW);
+  assert.equal(resolveEntryKey(s, "sa-bb"), null);
+  assert.equal(resolveEntryKey(s, ""), null);
+});
+
+// --- filterLiveDirectives ---
+
+function mkDirective(runId, action = "hang") {
+  return { runId, template: "coder", action, silentForMs: 20 * MIN, message: "msg" };
+}
+
+test("filterLiveDirectives: keeps active, drops done and absent", () => {
+  const s = createEmptyState();
+  recordSpawn(s, "sa-live01", "coder", NOW - 30 * MIN);
+  recordSpawn(s, "sa-done01", "coder", NOW - 60 * MIN);
+  recordObservation(s, "sa-done01", "done", "Done", NOW - 45 * MIN);
+
+  const live = filterLiveDirectives(s, [
+    mkDirective("sa-live01"),
+    mkDirective("sa-done01"),
+    mkDirective("sa-ghost9"),
+  ]);
+  assert.equal(live.length, 1);
+  assert.equal(live[0].runId, "sa-live01");
+});
+
+// --- recordObservation with parsed status (wait_all shape) ---
+
+test("recordObservation: status from extractRunStatus deactivates entry", () => {
+  const s = createEmptyState();
+  recordSpawn(s, "sa-fec2e1bc", "reviewer", NOW - 30 * MIN);
+  const collected =
+    "- sa-fec2e1（delegate · done · # reviewer: approved）:\n  LGTM";
+  const status = extractRunStatus(collected, "sa-fec2e1");
+  recordObservation(s, "sa-fec2e1bc", status, collected, NOW);
+  assert.equal(s.entries["sa-fec2e1bc"].active, false);
+  assert.equal(s.entries["sa-fec2e1bc"].status, "done");
+  assert.equal(evaluate(s, NOW + 20 * MIN).length, 0);
 });

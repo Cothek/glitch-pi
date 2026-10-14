@@ -13,15 +13,27 @@
  *      `delegate_task` tools (the end event carries no args — same pattern as
  *      stuck-detector.ts v2).
  *   2. tool_execution_end joins by toolCallId:
- *      - Spawn results → parse runId via parseRunIdFromResult, recordSpawn
- *      - get_result/wait_all → recordObservation (output + status)
- *      - stop → mark stopped
+ *      - Spawn results → extractSpawnInfo on the ack TEXT (first-line verb
+ *        anchor; isError results are skipped so echoed error dumps cannot
+ *        seed phantom entries), recordSpawn
+ *      - get_result (args.runId) AND wait_all (args.runIds array, fallback:
+ *        all active keys) → per-entry resolveEntryKey + per-run
+ *        extractRunStatus from the collected header lines → recordObservation
+ *        (done/error deactivate the entry immediately)
+ *      - stop → resolveEntryKey, mark stopped
  *   3. setInterval (2 min) calls evaluate() → writes directive file
- *   4. `context` event: if directive file exists, appends directive text to
- *      last message, deletes file (one-shot)
+ *   4. `context` event: if directive file exists, validates directives
+ *      against ACTIVE state entries (filterLiveDirectives, same at init),
+ *      appends surviving directive text to last message, deletes file
+ *      (one-shot). Nothing surviving → file deleted without injecting.
  *
  * CONSTRAINT: this extension NEVER calls the host's subagent tool. It only
  * detects + writes directives. Glitch acts on them.
+ *
+ * STATE ROOT: resolveStateDir() with GLITCH_WATCHDOG_STATE_DIR env override;
+ * default join(glitchRoot(), "data"). process.cwd() was the 2026-10-03
+ * two-root incident class — a pi launched from another folder reads/writes a
+ * different state file than the one the running session uses.
  */
 
 import {
@@ -41,9 +53,15 @@ import {
   sweep,
   buildDirective,
   parseRunIdFromResult,
+  extractSpawnInfo,
+  extractRunStatus,
+  resolveEntryKey,
+  filterLiveDirectives,
   type WatchdogState,
   type WatchdogDirective,
+  type WatchdogDirectiveFile,
 } from "../lib/subagent-watchdog-logic.mts";
+import { glitchRoot } from "../lib/root.mjs";
 
 const EVAL_INTERVAL_MS = 2 * 60 * 1000;
 const MAX_PENDING_ARGS = 64;
@@ -73,7 +91,10 @@ function safeWriteJson(path: string, data: unknown): void {
 }
 
 export default function (pi: ExtensionAPI) {
-  const dataDir = join(process.cwd(), "data");
+  // 2026-10-03 incident class: never root state at process.cwd(). Same fix
+  // as routing.ts — git checkout 07b0343 of this file regressed it to cwd
+  // and is restored here.
+  const dataDir = resolveStateDir();
   const STATE_FILE = join(dataDir, ".agent-watchdog.json");
   const DIRECTIVE_FILE = join(dataDir, ".agent-watchdog-directive.json");
 
@@ -90,12 +111,10 @@ export default function (pi: ExtensionAPI) {
   sweep(state, Date.now());
   safeWriteJson(STATE_FILE, state);
 
-  // Remove stale directive file on init (leftover from a crash).
-  try {
-    if (existsSync(DIRECTIVE_FILE)) unlinkSync(DIRECTIVE_FILE);
-  } catch {
-    // ignore
-  }
+  // Remove stale directive file on init (leftover from a crash), after
+  // validating its directives against live entries — stale entries' files
+  // are deleted outright; partially stale files are written back reduced.
+  pruneDirectiveFile(DIRECTIVE_FILE, state);
 
   // toolCallId → args captured at tool_execution_start.
   const pendingArgs = new Map<string, Record<string, unknown>>();
@@ -138,36 +157,69 @@ export default function (pi: ExtensionAPI) {
       const action = String(args.action ?? "");
       const resultText = extractResultText(event.result);
 
-      // --- Spawn: parse runId from result, record in state ---
+      // --- Spawn: parse runId from the ack text, record in state ---
       if (SPAWN_ACTIONS.has(action) || tool === "delegate_task") {
-        const runId = parseRunIdFromResult(event.result) ??
-          parseRunIdFromResult(resultText);
-        if (runId) {
-          const template = String(
-            args.template ?? args.agent ?? args.type ?? "unknown",
-          );
-          recordSpawn(state, runId, template, Date.now());
+        // Skip failed executions: a delegate_task that fails schema
+        // validation echoes its arguments JSON in the error result, and
+        // that JSON can quote a fixture ack ("Delegated: sa-xxxx") —
+        // parsing it seeds a phantom entry (live incident, this fix).
+        if ((event as any).isError) return;
+        const info = extractSpawnInfo(resultText);
+        if (info) {
+          const template =
+            info.template ??
+            String(args.template ?? args.agent ?? args.type ?? "unknown");
+          recordSpawn(state, info.runId, template, Date.now());
           safeWriteJson(STATE_FILE, state);
         }
         return;
       }
 
-      // --- Observe: get_result / wait_all → update observation ---
+      // --- Observe: get_result / wait_all → update observations ---
+      // wait_all passes runIds (array); get_result passes runId. For each
+      // run, resolve the live entry key (collected text truncates ids to
+      // 8 chars), parse per-run status from the collected header line, and
+      // record an observation — done/error deactivate the entry so finished
+      // agents stop accruing "silent for Xm".
       if (OBSERVE_ACTIONS.has(action)) {
-        const runId = String(args.runId ?? "");
-        const statusText = extractStatusFromResult(event.result);
-        if (runId && state.entries[runId]) {
-          recordObservation(state, runId, statusText, resultText, Date.now());
-          safeWriteJson(STATE_FILE, state);
+        const explicitStatus = extractStatusFromResult(event.result);
+        const rawIds: string[] = [];
+        if (typeof args.runId === "string" && args.runId) {
+          rawIds.push(args.runId);
         }
+        if (Array.isArray(args.runIds)) {
+          for (const id of args.runIds) {
+            if (typeof id === "string" && id) rawIds.push(id);
+          }
+        }
+        // wait_all without runIds collects everything → touch all active.
+        if (rawIds.length === 0 && action === "wait_all") {
+          rawIds.push(
+            ...Object.values(state.entries)
+              .filter((e) => e.active)
+              .map((e) => e.runId),
+          );
+        }
+        const now = Date.now();
+        let changed = false;
+        for (const rawId of rawIds) {
+          const key = resolveEntryKey(state, rawId);
+          if (!key) continue;
+          const statusText =
+            explicitStatus ?? extractRunStatus(resultText, key.slice(0, 8)) ??
+            extractRunStatus(resultText, rawId);
+          recordObservation(state, key, statusText, resultText, now);
+          changed = true;
+        }
+        if (changed) safeWriteJson(STATE_FILE, state);
         return;
       }
 
       // --- Stop: mark as stopped ---
       if (action === "stop") {
-        const runId = String(args.runId ?? "");
-        if (runId && state.entries[runId]) {
-          recordObservation(state, runId, "stopped", undefined, Date.now());
+        const key = resolveEntryKey(state, String(args.runId ?? ""));
+        if (key) {
+          recordObservation(state, key, "stopped", undefined, Date.now());
           safeWriteJson(STATE_FILE, state);
         }
         return;
@@ -211,10 +263,25 @@ export default function (pi: ExtensionAPI) {
   // --- Context event: inject directive into last message (one-shot) ---
   pi.on("context", async (event) => {
     try {
-      const payload = safeReadJson<{
-        directives: Array<WatchdogDirective & { message: string }>;
-      }>(DIRECTIVE_FILE);
+      const payload = safeReadJson<WatchdogDirectiveFile>(DIRECTIVE_FILE);
       if (!payload?.directives?.length) return;
+
+      // Validate against live entries before injecting: a stale file keeps
+      // re-flagging agents that finished long ago. Nothing surviving →
+      // delete the file and inject nothing.
+      const live = filterLiveDirectives(state, payload.directives);
+      if (live.length === 0) {
+        try {
+          unlinkSync(DIRECTIVE_FILE);
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      if (live.length !== payload.directives.length) {
+        payload.directives = live;
+        safeWriteJson(DIRECTIVE_FILE, payload);
+      }
 
       const messages = event.messages as AgentMessage[];
       if (!messages?.length) return;
@@ -260,6 +327,20 @@ export default function (pi: ExtensionAPI) {
 
 // --- Helpers ---
 
+/**
+ * State directory root. GLITCH_WATCHDOG_STATE_DIR overrides (tests,
+ * side-by-side debugging). Default join(glitchRoot(), "data") — never
+ * process.cwd(): the 2026-10-03 two-root incident class (see root.mjs
+ * header), which routing.ts fixed and this file regressed on.
+ */
+export function resolveStateDir(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const override = env.GLITCH_WATCHDOG_STATE_DIR;
+  if (override) return override;
+  return join(glitchRoot(), "data");
+}
+
 function extractResultText(result: unknown): string {
   if (!result) return "";
   if (typeof result === "string") return result;
@@ -275,6 +356,39 @@ function extractResultText(result: unknown): string {
     if (typeof r.output === "string") return r.output;
   }
   return String(result);
+}
+
+/**
+ * Validate a directive file against live entries. All-stale or empty →
+ * delete the file (it must never inject again). Partially stale → rewrite
+ * with only the survivors.
+ */
+function pruneDirectiveFile(
+  directiveFile: string,
+  state: WatchdogState,
+): void {
+  const payload = safeReadJson<WatchdogDirectiveFile>(directiveFile);
+  if (!payload?.directives?.length) {
+    try {
+      if (existsSync(directiveFile)) unlinkSync(directiveFile);
+    } catch {
+      // ignore
+    }
+    return;
+  }
+  const live = filterLiveDirectives(state, payload.directives);
+  try {
+    if (live.length === 0) {
+      unlinkSync(directiveFile);
+      return;
+    }
+    if (live.length !== payload.directives.length) {
+      payload.directives = live;
+      safeWriteJson(directiveFile, payload);
+    }
+  } catch {
+    // ignore — a failed prune is harmless; the injection path re-validates
+  }
 }
 
 function extractStatusFromResult(result: unknown): string | undefined {

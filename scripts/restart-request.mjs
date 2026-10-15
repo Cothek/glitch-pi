@@ -44,6 +44,11 @@ const NAME = "restart-stack";
 const WATCHDOG = join(ROOT, "scripts", "restart-watchdog.mjs");
 const WATCHDOG_NAME = "restart-watchdog";
 const WATCHDOG_TIMEOUT_SEC = 180;
+// Extra slack on the watchdog's phase-1 (wait-for-kill) deadline when
+// --apply-updates is set. The engine runs check-updates.mjs --apply BEFORE
+// the kill (measured ~2m50s), so the default 53s window false-fires
+// "no-restart-signal" while the restart is still on track.
+const WATCHDOG_UPDATE_GRACE_SEC = 600;
 
 const DEFAULT_NOTE = "Server restarted on request. Continue where you left off.";
 // Appended to every resume note so the post-restart session reads the
@@ -140,9 +145,15 @@ export function buildInnerCommand({ root, delaySec, continuePath, continueId, co
  * engine's -DelaySec so the watchdog's phase-1 deadline (delay + down-wait)
  * lines up with the engine's kill window. Timeout clamped to 30..600, ports
  * clamped to 1..65535, note re-sanitized (idempotent) and only emitted when
- * non-empty. Pure: no FS, no env, no spawning.
+ * non-empty. updateGrace extends ONLY the watchdog's phase-1 deadline; it is
+ * emitted only when > 0 so the plain-restart path stays byte-identical.
+ * WHY it exists: with -ApplyUpdates the engine runs check-updates.mjs --apply
+ * BEFORE the kill (measured ~2m50s), so the default delay+down-wait window
+ * (8+45=53s) expires mid-update and the watchdog false-reports
+ * "no-restart-signal" even though the restart succeeds. Pure: no FS, no env,
+ * no spawning.
  */
-export function buildWatchdogCommand({ root, nodeExe, delaySec, webPort, authPort, timeoutSec, note }) {
+export function buildWatchdogCommand({ root, nodeExe, delaySec, webPort, authPort, timeoutSec, updateGrace, note }) {
   const r = String(root ?? "");
   const node = String(nodeExe ?? "");
   const d = Math.max(0, Math.floor(Number(delaySec) || 0));
@@ -150,6 +161,8 @@ export function buildWatchdogCommand({ root, nodeExe, delaySec, webPort, authPor
   const a = Math.max(1, Math.floor(Number(authPort) || 4103));
   const t = Math.min(600, Math.max(30, Math.floor(Number(timeoutSec) || WATCHDOG_TIMEOUT_SEC)));
   let cmd = `"${node}" "${join(r, "scripts", "restart-watchdog.mjs")}" --delay ${d} --timeout ${t} --web-port ${w} --auth-port ${a}`;
+  const g = Math.max(0, Math.floor(Number(updateGrace) || 0));
+  if (g > 0) cmd += ` --update-grace ${g}`;
   const n = sanitizeNote(note ?? "");
   if (n) cmd += ` --note "${n}"`;
   return cmd;
@@ -252,6 +265,7 @@ function printHelp() {
     "  --session <path>    session jsonl path (overrides PI_SESSION_FILE)",
     "  --session-id <id>   live conversation id (rarely stable)",
     "  --apply-updates     run scripts/check-updates.mjs --apply --yes before the kill",
+    "                      (extends the watchdog phase-1 window by 600s to cover it)",,
     "  --no-watchdog       skip the post-restart health watchdog",
     "  --json              print one JSON object instead of a short line",
     "  --dry-run           print the inner command, do not spawn",
@@ -341,12 +355,16 @@ function main() {
   // Post-restart watchdog command (shown in --dry-run; spawned below).
   // Mirrors the engine delay so the watchdog's phase-1 deadline lines up with
   // the engine's kill window.
+  // The +updates path kills late (updates run first), so the watchdog's
+  // phase-1 deadline needs the extra grace or it false-fires.
+  const updateGrace = parsed.applyUpdates ? WATCHDOG_UPDATE_GRACE_SEC : 0;
   const watchdogCommand = parsed.noWatchdog
     ? null
     : buildWatchdogCommand({
         root: ROOT,
         nodeExe: process.execPath,
         delaySec: delay,
+        updateGrace,
         note: parsed.note,
       });
 

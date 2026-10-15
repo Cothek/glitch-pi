@@ -103,10 +103,21 @@ test("parseArgs: range checks exit cleanly", () => {
   assert.match(parseArgs(["--timeout", "5"]).error, /--timeout/); // below 30
   assert.match(parseArgs(["--timeout", "9999"]).error, /--timeout/); // above 600
   assert.match(parseArgs(["--down-wait", "9999"]).error, /--down-wait/);
+  assert.match(parseArgs(["--update-grace", "1801"]).error, /--update-grace/); // above 1800
+  assert.match(parseArgs(["--update-grace", "abc"]).error, /--update-grace/); // non-numeric
   assert.match(parseArgs(["--web-port", "0"]).error, /--web-port/);
   assert.match(parseArgs(["--auth-port", "70000"]).error, /--auth-port/);
   assert.match(parseArgs(["--note"]).error, /--note/);
   assert.match(parseArgs(["--bogus"]).error, /unknown flag/);
+});
+
+test("parseArgs: --update-grace accepts 0..1800, defaults to 0", () => {
+  assert.equal(parseArgs([]).updateGrace, 0);
+  const out = parseArgs(["--update-grace", "600"]);
+  assert.equal(out.updateGrace, 600);
+  assert.equal(out.error, null);
+  assert.equal(parseArgs(["--update-grace", "0"]).updateGrace, 0);
+  assert.equal(parseArgs(["--update-grace", "1800"]).updateGrace, 1800);
 });
 
 test("buildRecoveryCommand: engine with -SkipUpdates, real ports, no port overrides", () => {
@@ -182,6 +193,7 @@ test("buildReport and buildMarker: shapes", () => {
     delaySec: 0,
     downWaitSec: 45,
     timeoutSec: 180,
+    updateGraceSec: 600,
     webPort: 8787,
     authPort: 4103,
     poll: {
@@ -194,6 +206,7 @@ test("buildReport and buildMarker: shapes", () => {
   });
   assert.equal(report.outcome, "success");
   assert.equal(report.version, 1);
+  assert.equal(report.config.updateGraceSec, 600);
   assert.equal(report.recovery.attempted, false);
 
   const marker = buildMarker(report);

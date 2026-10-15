@@ -32,7 +32,7 @@ function onUiAction(action, handler) {
 // Header button state: poll /state and stamp data-dc-state on the button.
 // The host re-renders topbar items on any ui update, so the stamp is
 // reapplied every tick rather than assumed stable.
-const BTN_SEL = 'button.plugin-topbar-item[data-tip^="Desktop control"]';
+const BTN_SEL = 'button.plugin-topbar-item[data-tip^="Desktop control"], button.bar-item[data-bar-item^="desktop-control:"]';
 async function paintHeader() {
   try {
     const s = await fetch(API_BASE + '/state').then(r => r.json());
@@ -76,15 +76,19 @@ try { setInterval(() => { if (!headerBound) bindHeaderOnce(); }, 1500); } catch 
 
 const STYLE_CSS = `
 .dc-wrap{font:13px/1.5 var(--sans,system-ui,sans-serif);color:var(--text);padding:12px;display:flex;flex-direction:column;gap:12px;height:100%;box-sizing:border-box}
-/* Header button: icon-only, colored by plugin state.
-   The host renders plugin topbar actions as button.plugin-topbar-item with
+/* Header button: icon-only, colored by plugin state. Two host generations:
+   Host <=0.104.x renders plugin topbar actions as button.plugin-topbar-item with
    data-tip = hint ?? label, so the stable "Desktop control" prefix targets only
-   our button. Inside it the icon is ALSO a span (.plugin-icon-svg), so the hide
+   our button; inside it the icon is ALSO a span (.plugin-icon-svg), so the hide
    rule keys on the class-less LABEL span only - a bare span selector collapsed
-   the icon too and the button rendered as an empty pill. */
-button.plugin-topbar-item[data-tip^="Desktop control"] span:not([class]){position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-button.plugin-topbar-item[data-tip^="Desktop control"][data-dc-state="on"]{color:var(--green);border-color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
-button.plugin-topbar-item[data-tip^="Desktop control"][data-dc-state="off"]{color:var(--text-faint)}
+   the icon too and the button rendered as an empty pill.
+   Host >=0.105.x renders the button via the unified bar-item renderer as
+   button.bar-item with data-bar-item = "<pluginId>:<entryId>" and the label in
+   span.bar-item-text. Keying on the data-bar-item "desktop-control:" prefix is
+   stabler than tooltip text. Both generations are matched below. */
+button.plugin-topbar-item[data-tip^="Desktop control"] span:not([class]), button.bar-item[data-bar-item^="desktop-control:"] span.bar-item-text{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+button.plugin-topbar-item[data-tip^="Desktop control"][data-dc-state="on"], button.bar-item[data-bar-item^="desktop-control:"][data-dc-state="on"]{color:var(--green);border-color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+button.plugin-topbar-item[data-tip^="Desktop control"][data-dc-state="off"], button.bar-item[data-bar-item^="desktop-control:"][data-dc-state="off"]{color:var(--text-faint)}
 .dc-title{font-weight:600}
 .dc-sub{color:var(--text-faint);font-size:11px}
 .dc-card{border:1px solid var(--border-soft);border-radius:8px;background:var(--bg-elev2);padding:10px 12px;display:flex;flex-direction:column;gap:6px;font-family:var(--mono,monospace);font-size:11.5px;color:var(--text-dim)}

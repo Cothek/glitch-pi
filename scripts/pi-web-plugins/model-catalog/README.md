@@ -50,6 +50,18 @@ The plugin returns the parsed engine object verbatim and surfaces the
 engine's `blocked[]` field (pin-guard refusals) to the client unchanged,
 so a refused change explains itself.
 
+## Sync reconciliation
+
+A real sync (no `--catalog`) probes every currently enabled chat model with
+a 1-token inference call, concurrency 4. Only a deterministic HTTP 404
+(NIM "Function not found" - the deployment is gone even though the model is
+still listed in /v1/models) removes a model; 429/5xx/400/timeout keep it.
+Removed ids leave the state, models.json and the store (with backup).
+Chat ids the state has never seen are enabled automatically so they reach
+the picker; tier X stays excluded. models.json is written only when the
+reconciled enabled set actually differs, so a no-op refresh creates no
+backup churn. Fixture syncs (tests) skip probing entirely and stay offline.
+
 ## Pins
 
 Pins live in the state file's top-level `pins` array (sorted, deduped bare

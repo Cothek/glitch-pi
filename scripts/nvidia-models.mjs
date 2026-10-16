@@ -402,6 +402,12 @@ function writeState(stateFile, state) {
   writeJsonAtomic(stateFile, state);
 }
 
+// Carry the known-dead list through any state rewrite. Verbs that do not
+// probe (enable/disable/apply/restore) must not forget which ids are dead.
+function carryDead(prevState) {
+  return Array.isArray(prevState && prevState.dead) ? prevState.dead : [];
+}
+
 function diffFromState(prevState, currentRows) {
   const prevIds = new Set((prevState.models || []).map((m) => m.id));
   const currIds = new Set(currentRows.map((m) => m.id));
@@ -677,8 +683,86 @@ function finalizeReport(partial) {
     pins_changed: [],
     warnings: [],
     pruned_store: [],
+    removed_dead: [],
+    added_new: [],
+    probe_inconclusive: [],
+    probe_skipped: false,
     counts: { chat: 0, non_chat: 0, enabled: 0, recommended: 0 }
   }, partial || {});
+}
+
+// One-token inference probe. NVIDIA's /v1/models catalog keeps LISTING
+// models whose deployment is gone, so the only trustworthy dead signal is
+// an inference 404 ("Function not found"). Everything else (429, 5xx, 400,
+// timeout, network error) is inconclusive: the model stays.
+async function probeModel(apiKey, id) {
+  try {
+    const res = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: id, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 }),
+      signal: AbortSignal.timeout(15000)
+    });
+    // Drain the body so the socket is released back to the pool.
+    try { await res.text(); } catch { /* body read failure does not change the verdict */ }
+    return { dead: res.status === 404, status: res.status };
+  } catch (e) {
+    return { dead: false, status: 0, error: e && e.message ? e.message : String(e) };
+  }
+}
+
+// Reconcile classified rows against the previous state and a probe result:
+//  - dead ids vanish from the rows entirely (state forgets them; a pin on a
+//    dead id is KEPT, so the guard re-arms automatically if the id returns);
+//  - ids the state has never seen are NEW: chat rows flip enabled=true so
+//    they reach the picker (and only chat ids are reported as added_new -
+//    tier X ids land in state rows but never in the picker),
+//  - everything else keeps its decided enabled state.
+// PURE: no I/O, no fetching.
+function reconcileRows(rows, prevState, deadIds) {
+  const dead = deadIds instanceof Set ? deadIds : new Set(deadIds || []);
+  const known = new Set(((prevState && Array.isArray(prevState.models)) ? prevState.models : []).map((m) => m && m.id).filter(Boolean));
+  const out = [];
+  const addedIds = [];
+  const removedDeadIds = [];
+  for (const r of rows) {
+    if (dead.has(r.id)) { removedDeadIds.push(r.id); continue; }
+    const row = { ...r };
+    if (!known.has(r.id)) {
+      if (row.category === 'chat') {
+        row.enabled = true;
+        addedIds.push(r.id);
+      }
+    }
+    out.push(row);
+  }
+  return { rows: out, addedIds, removedDeadIds };
+}
+
+// Probe the enabled chat models of the live models.json list. Returns
+// { deadIds, inconclusive }. Concurrency-bounded so a full refresh stays
+// well inside the panel's 180s engine timeout.
+async function probeEnabledModels(apiKey, ids) {
+  const deadIds = [];
+  const aliveIds = [];
+  const inconclusive = [];
+  const queue = [...ids];
+  const workers = [];
+  const CONCURRENCY = 4;
+  for (let w = 0; w < Math.min(CONCURRENCY, queue.length); w++) {
+    workers.push((async () => {
+      for (;;) {
+        const id = queue.shift();
+        if (id === undefined) break;
+        const r = await probeModel(apiKey, id);
+        if (r.dead) deadIds.push(id);
+        else if (r.status >= 200 && r.status < 500) aliveIds.push(id);
+        else inconclusive.push({ id, status: r.status, error: r.error || '' });
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return { deadIds: deadIds.sort(), aliveIds, inconclusive };
 }
 
 async function loadCatalog(args) {
@@ -719,13 +803,80 @@ async function runSync(args) {
   // enabled baseline is the live models.json, not prevState, so a
   // first run on an empty state cannot report everything as disabled.
   const liveSet = liveEnabledSet(modelsJson);
-  const rows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, liveSet);
+  let rows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, liveSet);
   const { pins: pinList } = loadPinSet(prevState, REPO_ROOT);
+
+  // Reconciliation: the catalog keeps LISTING dead deployments, so a real
+  // sync probes every currently enabled chat model and drops the ones that
+  // answer 404; chat ids the state has never seen are enabled so they reach
+  // the picker. Fixture syncs (--catalog, used by the offline tests) skip
+  // probing entirely.
+  let removedDeadIds = [];
+  let addedIds = [];
+  let inconclusive = [];
+  let probeSkipped = false;
+  // Pass 1: mark never-seen chat ids as enabled so the probe set covers
+  // them too (a dead endpoint NVIDIA still lists must not sneak back in as
+  // a "new" model).
+  const marked = reconcileRows(rows, prevState, []);
+  rows = marked.rows;
+  let deadKnown = carryDead(prevState);
+  if (args.catalog) {
+    // Fixture mode (offline tests): skip probing, keep reconciliation so
+    // the pure logic is exercised without network access.
+    probeSkipped = true;
+    addedIds = marked.addedIds;
+  } else {
+    const probeSet = rows.filter((r) => r.tier !== 'X' && r.enabled).map((r) => r.id);
+    if (probeSet.length > 0) {
+      const apiKey = loadApiKey(args.keysFile);
+      const probe = await probeEnabledModels(apiKey, probeSet);
+      inconclusive = probe.inconclusive;
+      const deadSet = new Set(probe.deadIds);
+      const aliveSet = new Set(probe.aliveIds);
+      // Pass 2: drop the probed-dead ids; report the net new chat ids.
+      const final = reconcileRows(rows, prevState, probe.deadIds);
+      rows = final.rows;
+      addedIds = marked.addedIds.filter((id) => !deadSet.has(id));
+      // Report only removals that were actually picker-visible; ids already
+      // known-dead are re-probed for revival but are not news.
+      removedDeadIds = final.removedDeadIds.filter((id) => liveSet.has(id));
+      // Maintain the known-dead list: add probed-dead, clear definitive
+      // revivals (any non-404 HTTP answer proves the deployment exists).
+      deadKnown = normalizePinList([...new Set([...carryDead(prevState), ...probe.deadIds])].filter((id) => !aliveSet.has(id)));
+    } else {
+      addedIds = marked.addedIds;
+    }
+  }
+
+  // Write models.json only when the reconciled enabled set actually differs
+  // from the live file (no backup churn on a no-op refresh). Dead removals
+  // and new chat enables both surface here.
+  const targetSet = new Set(rows.filter((r) => r.enabled && r.tier !== 'X').map((r) => r.id));
+  const setDiffers = targetSet.size !== liveSet.size || [...targetSet].some((id) => !liveSet.has(id));
+  let applied = { backup: '', written: false, count: 0, restored: false, error: '' };
+  let storePrune = { pruned: [], written: false, backup: '', error: '' };
+  if (setDiffers) {
+    applied = applyToModelsJson(args.modelsFile, args.backupDir, rows, args.dryRun);
+    if (applied.error) {
+      out.ok = false;
+      out.error = applied.error;
+      out.removed_dead = removedDeadIds;
+      out.added_new = addedIds;
+      out.probe_inconclusive = inconclusive;
+      out.probe_skipped = probeSkipped;
+      return out;
+    }
+    const trackedIds = new Set([...rows.map((r) => r.id), ...removedDeadIds]);
+    storePrune = pruneStore(args.storeFile, args.storeBackupDir, targetSet, trackedIds, args.dryRun);
+  }
+
   const state = {
     synced_at: new Date().toISOString(),
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
     pins: normalizePinList([...pinList]),
+    dead: normalizePinList(deadKnown),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, state);
@@ -733,6 +884,12 @@ async function runSync(args) {
   out.synced_at = state.synced_at;
   Object.assign(out, buildBaseReport(rows, prevState));
   out.pins = normalizePinList([...pinList]);
+  out.removed_dead = removedDeadIds;
+  out.added_new = addedIds;
+  out.probe_inconclusive = inconclusive;
+  out.probe_skipped = probeSkipped;
+  out.backup = applied.backup;
+  out.pruned_store = storePrune.pruned;
   out.models = rows;
   out.counts = summarize(rows);
   return out;
@@ -805,6 +962,7 @@ async function runApplyRecommended(args) {
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
     pins: normalizePinList([...pins]),
+    dead: carryDead(prevState),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, nextState);
@@ -899,6 +1057,7 @@ async function runEnableDisable(args) {
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
     pins: normalizePinList([...pins]),
+    dead: carryDead(prevState),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, nextState);
@@ -1039,11 +1198,13 @@ async function runRestoreBackup(args) {
       const m = matchTierX(r.id, rules.tierX);
       if (m) { r.tier = 'X'; r.category = categoryForPattern(m, rules.category); r.relevance = 'excluded'; r.why = whyForTier('X'); }
     }
+    const stateBeforeWrite = readStateOrEmpty(args.stateFile);
     const state = {
       synced_at: new Date().toISOString(),
       source: 'restore',
       models: rows,
-      pins: loadPinSet(readStateOrEmpty(args.stateFile), REPO_ROOT).pins,
+      pins: loadPinSet(stateBeforeWrite, REPO_ROOT).pins,
+      dead: carryDead(stateBeforeWrite),
       counts: summarize(rows)
     };
     writeState(args.stateFile, state);
@@ -1149,6 +1310,8 @@ export {
   loadPinSet,
   seedPinList,
   pruneStore,
+  reconcileRows,
+  probeModel,
   liveEnabledSet,
   HARD_PINNED_IDS,
   TIER_WHY,

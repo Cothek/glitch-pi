@@ -293,8 +293,21 @@ function createInstance(container, ctx) {
     }
     // Refresh the status payload from the route after a mutation.
     state.diag.lastWrite = `${label} @ ${new Date().toLocaleTimeString()}`;
-    state.notice = null;
     state.rowMarks.clear();
+    // Sync reconciliation report: dead endpoints removed, new ones enabled.
+    if (action === "sync" && ((payload.removed_dead?.length ?? 0) > 0 || (payload.added_new?.length ?? 0) > 0)) {
+      const fmt = (list) => {
+        const l = Array.isArray(list) ? list : [];
+        return l.length <= 3 ? l.join(", ") : `${l.slice(0, 3).join(", ")} +${l.length - 3} more`;
+      };
+      const parts = [];
+      if (payload.removed_dead?.length) parts.push(`removed ${payload.removed_dead.length} dead: ${fmt(payload.removed_dead)}`);
+      if (payload.added_new?.length) parts.push(`added ${payload.added_new.length} new: ${fmt(payload.added_new)}`);
+      state.notice = `Sync: ${parts.join("; ")}.`;
+      state.noticeKind = "info";
+    } else {
+      state.notice = null;
+    }
     if (Array.isArray(payload.models)) {
       state.payload = payload;
       state.error = null;

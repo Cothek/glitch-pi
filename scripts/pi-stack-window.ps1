@@ -238,11 +238,13 @@ try {
     } else {
         Write-Host "  starting cloudflared (tunnel tied to this window) ..." -ForegroundColor Cyan
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $TunnelLog) | Out-Null
+        # --logfile is a tunnel-level option and must precede "run" (cloudflared 2026.10.0 rejects it after run).
         $tunnel = Start-Process -FilePath $CloudflaredBin `
-            -ArgumentList @("tunnel", "--config", "`"$TunnelConfig`"", "run", "--logfile", "`"$TunnelLog`"") `
+            -ArgumentList @("tunnel", "--config", "`"$TunnelConfig`"", "--logfile", "`"$TunnelLog`"", "run") `
             -NoNewWindow -PassThru
         Start-Sleep -Milliseconds 1500
         if ($tunnel.HasExited) {
+            $tunnel.WaitForExit()
             Write-Host "  WARNING: cloudflared exited immediately (code $($tunnel.ExitCode))." -ForegroundColor Yellow
             Write-Host "  Remote access will NOT work. Last lines of $TunnelLog :" -ForegroundColor DarkGray
             if (Test-Path $TunnelLog) { Get-Content $TunnelLog -Tail 5 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }

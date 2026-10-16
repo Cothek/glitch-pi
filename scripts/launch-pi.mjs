@@ -33,6 +33,7 @@ const ROOT_DIR = resolve(SCRIPT_DIR, '..');
 // for the live install, where ROOT_DIR is the previously hardcoded path.
 const PI_ROOT = process.env.GLITCH_PI_ROOT || ROOT_DIR;
 const isWin = process.platform === 'win32';
+const isMac = process.platform === 'darwin';
 
 const MAGENTA = '\x1b[35m';
 const CYAN = '\x1b[36m';
@@ -233,6 +234,63 @@ function startGitnexusSync() {
   }
 }
 
+// ---- Handy voice input (optional, non-fatal) ----
+// Restored from the old launch chain (the dead launchServer() in
+// server-mode.mjs): voice input comes up on every launch, in every mode.
+// Self-contained on purpose — server-mode.mjs is legacy and must not be
+// imported. Detached spawn: Handy never blocks the launcher, and the stop
+// scripts must never kill it.
+function isProcessRunning(name) {
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('tasklist', ['/NH', '/FI', `IMAGENAME eq ${name}.exe`], { encoding: 'utf-8', timeout: 5000 });
+      return out.includes(`${name}.exe`);
+    } else if (process.platform === 'darwin') {
+      execFileSync('pgrep', ['-x', name], { encoding: 'utf-8', timeout: 3000 });
+      return true;
+    } else {
+      execFileSync('pgrep', ['-f', 'Handy'], { encoding: 'utf-8', timeout: 3000 });
+      return true;
+    }
+  } catch {
+    return false;
+  }
+}
+
+function startHandyVoice() {
+  try {
+    const procName = isWin ? 'handy' : 'Handy';
+    if (isProcessRunning(procName)) {
+      log(DARK_GREEN, '  Handy already running');
+      return;
+    }
+    const handyBin = isWin
+      ? join(ROOT_DIR, 'handy-voice', 'Handy', 'handy.exe')
+      : isMac
+        ? join(ROOT_DIR, 'handy-voice', 'Handy.app', 'Contents', 'MacOS', 'Handy')
+        : join(ROOT_DIR, 'handy-voice', 'Handy.AppImage');
+    if (!existsSync(handyBin)) {
+      log(DARK_YELLOW, '  Handy not found (optional). Voice input disabled.');
+      return;
+    }
+    log(CYAN, '  Starting Handy voice input...');
+    if (isMac) {
+      const handyApp = join(ROOT_DIR, 'handy-voice', 'Handy.app');
+      if (existsSync(handyApp)) {
+        spawn('open', [handyApp], { detached: true, stdio: 'ignore' }).unref();
+      } else {
+        const proc = spawn(handyBin, [], { detached: true, stdio: 'ignore' });
+        proc.unref();
+      }
+    } else {
+      const proc = spawn(handyBin, [], { detached: true, stdio: 'ignore', windowsHide: true });
+      proc.unref();
+    }
+  } catch (e) {
+    log(YELLOW, `  Handy start failed (optional, non-fatal): ${e.message || e}`);
+  }
+}
+
 // ---- 2. Pi stack (web-ui + auth proxy) ----
 // windowed = one visible PowerShell window runs the whole stack; closing that
 // window stops it. headless = start-detached.ps1 (CREATE_NO_WINDOW), survives
@@ -401,6 +459,9 @@ async function main() {
     log(RED, `  ERROR: Pi workspace not found: ${PI_ROOT}`);
     process.exit(1);
   }
+
+  // Handy voice input: runs in every mode (--tui, --web, --stack-only).
+  startHandyVoice();
 
   // Interface choice: explicit flag > saved preference > interactive menu.
   // The saved pick is written ONLY on a real choice (flag or menu answer) —

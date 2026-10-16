@@ -28,7 +28,7 @@ const POLL_MS = 15000;
 const STYLE_ID = "agent-models-style";
 const MOUNT_LABEL = "agent-models";
 /** Keep in sync with manifest.json version (shown in the diag line). */
-const PLUGIN_VERSION = "0.6.1";
+const PLUGIN_VERSION = "0.7.0";
 /**
  * Render cap. Deliberately above any realistic catalog size: the catalog is ~500
  * entries and these are plain DOM rows, not a virtual list.
@@ -1408,7 +1408,8 @@ function createInstance(container, ctx) {
 			if (!rows.length) {
 				const msg = state.report.rows?.length
 					? "No agents match this filter."
-					: `No agent files in ${state.report.agentsDir ?? ".pi/agents"}/. Create one to see it here.`;
+					: `No agent files in ${state.report.agentsDir ?? ".pi/agents"}/. Create one to see it here.` +
+					(state.report.fallbackHint ? ` ${state.report.fallbackHint}` : "");
 				list.appendChild(el("div", "am-empty", msg));
 				renderDiag();
 				return;

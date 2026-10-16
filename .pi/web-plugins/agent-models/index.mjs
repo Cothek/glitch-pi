@@ -11,9 +11,13 @@
  *   catalog : host.models.list() -> [{id:"provider/model", provider, vision}]
  *             from the live runtime, so it means "authenticated and usable"
  *
- * WHY NOTHING ELSE IS READ: user-scope agents (~/.pi/agent/agents) live outside
- * the workspace and would need an access grant; phase 1 covers the project
- * roster and says so instead of silently omitting them.
+ * CROSS-PROJECT FALLBACK: when the workspace has no .pi/agents/*.md files, the
+ * plugin falls back to the glitch-pi repo's agents directory at
+ * E:/Glitch AI/glitch-pi/.pi/agents using host.fs.requestAccess. The grant is
+ * requested LAZILY (only when the workspace roster is empty) and cached per
+ * activation. If denied, the page keeps the empty state with a fallbackHint
+ * explaining how to grant access. Write paths (/set-model, /set-models, /restore)
+ * resolve through the same helper so validation and backups work under the fallback.
  *
  * SURFACES
  *   0. composer button (chat bar, right of the thinking chip) -> opens the page
@@ -37,6 +41,23 @@
  * requested model must exist in the live catalog or be an explicit "inherit",
  * the file is backed up before the first byte changes, and the edit itself only
  * rewrites the `model:` line so comments and key order survive untouched.
+ *
+ * SURFACES
+ *   0. composer button (chat bar, right of the thinking chip) -> opens the page
+ *      via kind:"view": the stock client navigates to view:"plugin:agent-models"
+ *      on click, so no client handler is involved.
+ *   1. right-panel tab (manifest "view": true) -> client fetches GET /state
+ *   2. GET  /plugins-api/agent-models/state     -> JSON report (catalog, models, facets, configs)
+ *   3. POST /plugins-api/agent-models/set-model  -> rewrite ONE agent's model pin
+ *   3b. POST /plugins-api/agent-models/set-models -> rewrite MANY agents' model pin
+ *       in one round trip (multi-select in the panel; same validation + per-agent
+ *       backup as /set-model, per-agent results so a partial failure is visible)
+ *   4. POST /plugins-api/agent-models/restore   -> restore an agent's newest backup
+ *   5. GET  /plugins-api/agent-models/configs    -> full saved-config list (with pins)
+ *   6. POST /plugins-api/agent-models/configs/save   -> snapshot current pins under a name
+ *   7. POST /plugins-api/agent-models/configs/apply  -> batch-set all pins from a saved config
+ *   8. POST /plugins-api/agent-models/configs/delete -> remove a saved config
+ *   9. /agent-models slash command -> same table as text, no browser needed
  */
 
 import { definePlugin } from "./sdk/index.mjs";
@@ -59,6 +80,12 @@ const resolver = await import(new URL(`./resolver.mjs?v=${IMPORT_TAG}`, import.m
 const { buildReport, formatCostShort, formatCostTitle, formatReportTable, parseAgentFile, setModelInFrontmatter } = resolver;
 
 const AGENTS_DIR = ".pi/agents";
+/** Fallback agents directory: the glitch-pi repo's agents folder.
+ *  Normalized with forward slashes for cross-platform consistency.
+ *  requestAccess grants read+write outside the workspace (verified against
+ *  plugins.js allowAbs which accepts paths inside the workspace OR in the
+ *  plugin grants table). */
+const FALLBACK_AGENTS_DIR = "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/");
 /** Backups live INSIDE the workspace on purpose: cross-directory writes would
  *  need a separate user directory grant, workspace writes do not. */
 const BACKUP_DIR = ".pi/agent-models/backups";
@@ -77,7 +104,7 @@ const STATE_TTL_MS = 5000;
  */
 const CONFIGS_PATH = ".pi/agent-models/configs.json";
 
-const EXCLUDED_AGENTS = new Set(["glitch-omni", "memory-paid"]);
+const EXCLUDED_AGENTS = new Set(["glitch-omni"]);
 
 async function listAgentFiles(host) {
 	try {
@@ -91,6 +118,14 @@ async function listAgentFiles(host) {
 		return [];
 	}
 }
+
+/**
+ * Resolve the agents directory to use for reads and writes.
+ * Workspace wins when non-empty; otherwise fallback (with lazy grant).
+ * Returns { dir, fallbackHint } where fallbackHint is set when the grant
+ * was denied or failed (so the UI can explain how to grant access).
+ */
+
 
 async function readCatalog(host) {
 	try {
@@ -222,18 +257,61 @@ export default definePlugin({
 		let cacheAt = 0;
 		let catalogSize = 0;
 
+		// Per-activation cache for the fallback directory resolution
+		let fallbackCache = null;
+
+		/** Resolve the agents directory to use for reads and writes.
+		 * Workspace wins when non-empty; otherwise fallback (with lazy grant).
+		 * Returns { dir, fallbackHint } where fallbackHint is set when the grant
+		 * was denied or failed (so the UI can explain how to grant access). */
+		async function resolveAgentsDir(host) {
+			const workspaceFiles = await listAgentFiles(host);
+			if (workspaceFiles.length > 0) {
+				return { dir: AGENTS_DIR, fallbackHint: null };
+			}
+
+			// Workspace is empty — try the fallback directory with lazy grant.
+			// Cache the outcome per activation so requestAccess fires once, not on every poll.
+			if (fallbackCache === null) {
+				try {
+					const granted = await host.fs.requestAccess(FALLBACK_AGENTS_DIR, "Read agent model pins from the glitch-pi repository");
+					if (granted) {
+						fallbackCache = { dir: FALLBACK_AGENTS_DIR, fallbackHint: null };
+					} else {
+						fallbackCache = { dir: FALLBACK_AGENTS_DIR, fallbackHint: `Access to the fallback agents directory (${FALLBACK_AGENTS_DIR}) was denied. Grant it in Settings > Interface Plugins > Agent Models to see the glitch-pi agent roster.` };
+					}
+				} catch (err) {
+					fallbackCache = { dir: FALLBACK_AGENTS_DIR, fallbackHint: `Failed to request access to the fallback agents directory: ${err?.message ?? err}` };
+				}
+			}
+			return fallbackCache;
+		}
+
 		/** Collect + classify. Always rebuilds from disk; the caller decides about caching. */
 		async function collect() {
-			const files = await listAgentFiles(host);
+			const { dir: agentsDir, fallbackHint } = await resolveAgentsDir(host);
 			const catalog = await readCatalog(host);
 			catalogSize = catalog.ids.size;
 			const priceData = await readCosts(host);
 			const backupCounts = await countBackups(host);
 			const agents = [];
 			const unreadable = [];
+
+			let files = [];
+			try {
+				const entries = await host.fs.list(agentsDir);
+				files = entries
+					.filter((e) => e.type === "file" && e.name.endsWith(".md"))
+					.map((e) => e.name)
+					.filter((name) => !EXCLUDED_AGENTS.has(name.replace(/\.md$/, "")))
+					.sort((a, b) => a.localeCompare(b));
+			} catch {
+				files = [];
+			}
+
 			for (const name of files) {
 				try {
-					agents.push(parseAgentFile(await host.fs.readText(`${AGENTS_DIR}/${name}`), name));
+					agents.push(parseAgentFile(await host.fs.readText(`${agentsDir}/${name}`), name));
 				} catch {
 					unreadable.push(name);
 				}
@@ -243,8 +321,9 @@ export default definePlugin({
 				catalog.ids,
 				`host.models.list() - ${catalog.ids.size} authenticated model${catalog.ids.size === 1 ? "" : "s"}`,
 			);
-			report.agentsDir = AGENTS_DIR;
+			report.agentsDir = agentsDir;
 			report.unreadable = unreadable;
+			if (fallbackHint) report.fallbackHint = fallbackHint;
 			// The picker needs the full list; 500-odd ids is a small payload locally.
 			report.catalog = [...catalog.ids].sort();
 			report.costs = priceData.costs;
@@ -351,7 +430,18 @@ export default definePlugin({
 						return json(res, 400, { ok: false, error: `invalid agent name: ${JSON.stringify(agent)}` });
 					}
 					// Validate against the discovered files, never interpolate blindly.
-					const files = await listAgentFiles(host);
+					const { dir: agentsDir } = await resolveAgentsDir(host);
+					let files = [];
+					try {
+						const entries = await host.fs.list(agentsDir);
+						files = entries
+							.filter((e) => e.type === "file" && e.name.endsWith(".md"))
+							.map((e) => e.name)
+							.filter((name) => !EXCLUDED_AGENTS.has(name.replace(/\.md$/, "")))
+							.sort((a, b) => a.localeCompare(b));
+					} catch {
+						files = [];
+					}
 					if (!files.includes(`${agent}.md`)) {
 						return json(res, 404, { ok: false, error: `unknown agent: ${agent}` });
 					}
@@ -364,7 +454,7 @@ export default definePlugin({
 						});
 					}
 
-					const file = `${AGENTS_DIR}/${agent}.md`;
+					const file = `${agentsDir}/${agent}.md`;
 					const before = await host.fs.readText(file);
 					const edit = setModelInFrontmatter(before, model || null);
 					if (!edit.ok) return json(res, 400, { ok: false, error: edit.reason });
@@ -436,7 +526,18 @@ export default definePlugin({
 						}
 					}
 					// Validate against the discovered files, never interpolate blindly.
-					const files = await listAgentFiles(host);
+					const { dir: agentsDir } = await resolveAgentsDir(host);
+					let files = [];
+					try {
+						const entries = await host.fs.list(agentsDir);
+						files = entries
+							.filter((e) => e.type === "file" && e.name.endsWith(".md"))
+							.map((e) => e.name)
+							.filter((name) => !EXCLUDED_AGENTS.has(name.replace(/\.md$/, "")))
+							.sort((a, b) => a.localeCompare(b));
+					} catch {
+						files = [];
+					}
 					const unknown = agents.filter((agent) => !files.includes(`${agent}.md`));
 					if (unknown.length) {
 						return json(res, 404, { ok: false, error: `unknown agent(s): ${unknown.join(", ")}` });
@@ -455,7 +556,7 @@ export default definePlugin({
 					let applied = 0;
 					let unchanged = 0;
 					for (const agent of agents) {
-						const file = `${AGENTS_DIR}/${agent}.md`;
+						const file = `${agentsDir}/${agent}.md`;
 						try {
 							const before = await host.fs.readText(file);
 							const edit = setModelInFrontmatter(before, model || null);
@@ -514,7 +615,18 @@ export default definePlugin({
 					if (!/^[A-Za-z0-9._-]+$/.test(agent)) {
 						return json(res, 400, { ok: false, error: `invalid agent name: ${JSON.stringify(agent)}` });
 					}
-					const files = await listAgentFiles(host);
+					const { dir: agentsDir } = await resolveAgentsDir(host);
+					let files = [];
+					try {
+						const entries = await host.fs.list(agentsDir);
+						files = entries
+							.filter((e) => e.type === "file" && e.name.endsWith(".md"))
+							.map((e) => e.name)
+							.filter((name) => !EXCLUDED_AGENTS.has(name.replace(/\.md$/, "")))
+							.sort((a, b) => a.localeCompare(b));
+					} catch {
+						files = [];
+					}
 					if (!files.includes(`${agent}.md`)) {
 						return json(res, 404, { ok: false, error: `unknown agent: ${agent}` });
 					}
@@ -536,7 +648,7 @@ export default definePlugin({
 						return json(res, 404, { ok: false, error: `no backup exists for ${agent} - nothing to restore` });
 					}
 
-					const file = `${AGENTS_DIR}/${agent}.md`;
+					const file = `${agentsDir}/${agent}.md`;
 					const current = await host.fs.readText(file);
 					const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 					const safety = `${BACKUP_DIR}/${agent}-${stamp}.md`;
@@ -675,7 +787,18 @@ export default definePlugin({
 					}
 
 					const catalog = await readCatalog(host);
-					const files = await listAgentFiles(host);
+					const { dir: agentsDir } = await resolveAgentsDir(host);
+					let files = [];
+					try {
+						const entries = await host.fs.list(agentsDir);
+						files = entries
+							.filter((e) => e.type === "file" && e.name.endsWith(".md"))
+							.map((e) => e.name)
+							.filter((name) => !EXCLUDED_AGENTS.has(name.replace(/\.md$/, "")))
+							.sort((a, b) => a.localeCompare(b));
+					} catch {
+						files = [];
+					}
 					const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
 					const applied = [];
@@ -697,7 +820,7 @@ export default definePlugin({
 							continue;
 						}
 
-						const file = `${AGENTS_DIR}/${agent}.md`;
+						const file = `${agentsDir}/${agent}.md`;
 						const before = await host.fs.readText(file);
 						const edit = setModelInFrontmatter(before, model || null);
 						if (!edit.ok || !edit.changed) continue;

@@ -141,6 +141,319 @@ describe("resolver: parsing", () => {
 	});
 });
 
+describe("plugin: fallback to glitch-pi agents directory", () => {
+	let host;
+	let route;
+	let dir;
+
+	/** Helper to call the /state route on a given host. */
+	function callStateRoute(testHost, testRoute, url = "/state?refresh=1") {
+		return new Promise((resolve) => {
+			testRoute.handler({ url, headers: {}, body: undefined }, {
+				writeHead() {},
+				end(body) { resolve(JSON.parse(body)); }
+			});
+		});
+	}
+
+	before(async () => {
+		const { readdirSync, readFileSync, mkdirSync, writeFileSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		// Create an EMPTY workspace (no .pi/agents)
+		const root = mkdtempSync(join(tmpdir(), "agent-models-fallback-test-"));
+		dir = join(root, ".pi", "agents");
+		mkdirSync(dir, { recursive: true });
+		// Do NOT write any agent files - workspace is empty
+
+		// Mock fallback directory with some agent files
+		const fallbackDir = "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/");
+		const fallbackFiles = new Map();
+		// We can't easily read the real fallback dir in tests, so we'll mock the fs.list
+		// to return different results based on the path requested.
+
+		host = createMockHost({
+			cwd: root,
+			fs: {
+				list: async (rel) => {
+					if (rel === ".pi/agents") {
+						// Workspace is empty
+						return [];
+					}
+					if (rel === fallbackDir) {
+						// Fallback directory has agents
+						return [
+							{ name: "coder.md", type: "file" },
+							{ name: "reviewer.md", type: "file" },
+						].map((e) => ({ name: e.name, type: e.type }));
+					}
+					if (rel === ".pi/agent-models/backups") {
+						return [];
+					}
+					return [];
+				},
+				readText: async (rel) => {
+					if (rel === ".pi/agents/coder.md") throw new Error("ENOENT");
+					if (rel === ".pi/agents/reviewer.md") throw new Error("ENOENT");
+					if (rel === fallbackDir + "/coder.md") {
+						return `---
+name: coder
+description: "Senior full-stack engineer."
+tools: read, edit, bash
+model: nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
+---
+
+# @coder
+`;
+					}
+					if (rel === fallbackDir + "/reviewer.md") {
+						return `---
+name: reviewer
+description: "Independent code reviewer."
+tools: read, find, grep
+model: opencode/mimo-v2.5-free
+---
+
+# @reviewer
+`;
+					}
+					if (rel === ".pi/agent-models/costs.json") throw new Error("ENOENT");
+					if (rel === ".pi/agent-models/configs.json") throw new Error("ENOENT");
+					throw new Error("ENOENT " + rel);
+				},
+				write: async () => {},
+				mkdir: async () => {},
+				requestAccess: async (requestedDir, reason) => {
+					// Track the call
+					host.mock._lastRequestAccess = { dir: requestedDir, reason };
+					// By default, grant access for the fallback dir
+					if (requestedDir === fallbackDir) return true;
+					return false;
+				},
+			},
+			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
+		});
+
+		await plugin.activate(host);
+		route = host.mock.routes.find((r) => r.path === "/state");
+	});
+
+	it("calls requestAccess for the fallback dir when workspace is empty", async () => {
+		// Call the state route
+		const payload = await callStateRoute(host, route);
+		assert.equal(payload.ok, true);
+		// The fallback should have been requested
+		assert.ok(host.mock._lastRequestAccess, "requestAccess should have been called");
+		assert.equal(host.mock._lastRequestAccess.dir, "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/"));
+		assert.match(host.mock._lastRequestAccess.reason, /glitch-pi/);
+	});
+
+	it("returns the fallback agents in the roster when grant is approved", async () => {
+		const payload = await callStateRoute(host, route);
+		assert.equal(payload.ok, true);
+		assert.equal(payload.counts.total, 2);
+		assert.ok(payload.agentsDir.includes("glitch-pi"));
+		assert.ok(payload.rows.some((r) => r.name === "coder"));
+		assert.ok(payload.rows.some((r) => r.name === "reviewer"));
+	});
+
+	it("includes fallbackHint when requestAccess is denied", async () => {
+		// Create a new host where requestAccess returns false
+		const { mkdtempSync, mkdirSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		const { tmpdir: osTmpdir } = await import("node:os");
+		const fallbackDir = "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/");
+		const root = mkdtempSync(join(osTmpdir(), "agent-models-fallback-denied-"));
+		const dir = join(root, ".pi", "agents");
+		mkdirSync(dir, { recursive: true });
+
+		let grantDenied = false;
+		const deniedHost = createMockHost({
+			cwd: root,
+			fs: {
+				list: async (rel) => {
+					if (rel === ".pi/agents") return [];
+					if (rel === fallbackDir) {
+						// When grant is denied, the fallback dir should not be accessible
+						// The plugin's resolveAgentsDir caches the fallback dir but with fallbackHint
+						// collect() will try to list it, so we return empty to simulate no access
+						if (grantDenied) return [];
+						return [{ name: "coder.md", type: "file" }];
+					}
+					if (rel === ".pi/agent-models/backups") return [];
+					return [];
+				},
+				readText: async (rel) => {
+					if (rel === fallbackDir + "/coder.md") {
+						return `---
+name: coder
+description: "d"
+tools: read
+model: nvidia/x
+---
+
+body
+`;
+					}
+					throw new Error("ENOENT " + rel);
+				},
+				write: async () => {},
+				mkdir: async () => {},
+				requestAccess: async () => {
+					grantDenied = true;
+					return false; // DENIED
+				},
+			},
+			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
+		});
+
+		await plugin.activate(deniedHost);
+		const deniedRoute = deniedHost.mock.routes.find((r) => r.path === "/state");
+
+		const payload = await callStateRoute(deniedHost, deniedRoute);
+
+		assert.equal(payload.ok, true);
+		assert.equal(payload.counts.total, 0, "no agents when grant denied");
+		assert.ok(payload.fallbackHint, "fallbackHint should be present when grant denied");
+		assert.match(payload.fallbackHint, /denied/);
+		assert.match(payload.fallbackHint, /Settings/);
+	});
+
+	it("workspace agents win when workspace is non-empty (no requestAccess call)", async () => {
+		const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		const { tmpdir: osTmpdir } = await import("node:os");
+		const fallbackDir = "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/");
+		const root = mkdtempSync(join(osTmpdir(), "agent-models-workspace-wins-"));
+		const dir = join(root, ".pi", "agents");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "local-agent.md"), `---
+name: local-agent
+description: "Local only"
+tools: read
+model: nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
+---
+
+body
+`, "utf-8");
+
+		let requestAccessCalled = false;
+		const workspaceHost = createMockHost({
+			cwd: root,
+			fs: {
+				list: async (rel) => {
+					if (rel === ".pi/agents") {
+						return [{ name: "local-agent.md", type: "file" }];
+					}
+					if (rel === fallbackDir) {
+						return [{ name: "coder.md", type: "file" }];
+					}
+					if (rel === ".pi/agent-models/backups") return [];
+					return [];
+				},
+				readText: async (rel) => {
+					if (rel === ".pi/agents/local-agent.md") {
+						return `---
+name: local-agent
+description: "Local only"
+tools: read
+model: nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
+---
+
+body
+`;
+					}
+					throw new Error("ENOENT " + rel);
+				},
+				write: async () => {},
+				mkdir: async () => {},
+				requestAccess: async () => {
+					requestAccessCalled = true;
+					return true;
+				},
+			},
+			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
+		});
+
+		await plugin.activate(workspaceHost);
+		const workspaceRoute = workspaceHost.mock.routes.find((r) => r.path === "/state");
+
+		const payload = await callStateRoute(workspaceHost, workspaceRoute);
+
+		assert.equal(payload.ok, true);
+		assert.equal(payload.counts.total, 1);
+		assert.equal(payload.rows[0].name, "local-agent");
+		assert.equal(payload.agentsDir, ".pi/agents");
+		assert.equal(requestAccessCalled, false, "requestAccess should NOT be called when workspace has agents");
+	});
+
+	it("write paths use the resolved agents directory (fallback when active)", async () => {
+		const { mkdtempSync, mkdirSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		const { tmpdir: osTmpdir } = await import("node:os");
+		const fallbackDir = "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/");
+		const root = mkdtempSync(join(osTmpdir(), "agent-models-fallback-write-"));
+		const dir = join(root, ".pi", "agents");
+		mkdirSync(dir, { recursive: true });
+
+		const writtenFiles = new Map();
+		const writeHost = createMockHost({
+			cwd: root,
+			fs: {
+				list: async (rel) => {
+					if (rel === ".pi/agents") return [];
+					if (rel === fallbackDir) {
+						return [{ name: "coder.md", type: "file" }];
+					}
+					if (rel === ".pi/agent-models/backups") return [];
+					return [];
+				},
+				readText: async (rel) => {
+					if (rel === fallbackDir + "/coder.md") {
+						return `---
+name: coder
+description: "d"
+tools: read
+model: nvidia/x
+---
+
+body
+`;
+					}
+					if (rel.startsWith(".pi/agent-models/backups/")) {
+						return writtenFiles.get(rel) ?? "";
+					}
+					throw new Error("ENOENT " + rel);
+				},
+				write: async (rel, data) => {
+					writtenFiles.set(rel, String(data));
+				},
+				mkdir: async () => {},
+				requestAccess: async (d) => d === fallbackDir,
+			},
+			models: { list: async () => [...CATALOG, "nvidia/x"].map((id) => ({ id, provider: id.split("/")[0] })) },
+		});
+
+		await plugin.activate(writeHost);
+		const setModelRoute = writeHost.mock.routes.find((r) => r.method === "POST" && r.path === "/set-model");
+
+		const payload = await new Promise((resolve) => {
+			setModelRoute.handler({ url: "/set-model", headers: {}, body: { agent: "coder", model: "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" } }, {
+				writeHead() {},
+				end(body) { resolve(JSON.parse(body)); }
+			});
+		});
+
+		assert.equal(payload.ok, true, payload.error ?? "");
+		// The write should have gone to the fallback directory
+		const fallbackWrite = writtenFiles.get(fallbackDir + "/coder.md");
+		assert.ok(fallbackWrite, "file should be written to fallback directory");
+		assert.match(fallbackWrite, /model: nvidia\/nvidia\/nemotron-3.5-lightning-30b-a3b/);
+		// Backup should be in workspace .pi/agent-models/backups
+		const backupWrite = [...writtenFiles.entries()].find(([k]) => k.includes("/backups/"));
+		assert.ok(backupWrite, "backup should be written");
+	});
+});
+
 describe("resolver: status truth table", () => {
 	it("ok when the pin is in the catalog", () => {
 		const v = classifyModelPin("nvidia/nvidia/nemotron-3.5-lightning-30b-a3b", CATALOG);

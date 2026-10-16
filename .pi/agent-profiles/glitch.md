@@ -113,7 +113,7 @@ node glitch-memorycore/plugins/embed-search/search-memory.mjs -q "<your query>" 
 
 I am the dispatcher. Code work goes to a real host subagent, not to a headless child process.
 
-- **Default to dispatch**: spawn a subagent with `delegate_task` (structured six-section brief; agent = the role name) or `subagent_spawn` (free-form; template = the role name). My roles: coder, reviewer, testing, ui-designer, vision, vision-alt, memory, memory-paid, pentester, general, explore, researcher, oracle, plan-checker.
+- **Default to dispatch**: spawn a subagent with `delegate_task` (structured six-section brief; agent = the role name) or `subagent_spawn` (free-form; template = the role name). My roles: coder, reviewer, testing, ui-designer, vision, vision-alt, memory, memory-alt, pentester, general, explore.
 - **The gate backs this up**: routing.ts counts `subagent_spawn` and `delegate_task` as dispatch evidence and blocks my direct edits of code files. Read-only work (read, grep, glob, bash reads) stays with me.
 - **Brief properly**: file paths, constraints, expected output format, and what "done" means. The subagent cannot see our conversation.
 - **Model pins**: each role template carries its own model pin (the Agent Models panel changes it). A pin overrides the composer model switcher; an empty one follows it.

@@ -145,6 +145,7 @@ async function spawnPiJson(
   parentModel: string | undefined,
   parentThinking: string | undefined,
   signal: AbortSignal | undefined,
+  availableModels: Set<string> | undefined,
 ): Promise<SpawnResult> {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   // Model + thinking choice: one source of truth, shared with the SDK path below and
@@ -154,12 +155,18 @@ async function spawnPiJson(
     agentThinking: agent.thinkingLevel,
     parentModel,
     parentThinking,
+    availableModels,
   });
-  if (plan.droppedPin) {
+  if (plan.dropped.length > 0) {
     // Say it out loud instead of silently running the parent model. The agent-models
     // panel shows the same verdict; this is the dispatch-time echo of it.
     console.error(
-      `[dispatcher] ${agent.name}: pin "${agent.model}" is not available on pi - running ${plan.model ?? "the model default"}`,
+      `[dispatcher] ${agent.name}: pin(s) dropped (provider not on pi): ${plan.dropped.join(", ")} - running ${plan.model ?? "the model default"}`,
+    );
+  }
+  if (plan.unresolved.length > 0) {
+    console.error(
+      `[dispatcher] ${agent.name}: pin(s) not in available models: ${plan.unresolved.join(", ")} - running ${plan.model ?? "the model default"}`,
     );
   }
   if (plan.model) args.push("--model", plan.model);
@@ -254,7 +261,7 @@ async function spawnPiJson(
 }
 
 const TaskParams = Type.Object({
-  agent: Type.String({ description: "Agent name: coder, reviewer, testing, ui-designer, vision, vision-alt, memory, memory-paid, pentester, glitch-omni" }),
+  agent: Type.String({ description: "Agent name: coder, reviewer, testing, ui-designer, vision, vision-alt, memory, memory-alt, pentester, glitch-omni" }),
   task: Type.String({ description: "Complete task description for the sub-agent. Include file paths, constraints, and expected output format."}),
   agentScope: Type.Optional(
     Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")], {
@@ -269,12 +276,12 @@ export default function (pi: ExtensionAPI) {
     label: "Task",
     description:
       "Dispatch a task to a specialized sub-agent with an isolated context window. " +
-      "Agents: coder, reviewer, testing, ui-designer, vision, vision-alt, memory, memory-paid, pentester, glitch-omni. " +
+      "Agents: coder, reviewer, testing, ui-designer, vision, vision-alt, memory, memory-alt, pentester, glitch-omni. " +
       "Use for code review, implementation, tests, design, vision analysis, memory writes, and security assessment. " +
       "Returns the sub-agent's final output.",
     parameters: TaskParams,
 
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const cwd = process.cwd();
       const agentScope: AgentScope = (params.agentScope as AgentScope) || "both";
       const discovery = discoverAgents(cwd, agentScope);
@@ -297,8 +304,24 @@ export default function (pi: ExtensionAPI) {
       const parentModel = (pi as any).__dispatchModel as string | undefined;
       const parentThinking = (pi as any).__dispatchThinking as string | undefined;
 
+      // Build available model IDs from the session's scoped models so planDispatch can
+      // reject pins that are not in the live catalog (same verdict the agent-models
+      // panel shows as "UNRESOLVED").
+      const availableModels = new Set<string>();
+      if (ctx?.scopedModels) {
+        for (const sm of ctx.scopedModels) {
+          const m = sm.model;
+          if (m?.provider && m?.id) {
+            availableModels.add(`${m.provider}/${m.id}`);
+          }
+        }
+      }
+
       // spawn `pi --mode json` is the single dispatch path (SDK path removed).
-      const result = await spawnPiJson(agent, params.task, cwd, parentModel, parentThinking, signal);
+      const result = await spawnPiJson(
+        agent, params.task, cwd, parentModel, parentThinking, signal,
+        availableModels.size > 0 ? availableModels : undefined,
+      );
 
       const failed =
         result.exitCode !== 0 ||

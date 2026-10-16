@@ -192,6 +192,37 @@ if ($Status) {
     exit 0
 }
 
+# ---- Handy voice input (optional, non-fatal) --------------------------------
+# launch-pi.mjs also starts Handy (startHandyVoice); both checks are idempotent,
+# so whoever runs first wins. This block sits AFTER the -Status early-exit and
+# BEFORE the windowed/detached split, so it runs for BOTH start modes and can
+# never run for -Status. A Handy failure is a warning, never a stack failure -
+# and no stop script may ever kill it.
+$handyBin = Join-Path $RootDir "handy-voice\Handy\handy.exe"
+try {
+    # tasklist prints an INFO line (no match) on stdout; under
+    # $ErrorActionPreference = "Stop" a stray stderr line would throw, so relax
+    # EAP for the probe the same way Get-TunnelLine does.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $handyOut = tasklist /NH /FI "IMAGENAME eq handy.exe" 2>$null
+        $handyRunning = [bool]($handyOut | Select-String -SimpleMatch "handy.exe")
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($handyRunning) {
+        Write-Host "  Handy already running" -ForegroundColor Green
+    } elseif (-not (Test-Path $handyBin)) {
+        Write-Host "  Handy not found (optional). Voice input disabled." -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Starting Handy voice input..."
+        Start-Process -FilePath $handyBin -WindowStyle Hidden
+    }
+} catch {
+    Write-Host "  Handy start failed (non-fatal): $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 # Close parked stack windows left over from past windowed runs: a
 # pi-stack-window.ps1 window parks forever (-NoExit) after its stack dies,
 # so stale copies accumulate across stop/restart cycles. A window is stale

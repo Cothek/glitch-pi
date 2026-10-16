@@ -78,6 +78,14 @@ import { glitchRoot } from "../lib/root.mjs";
 // confirmed to exist; guessing risks exempting primary sessions, which is far
 // worse. Default sub-agents are ephemeral, so the common path is covered.
 import { isSubAgentSession } from "../lib/subagent-session.mjs";
+// Review Gate verdict parsing — async dispatch acks hold no verdict, so acks
+// are deferred and judged at wait_all/get_result collection instead
+// (unit-tested in .pi/lib/review-verdict.test.mjs, plan-paths.mjs pattern).
+import {
+  classifyReviewDispatch,
+  extractRunSection,
+  isPassVerdict,
+} from "../lib/review-verdict.mjs";
 
 // --- Paths (both roots resolved by ../lib/root.mjs) ---
 // The 2026-10-03 incident: this extension seeded its root from process.cwd()
@@ -244,11 +252,11 @@ const DESTRUCTIVE_BASH_COMMANDS = new Set([
 ]);
 
 const CODE_WRITING_AGENTS = new Set([
-  "coder", "coder-paid", "ui-designer", "ui-designer-paid",
-  "testing", "testing-paid", "pentester", "pentester-paid",
+  "coder", "coder-alt", "ui-designer", "ui-designer-alt",
+  "testing", "testing-alt", "pentester", "pentester-alt",
 ]);
 
-const REVIEW_AGENTS = new Set(["reviewer", "reviewer-paid"]);
+const REVIEW_AGENTS = new Set(["reviewer", "reviewer-alt"]);
 
 // --- Pure helpers ---
 
@@ -396,51 +404,6 @@ function extractResultText(result: any): string {
   }
 }
 
-function isPassVerdict(text: string): boolean {
-  if (!text) return false;
-  // Scan a LEADING REGION, not just line 1. Real reviewers open with prose
-  // ("here is my verdict:") and state the verdict on a later line, while their
-  // evidence legitimately contains the words FAIL/REJECT. Reading line 1 alone
-  // fell through to the body scan, scored a real PASS as a FAIL, and so blocked
-  // every commit after that review.
-  const lead = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 5).join("\n");
-  const leadBare = lead.replace(/[*_`#>]/g, "");
-  // A qualified pass is not a pass. Scope this to the words IMMEDIATELY after the
-  // verdict token (the rest of its own line), not the whole region: a stray "but"
-  // in the evidence on a later line must not turn a PASS into a FAIL, which would
-  // re-create the deadlock.
-  const qualified = (idx: number, len: number): boolean =>
-    /\b(?:with|but|however|if|once|after|provided|assuming|unless)\b/i.test(leadBare.slice(idx + len).split("\n")[0]);
-
-  // 1. An explicit label wins outright. This protects the common
-  //    "this would FAIL without the fix. Verdict: PASS" shape.
-  const labelled = leadBare.match(/verdict\s*:\s*(PASS|PASSED|APPROVED|PROCEED|SHIP|FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)\b/i);
-  if (labelled) {
-    const v = labelled[1].toUpperCase();
-    if (/^(FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)$/.test(v)) return false;
-    return !qualified(labelled.index ?? 0, labelled[0].length);
-  }
-  if (/verdict\s*:\s*✅/.test(leadBare)) return true;
-
-  // A reship order in the region is an explicit fail signal. It must never be
-  // read as a standalone "SHIP" pass token by the scan below.
-  if (/FIX THEN SHIP|FIX AND RESHIP|\bDO NOT SHIP\b/i.test(leadBare)) return false;
-
-  // 2. Otherwise the EARLIEST standalone verdict token in the region decides.
-  const first = leadBare.match(/\b(PASS|PASSED|APPROVED|PROCEED|SHIP|FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)\b/i);
-  if (first) {
-    const v = first[1].toUpperCase();
-    if (/^(FAIL|FAILED|FAILURE|REJECT|REJECTED|BLOCK|BLOCKED)$/.test(v)) return false;
-    return !qualified(first.index ?? 0, first[0].length);
-  }
-
-  // 3. No verdict token anywhere in the leading region — fall back to the body
-  //    scan, where fail signals trump.
-  const fail = /FIX THEN SHIP|FIX AND RESHIP|REJECTED|\bFAIL(?:ED|URE)?\b|\bREJECT\b|\bDENIED\b|\bDO NOT SHIP\b|\bPASS\b\s+(?:with|but)\b/i.test(text);
-  if (fail) return false;
-  return /\bPASSED\b|\bPASS\b|\bPROCEED\b|verdict\s*:\s*✅|\bSHIP\b|\bAPPROVED\b/i.test(text);
-}
-
 function extractFilePath(input: any): string {
   if (!input || typeof input !== "object") return "";
   // Pi uses `path`; OpenCode used filePath/path — accept both for safety
@@ -574,6 +537,12 @@ export default function (pi: ExtensionAPI) {
   // fired. Recover the args from the matching tool_execution_start, where they DO
   // exist, keyed by toolCallId (the stuck-detector v2 pattern).
   const dispatchArgsByCallId = new Map<string, any>();
+  // Async reviewer runs whose verdict has NOT been read yet — delegate_task /
+  // subagent spawn return only an ack, the real verdict arrives at
+  // subagent wait_all/get_result collection (handled in tool_execution_end
+  // below). runId ("sa-ed5e1e55") -> agentName. Bounded like
+  // dispatchArgsByCallId so a never-collected run cannot leak entries.
+  const pendingReviewRuns = new Map<string, string>();
   let lastCodeTaskTime = 0;
   let lastReviewTaskTime = 0;
   let currentSessionID: string | null = null;
@@ -860,7 +829,7 @@ export default function (pi: ExtensionAPI) {
                 reason:
                   "⛔ Review Gate: " + verdictNote +
                   "A PASS is required before committing code written by a sub-agent, and the PASS must be NEWER than the last code write.\n" +
-                  "Dispatch @reviewer first. Reviewer agents: @reviewer (free), @reviewer-paid (paid fallback)\n" +
+                  "Dispatch @reviewer first. Reviewer agents: @reviewer (free), @reviewer-alt (alt fallback)\n" +
                   "To bypass: git commit --no-verify (only if you understand the risk)",
               };
             }
@@ -899,7 +868,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_execution_start", async (event) => {
     try {
       const args = (event as any).args;
-      if (!isDispatchToolCall((event as any).toolName, args)) return;
+      const toolName = (event as any).toolName;
+      // Storage is WIDER than dispatch on purpose: wait_all/get_result carry
+      // the runId(s) needed by the review-collection branch below, and the
+      // END event has no args. This stores args only — isDispatchToolCall
+      // itself (and every gate reading it) is unchanged.
+      if (!isDispatchToolCall(toolName, args) && toolName !== "subagent") return;
       const id = (event as any).toolCallId;
       if (!id) return;
       dispatchArgsByCallId.set(String(id), args ?? {});
@@ -932,22 +906,103 @@ export default function (pi: ExtensionAPI) {
         }
 
         if (REVIEW_AGENTS.has(agentName)) {
-          lastReviewTaskTime = Date.now();
           const text = extractResultText(event.result);
-          if (isPassVerdict(text)) {
-            lastReviewVerdict = "PASS";
-            pendingReview = false;
-            writeReviewPassMarker(agentName);
+          const failed = Boolean((event as any).isError);
+          const dispatchKind = failed ? { kind: "unknown" as const } : classifyReviewDispatch(text);
+          if (dispatchKind.kind === "ack") {
+            // Async delegation: the ack holds NO verdict, so judging it
+            // always recorded a real PASS as FAIL and pinned the commit
+            // gate shut (live bug, this session). Defer: remember the run
+            // and judge it when wait_all/get_result collects the result.
+            pendingReviewRuns.set(dispatchKind.runId, agentName);
+            if (pendingReviewRuns.size > 50) {
+              const oldest = pendingReviewRuns.keys().next().value;
+              if (oldest !== undefined) pendingReviewRuns.delete(oldest);
+            }
+            lastReviewTaskTime = Date.now();
+            console.warn(`[routing] Reviewer ${agentName} dispatched async (run ${dispatchKind.runId}) — verdict deferred until collection`);
+          } else if (dispatchKind.kind === "sync-verdict") {
+            lastReviewTaskTime = Date.now();
+            if (isPassVerdict(text)) {
+              lastReviewVerdict = "PASS";
+              pendingReview = false;
+              writeReviewPassMarker(agentName);
+            } else {
+              // A FAIL must NOT clear pendingReview. Clearing it here made the
+              // commit gate unable to tell "reviewed and failed" from "never
+              // reviewed", so a FAIL behaved exactly like a PASS.
+              lastReviewVerdict = "FAIL";
+              pendingReview = true;
+              clearPassMarker();
+              console.warn(`[routing] Review verdict for ${agentName} was FAIL — commit gate stays closed until a PASS`);
+            }
           } else {
-            // A FAIL must NOT clear pendingReview. Clearing it here made the
-            // commit gate unable to tell "reviewed and failed" from "never
-            // reviewed", so a FAIL behaved exactly like a PASS.
+            // unknown (or isError): no readable verdict — stay conservative,
+            // same FAIL path as before.
+            lastReviewTaskTime = Date.now();
             lastReviewVerdict = "FAIL";
             pendingReview = true;
             clearPassMarker();
             console.warn(`[routing] Review verdict for ${agentName} was FAIL — commit gate stays closed until a PASS`);
           }
         }
+      }
+
+      // --- Async review collection: wait_all / get_result carry the verdicts
+      // of runs deferred above. runIds in collected text are TRUNCATED to 8
+      // chars, so pending keys match by 8-char prefix.
+      if (tool === "subagent" && pendingReviewRuns.size > 0) {
+        const action = String((dispatchArgs as any)?.action ?? "");
+        const text = extractResultText(event.result);
+        // Resolve which pending runs this collection can answer for.
+        const wantedIds: string[] =
+          action === "get_result"
+            ? (dispatchArgs as any)?.runId
+              ? [String((dispatchArgs as any).runId)]
+              : []
+            : action === "wait_all"
+              ? Array.isArray((dispatchArgs as any)?.runIds) && (dispatchArgs as any).runIds.length > 0
+                ? (dispatchArgs as any).runIds.map(String)
+                : [...pendingReviewRuns.keys()] // no filter given: scan everything pending
+              : [];
+        if (action === "get_result" || action === "wait_all") {
+          const matched: Array<[string, string]> = [];
+          for (const [runId, name] of pendingReviewRuns) {
+            if (wantedIds.some((id) => runId.slice(0, 8) === id.slice(0, 8))) matched.push([runId, name]);
+          }
+          for (const [runId, name] of matched) {
+            // Isolate this run's section; falling back to the whole text is
+            // only safe when ONE run matched, or it could read a sibling's
+            // verdict tokens.
+            const section = extractRunSection(text, runId.slice(0, 8)) || (matched.length === 1 ? text : "");
+            pendingReviewRuns.delete(runId);
+            if (section && isPassVerdict(section)) {
+              lastReviewVerdict = "PASS";
+              pendingReview = false;
+              writeReviewPassMarker(name);
+              console.log(`[routing] ✅ Review PASS (${name}, run ${runId}) via collection`);
+            } else {
+              lastReviewVerdict = "FAIL";
+              pendingReview = true;
+              clearPassMarker();
+              console.warn(`[routing] Review verdict for ${name} (run ${runId}) collected as FAIL — commit gate stays closed until a PASS`);
+            }
+          }
+        } else if (action === "stop") {
+          // A stopped review has no verdict; the gate stays closed, consistent
+          // with the failure semantics above.
+          const stopId = (dispatchArgs as any)?.runId ? String((dispatchArgs as any).runId) : "";
+          for (const [runId, name] of [...pendingReviewRuns]) {
+            if (!stopId || runId.slice(0, 8) === stopId.slice(0, 8)) {
+              pendingReviewRuns.delete(runId);
+              lastReviewVerdict = "FAIL";
+              pendingReview = true;
+              clearPassMarker();
+              console.warn(`[routing] Review run ${runId} (${name}) stopped before verdict — commit gate stays closed until a PASS`);
+            }
+          }
+        }
+        // list / templates / steer / handoff: bookkeeping — no verdict state changes.
       }
     } catch (e: any) {
       console.error(`[routing] tool_execution_end failed: ${e?.message || e}`);

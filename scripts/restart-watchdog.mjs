@@ -75,7 +75,9 @@ const RECOVERY_WAIT_SEC = 120;
 const DEFAULT_DELAY = 0;
 const DEFAULT_DOWN_WAIT = 45;
 const DEFAULT_TIMEOUT = 180;
+const DEFAULT_UPDATE_GRACE = 0;
 const MAX_TIMEOUT = 600;
+const MAX_UPDATE_GRACE = 1800;
 const MAX_DOWN_WAIT = 300;
 const MAX_NOTE = 300;
 const TAIL_LINES = 20;
@@ -86,9 +88,9 @@ const OUTCOMES = ["success", "recovered", "failed", "no-restart-signal"];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Tiny argv parser. --delay / --down-wait / --timeout take a number and are
- * range-checked so a bad value exits 2 cleanly instead of producing a nonsense
- * deadline. --web-port / --auth-port take 1..65535. --note takes text.
+ * Tiny argv parser. --delay / --down-wait / --timeout / --update-grace take
+ * a number and are range-checked so a bad value exits 2 cleanly instead of
+ * producing a nonsense deadline. --web-port / --auth-port take 1..65535. --note takes text.
  * --no-recovery disables the recovery relaunch (used when testing against the
  * live stack). Unknown flags produce a structured error.
  */
@@ -97,6 +99,7 @@ export function parseArgs(argv) {
     delay: DEFAULT_DELAY,
     downWait: DEFAULT_DOWN_WAIT,
     timeout: DEFAULT_TIMEOUT,
+    updateGrace: DEFAULT_UPDATE_GRACE,
     webPort: 8787,
     authPort: 4103,
     note: null,
@@ -128,6 +131,14 @@ export function parseArgs(argv) {
       const r = num("--timeout", args[++i], 30, MAX_TIMEOUT);
       if (r.error) { out.error = r.error; return out; }
       out.timeout = r.value;
+    } else if (a === "--update-grace") {
+      // Extends ONLY the phase-1 deadline. Used by restart-request.mjs when the
+      // engine runs with -ApplyUpdates: the kill happens only after
+      // check-updates.mjs --apply finishes (measured ~2m50s), so the default
+      // 53s window would expire mid-update and false-report "no-restart-signal".
+      const r = num("--update-grace", args[++i], 0, MAX_UPDATE_GRACE);
+      if (r.error) { out.error = r.error; return out; }
+      out.updateGrace = r.value;
     } else if (a === "--web-port") {
       const r = num("--web-port", args[++i], 1, 65535);
       if (r.error) { out.error = r.error; return out; }
@@ -165,6 +176,9 @@ function printHelp() {
     "  --delay <sec>       mirror of the restart engine -DelaySec (default 0)",
     "  --down-wait <sec>   phase-1 slack after the kill window (default 45)",
     "  --timeout <sec>     phase-2 deadline for both ports up (default 180)",
+    "  --update-grace <sec>  extra slack on the phase-1 deadline only, for the",
+    "                        -ApplyUpdates path where updates run before the kill",
+    "                        (default 0, max 1800; restart-request passes 600)",
     "  --web-port <port>   pi-web-ui port (default 8787)",
     "  --auth-port <port>  auth proxy port (default 4103)",
     "  --note <text>       trigger note recorded in the report",
@@ -400,6 +414,7 @@ export function buildReport({
   delaySec,
   downWaitSec,
   timeoutSec,
+  updateGraceSec,
   webPort,
   authPort,
   poll,
@@ -413,7 +428,7 @@ export function buildReport({
     finishedAt,
     outcome,
     triggerNote: triggerNote ?? "",
-    config: { delaySec, downWaitSec, timeoutSec, webPort, authPort },
+    config: { delaySec, downWaitSec, timeoutSec, updateGraceSec, webPort, authPort },
     poll,
     recovery: recovery ?? { attempted: false, pid: null, error: null },
     diagnostics: diagnostics ?? null,
@@ -483,8 +498,9 @@ async function main() {
 
   // ---- Phase 1: wait for the restart signature (both ports down) ------------
   // The engine kills both ports; both down means the kill happened. Deadline
-  // is the engine delay plus the down-wait slack.
-  const downDeadline = Date.now() + parsed.delay * 1000 + parsed.downWait * 1000;
+  // is the engine delay plus the down-wait slack, extended by
+  // --update-grace when the engine is applying updates before the kill.
+  const downDeadline = Date.now() + parsed.delay * 1000 + parsed.downWait * 1000 + parsed.updateGrace * 1000;
   let sawDown = false;
   while (Date.now() < downDeadline) {
     const { web, auth } = await probeOnce();
@@ -504,6 +520,7 @@ async function main() {
     const report = buildReport({
       startedAt, finishedAt, outcome: "no-restart-signal", triggerNote: note,
       delaySec: parsed.delay, downWaitSec: parsed.downWait, timeoutSec: parsed.timeout,
+      updateGraceSec: parsed.updateGrace,
       webPort: parsed.webPort, authPort: parsed.authPort, poll, diagnostics,
     });
     const { reportPath, markerPath } = writeOutputs(report);
@@ -524,6 +541,7 @@ async function main() {
       const report = buildReport({
         startedAt, finishedAt, outcome: "success", triggerNote: note,
         delaySec: parsed.delay, downWaitSec: parsed.downWait, timeoutSec: parsed.timeout,
+        updateGraceSec: parsed.updateGrace,
         webPort: parsed.webPort, authPort: parsed.authPort, poll,
       });
       const { reportPath, markerPath } = writeOutputs(report);
@@ -557,6 +575,7 @@ async function main() {
         const report = buildReport({
           startedAt, finishedAt, outcome: "recovered", triggerNote: note,
           delaySec: parsed.delay, downWaitSec: parsed.downWait, timeoutSec: parsed.timeout,
+          updateGraceSec: parsed.updateGrace,
           webPort: parsed.webPort, authPort: parsed.authPort, poll, recovery, diagnostics,
         });
         const { reportPath, markerPath } = writeOutputs(report);
@@ -574,6 +593,7 @@ async function main() {
   const report = buildReport({
     startedAt, finishedAt, outcome: "failed", triggerNote: note,
     delaySec: parsed.delay, downWaitSec: parsed.downWait, timeoutSec: parsed.timeout,
+    updateGraceSec: parsed.updateGrace,
     webPort: parsed.webPort, authPort: parsed.authPort, poll, recovery, diagnostics,
   });
   const { reportPath, markerPath } = writeOutputs(report);

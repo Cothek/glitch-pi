@@ -182,6 +182,21 @@ test("buildWatchdogCommand: clamps timeout into 30..600 and note only when non-e
   assert.match(withNote, /--note "fix me go"/);
 });
 
+test("buildWatchdogCommand: --update-grace emitted only when > 0", () => {
+  // 0 (or omitted) keeps the plain-restart output byte-identical; a positive
+  // value appends a plain flag + integer so cmd.exe parsing stays trivial.
+  const base = { root: "E:\\Glitch AI\\glitch-pi", nodeExe: "node", delaySec: 15 };
+  const zero = buildWatchdogCommand({ ...base, updateGrace: 0 });
+  assert.doesNotMatch(zero, /--update-grace/);
+  const omitted = buildWatchdogCommand(base);
+  assert.doesNotMatch(omitted, /--update-grace/);
+  const grace = buildWatchdogCommand({ ...base, updateGrace: 600 });
+  assert.match(grace, /--update-grace 600/);
+  // Placement: before --note, after the port flags.
+  const withNote = buildWatchdogCommand({ ...base, updateGrace: 600, note: "hi" });
+  assert.match(withNote, /--auth-port 4103 --update-grace 600 --note "hi"$/);
+});
+
 test("parseArgs: --no-watchdog flag", () => {
   const out = parseArgs(["--no-watchdog"]);
   assert.equal(out.noWatchdog, true);

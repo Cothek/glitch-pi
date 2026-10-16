@@ -26,7 +26,8 @@ atomic-write, read-back verification, and the model-count check.
 5. **`POST /plugins-api/model-catalog/sync`** — resync from the live catalog.
 6. **`POST /plugins-api/model-catalog/set`** — toggle one model on/off.
 7. **`POST /plugins-api/model-catalog/bulk`** — recommended / enable all / disable all.
-8. **`POST /plugins-api/model-catalog/restore`** — restore the last backup.
+8. **`POST /plugins-api/model-catalog/pin`** — pin or unpin one model (edits the guard list).
+9. **`POST /plugins-api/model-catalog/restore`** — restore the last backup.
 
 ## Routes
 
@@ -42,11 +43,30 @@ HTTP body cannot inject new ids.
 | POST | /sync   | - | `--sync --json` | 180s |
 | POST | /set    | `{id, enabled}` | `--enable <id> --json` or `--disable <id> --json` | 180s |
 | POST | /bulk   | `{action: recommended\|all\|none}` | `--apply-recommended --json` or `--enable <id1> <id2> ... --json` or `--disable <id1> <id2> ... --json` | 180s |
+| POST | /pin    | `{id, pinned}` | `--pin <id> --json` or `--unpin <id> --json` | 180s |
 | POST | /restore | - | `--restore-backup --json` | 180s |
 
 The plugin returns the parsed engine object verbatim and surfaces the
 engine's `blocked[]` field (pin-guard refusals) to the client unchanged,
 so a refused change explains itself.
+
+## Pins
+
+Pins live in the state file's top-level `pins` array (sorted, deduped bare
+NIM ids). The engine seeds that array ONCE from `HARD_PINNED_IDS` plus every
+`model: nvidia/...` line in `.pi/agents/*.md`; from then on the persisted
+list is the only guard source. The panel's PIN pill is a toggle: pinned
+models refuse `--disable` (and `--apply-recommended` force-keeps them),
+unpinned models disable freely. `agentUsers` on each row is advisory only:
+it names the agent files that reference the model, so disabling an in-use
+model is an informed choice, never a refusal.
+
+After any engine write to `models.json` (`--enable`, `--disable`,
+`--apply-recommended`), the engine also prunes `~/.pi/agent/models-store.json`:
+nvidia entries that are state-tracked and no longer enabled in models.json
+are removed (backup in `data/backups/nvidia-models-store/`), so the panel
+state is the picker's source of truth. Custom user-added store entries and
+non-nvidia providers are never touched.
 
 Status responses carry two extra fields on top of the engine payload:
 `healthy` (boolean, true when the engine returned `ok: true`) and

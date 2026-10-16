@@ -425,6 +425,38 @@ export function createPlugin() {
       );
 
       /**
+       * POST /pin. Body: { id, pinned }.
+       * Engine call (when id is whitelisted):
+       *   `data/node/node.exe scripts/nvidia-models.mjs --pin|--unpin <id> --json`.
+       * 180s timeout. Same validation as /set: the id never reaches a command
+       * line unless the engine has synced it. Pins live in the state file's
+       * `pins` array; the guard refuses --disable for pinned ids only.
+       */
+      cleanup.push(
+        host.route("POST", "/pin", async (req, res) => {
+          try {
+            const body = req && typeof req.body === "object" && req.body !== null ? req.body : {};
+            const id = typeof body.id === "string" ? body.id.trim() : "";
+            const pinned = body.pinned === true;
+            if (!id) return json(res, 400, { ok: false, error: "id is required" });
+            localRefreshIds();
+            if (!localKnownIds.has(id)) {
+              return json(res, 400, {
+                ok: false,
+                error: `unknown model id: ${id} (engine has not synced this id; resync first)`,
+              });
+            }
+            const verb = pinned ? "--pin" : "--unpin";
+            const result = await runEngine([verb], [id], APPLY_TIMEOUT_MS, host);
+            localStatusCache.value = null;
+            json(res, result.ok ? 200 : 502, { ok: result.ok, ...result });
+          } catch (err) {
+            json(res, 500, { ok: false, error: err?.message ?? String(err) });
+          }
+        }),
+      );
+
+      /**
        * POST /bulk. Body: { action: "recommended" | "all" | "none" }.
        * Engine call:
        *   - `data/node/node.exe scripts/nvidia-models.mjs --apply-recommended --json`

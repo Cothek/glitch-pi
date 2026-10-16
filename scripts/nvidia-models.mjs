@@ -42,10 +42,16 @@ const DEFAULT_STORE_FILE     = join(homedir(), '.pi', 'agent', 'models-store.jso
 const DEFAULT_KEYS_FILE      = join(homedir(), '.pi', 'agent', 'provider-keys.json');
 const DEFAULT_STATE_FILE     = join(REPO_ROOT, 'data', 'nvidia-models-state.json');
 const DEFAULT_BACKUP_DIR     = join(REPO_ROOT, 'data', 'backups', 'nvidia-models');
+const DEFAULT_STORE_BACKUP_DIR = join(REPO_ROOT, 'data', 'backups', 'nvidia-models-store');
 const API_HOST               = 'integrate.api.nvidia.com';
 const API_PATH               = '/v1/models';
 const API_TIMEOUT_MS         = 20_000;
 
+// Hard-pinned ids are the SEED for the state file's `pins` array, not a
+// permanent guard. On the first state write after this change the seed is
+// persisted (HARD_PINNED_IDS ∪ every model: nvidia/... line in .pi/agents/*.md);
+// from then on the persisted list is the only guard source and the panel's
+// PIN toggle edits it directly.
 const HARD_PINNED_IDS = [
   'z-ai/glm-5.3',
   'moonshotai/kimi-k3',
@@ -60,7 +66,7 @@ const TIER_WHY = {
   X: 'non-chat (embedding/guard/reward/parser/retrieval/vision utility), excluded from the panel'
 };
 
-const VERBS = ['--sync', '--status', '--apply-recommended', '--enable', '--disable', '--restore-backup'];
+const VERBS = ['--sync', '--status', '--apply-recommended', '--enable', '--disable', '--pin', '--unpin', '--restore-backup'];
 
 function parseArgs(argv) {
   const args = {
@@ -68,6 +74,7 @@ function parseArgs(argv) {
     dryRun: false,
     modelsFile: null,
     stateFile: null,
+    storeFile: null,
     catalog: null,
     keysFile: null,
     backupDir: null,
@@ -81,6 +88,7 @@ function parseArgs(argv) {
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--models-file') { args.modelsFile = argv[++i]; }
     else if (a === '--state-file')  { args.stateFile  = argv[++i]; }
+    else if (a === '--store-file')  { args.storeFile  = argv[++i]; }
     else if (a === '--catalog')     { args.catalog    = argv[++i]; }
     else if (a === '--keys-file')   { args.keysFile   = argv[++i]; }
     else if (a === '--backup-dir')  { args.backupDir  = argv[++i]; }
@@ -88,10 +96,15 @@ function parseArgs(argv) {
     else if (VERBS.includes(a)) {
       if (args.verb) throw new Error(`only one verb allowed, got ${args.verb} and ${a}`);
       args.verb = a;
-      if (a === '--enable' || a === '--disable') {
-        const next = argv[++i];
-        if (!next) throw new Error(`${a} requires a comma-separated id list`);
-        args.ids = next.split(',').map((s) => s.trim()).filter(Boolean);
+      if (['--enable', '--disable', '--pin', '--unpin'].includes(a)) {
+        // Ids may arrive as one comma-joined token or as separate argv
+        // tokens (the plugin's bulk path passes one token per id). Consume
+        // every non-flag token that follows; a flag token stops the scan.
+        const fragments = [];
+        while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) {
+          fragments.push(argv[++i]);
+        }
+        args.ids = fragments.flatMap((s) => s.split(',')).map((s) => s.trim()).filter(Boolean);
         if (args.ids.length === 0) throw new Error(`${a} requires at least one id`);
       }
     } else {
@@ -111,12 +124,15 @@ function printUsage() {
     '  --apply-recommended     rewrite models.json with Tier A enabled',
     '  --enable id1,id2        enable specific ids (pin-guarded)',
     '  --disable id1,id2       disable specific ids (pin-guarded)',
+    '  --pin id1,id2           pin ids: the guard then refuses to disable them',
+    '  --unpin id1,id2         unpin ids: they become freely disableable',
     '  --restore-backup        restore the most recent backup',
     '  --help, -h              print this help and exit 0',
     '',
     'Diagnostics (not used by the plugin):',
     '  --models-file <path>    override models.json path (use a copy)',
     '  --state-file  <path>    override state file path',
+    '  --store-file  <path>    override models-store.json path (use a copy)',
     '  --catalog     <path>    use a fixture catalog instead of the API',
     '  --keys-file   <path>    override provider-keys.json path',
     '  --backup-dir  <path>    override backup directory'
@@ -314,8 +330,11 @@ function summarize(rows) {
   return counts;
 }
 
-function discoverPins(repoRoot) {
-  const pins = new Set(HARD_PINNED_IDS);
+// Advisory scan: which agent files reference which NIM model. The result
+// does NOT drive the pin guard (state pins do); the panel shows it so a
+// disable of an in-use model is an informed choice, not a refusal.
+function agentPinUsers(repoRoot) {
+  const users = new Map();
   const agentsDir = join(repoRoot, '.pi', 'agents');
   if (existsSync(agentsDir)) {
     for (const file of readdirSync(agentsDir)) {
@@ -324,16 +343,47 @@ function discoverPins(repoRoot) {
         const txt = readFileSync(join(agentsDir, file), 'utf8');
         for (const line of txt.split(/\r?\n/)) {
           const m = line.match(/^\s*model:\s*(nvidia\/[^\s]+)\s*$/);
-          if (m) pins.add(m[1].replace(/^nvidia\//, ''));
+          if (m) {
+            const id = m[1].replace(/^nvidia\//, '');
+            if (!users.has(id)) users.set(id, []);
+            if (!users.get(id).includes(file)) users.get(id).push(file);
+          }
         }
-      } catch { /* unreadable agent file: skip, do not fail pin detection */ }
+      } catch { /* unreadable agent file: skip, do not fail the scan */ }
     }
   }
-  return pins;
+  return users;
+}
+
+function normalizePinList(value) {
+  const list = Array.isArray(value) ? value : [];
+  return [...new Set(list.map((s) => String(s).trim()).filter(Boolean))].sort();
+}
+
+// One-time seed: HARD_PINNED_IDS ∪ every agent-file pin. Used when a state
+// file has no pins key yet; the next state write persists it, and after that
+// the persisted list is the only guard source.
+function seedPinList(repoRoot) {
+  const seeded = new Set(HARD_PINNED_IDS);
+  for (const id of agentPinUsers(repoRoot).keys()) seeded.add(id);
+  return normalizePinList([...seeded]);
+}
+
+// Resolve the pin set for a guard or decoration. `seeded` is true when the
+// state file had no pins key and the seed was computed in memory; callers
+// that write state persist it, --status never writes.
+function loadPinSet(state, repoRoot) {
+  if (state && Array.isArray(state.pins)) {
+    return { pins: new Set(normalizePinList(state.pins)), seeded: false };
+  }
+  return { pins: new Set(seedPinList(repoRoot)), seeded: true };
 }
 
 function readStateOrEmpty(stateFile) {
   if (!existsSync(stateFile)) {
+    // NOTE: no `pins` key here on purpose. loadPinSet() seeds when the key is
+    // ABSENT; an explicit empty array would mean "user unpinned everything"
+    // and would defeat the one-time seed on a fresh state file.
     return { synced_at: '', source: 'state', models: [], counts: { chat: 0, non_chat: 0, enabled: 0, recommended: 0 } };
   }
   // Distinguish "file corrupt" from "file missing". F4 requires --status
@@ -373,6 +423,44 @@ function backupModelsJson(modelsFile, backupDir) {
   const dest = join(backupDir, `models.json.${ts}`);
   copyFileSync(modelsFile, dest);
   return dest;
+}
+
+// Reconcile the picker store with panel state. The pi web picker renders the
+// UNION of models.json + pi's built-in catalog + models-store.json, so an id
+// that the panel disabled but the store still lists keeps showing up. Remove
+// only ids that are state-tracked AND absent from the freshly written
+// models.json list; user-added custom entries (not tracked) and non-nvidia
+// providers survive. Backup first, atomic write, restore on failure.
+function pruneStore(storeFile, backupDir, enabledIds, trackedIds, dryRun) {
+  const result = { backup: '', pruned: [], written: false, error: '' };
+  if (!existsSync(storeFile)) return result;
+  let store;
+  try { store = readJson(storeFile); } catch (e) { result.error = `cannot parse store: ${e.message}`; return result; }
+  const section = store && store.nvidia && Array.isArray(store.nvidia.models) ? store.nvidia.models : null;
+  if (!section) return result;
+  const enabled = enabledIds instanceof Set ? enabledIds : new Set(enabledIds || []);
+  const tracked = trackedIds instanceof Set ? trackedIds : new Set(trackedIds || []);
+  const pruned = section.filter((m) => m && m.id && tracked.has(m.id) && !enabled.has(m.id)).map((m) => m.id);
+  if (pruned.length === 0) return result;
+  result.pruned = pruned;
+  if (dryRun) return result;
+  ensureDir(backupDir);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const dest = join(backupDir, `models-store.json.${ts}`);
+  try { copyFileSync(storeFile, dest); } catch (e) { result.error = `store backup failed: ${e.message}`; return result; }
+  result.backup = dest;
+  const keep = section.filter((m) => !m || !m.id || !tracked.has(m.id) || enabled.has(m.id));
+  const next = JSON.parse(JSON.stringify(store));
+  next.nvidia.models = keep;
+  try {
+    writeJsonAtomic(storeFile, next);
+  } catch (e) {
+    result.error = `store write failed: ${e.message}`;
+    try { copyFileSync(dest, storeFile); } catch { /* restore failure ignored: original error surfaces */ }
+    return result;
+  }
+  result.written = true;
+  return result;
 }
 
 function rebuildModelsJson(modelsJson, nvidiaModels) {
@@ -585,6 +673,10 @@ function finalizeReport(partial) {
     blocked: [],
     error: '',
     models: [],
+    pins: [],
+    pins_changed: [],
+    warnings: [],
+    pruned_store: [],
     counts: { chat: 0, non_chat: 0, enabled: 0, recommended: 0 }
   }, partial || {});
 }
@@ -628,16 +720,19 @@ async function runSync(args) {
   // first run on an empty state cannot report everything as disabled.
   const liveSet = liveEnabledSet(modelsJson);
   const rows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, liveSet);
+  const { pins: pinList } = loadPinSet(prevState, REPO_ROOT);
   const state = {
     synced_at: new Date().toISOString(),
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
+    pins: normalizePinList([...pinList]),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, state);
 
   out.synced_at = state.synced_at;
   Object.assign(out, buildBaseReport(rows, prevState));
+  out.pins = normalizePinList([...pinList]);
   out.models = rows;
   out.counts = summarize(rows);
   return out;
@@ -672,7 +767,7 @@ async function runApplyRecommended(args) {
 
   const currentEnabled = liveEnabledSet(modelsJson);
   const initialRows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, currentEnabled);
-  const pins = discoverPins(REPO_ROOT);
+  const { pins } = loadPinSet(prevState, REPO_ROOT);
   const rows = decideEnabledRows(initialRows, [], '--apply-recommended', currentEnabled, prevState);
 
   // F3 pin guard: force-keep any pinned id that --apply-recommended would
@@ -699,10 +794,17 @@ async function runApplyRecommended(args) {
     return out;
   }
 
+  // Panel state is the picker's source of truth for nvidia ids: prune
+  // state-tracked store entries that this write dropped from models.json.
+  const pruneSet = new Set(rows.filter((r) => r.enabled && r.tier !== 'X').map((r) => r.id));
+  const trackedIds = new Set(rows.map((r) => r.id));
+  const storePrune = pruneStore(args.storeFile, args.storeBackupDir, pruneSet, trackedIds, args.dryRun);
+
   const nextState = {
     synced_at: new Date().toISOString(),
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
+    pins: normalizePinList([...pins]),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, nextState);
@@ -711,6 +813,8 @@ async function runApplyRecommended(args) {
   Object.assign(out, buildBaseReport(rows, prevState));
   out.backup = applied.backup;
   out.blocked = blocked;
+  out.pins = normalizePinList([...pins]);
+  out.pruned_store = storePrune.pruned;
   out.models = rows;
   out.counts = summarize(rows);
   return out;
@@ -766,7 +870,7 @@ async function runEnableDisable(args) {
     }
     initialRows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, currentEnabled);
   }
-  const pins = discoverPins(REPO_ROOT);
+  const pins = loadPinSet(prevState, REPO_ROOT).pins;
   const blocked = findPinConflicts(initialRows, verb, args.ids, pins);
 
   const rows = decideEnabledRows(initialRows, args.ids, verb, currentEnabled, prevState);
@@ -784,10 +888,17 @@ async function runEnableDisable(args) {
     return out;
   }
 
+  // Panel state is the picker's source of truth for nvidia ids: prune
+  // state-tracked store entries that this write dropped from models.json.
+  const pruneSet = new Set(rows.filter((r) => r.enabled && r.tier !== 'X').map((r) => r.id));
+  const trackedIds = new Set(rows.map((r) => r.id));
+  const storePrune = pruneStore(args.storeFile, args.storeBackupDir, pruneSet, trackedIds, args.dryRun);
+
   const nextState = {
     synced_at: new Date().toISOString(),
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
+    pins: normalizePinList([...pins]),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, nextState);
@@ -796,6 +907,8 @@ async function runEnableDisable(args) {
   Object.assign(out, buildBaseReport(rows, prevState));
   out.backup = applied.backup;
   out.blocked = blocked;
+  out.pins = normalizePinList([...pins]);
+  out.pruned_store = storePrune.pruned;
   out.models = rows;
   out.counts = summarize(rows);
   return out;
@@ -822,16 +935,55 @@ async function runStatus(args) {
   const rows = prevState.models;
   out.synced_at = prevState.synced_at || '';
   Object.assign(out, buildBaseReport(rows, prevState));
-  // Decorate pin state at read time so HARD_PINNED_IDS or agent-profile
-  // changes reflect immediately without a resync. Shallow copies: the
-  // diff in buildBaseReport above must keep comparing the raw state rows.
+  // Decorate pin state and advisory agent usage at read time so pin and
+  // agent-profile changes reflect immediately without a resync. Shallow
+  // copies: the diff in buildBaseReport above must keep comparing the raw
+  // state rows. READ-ONLY: a missing pins key seeds in memory, never writes.
   try {
-    const pins = discoverPins(REPO_ROOT);
-    out.models = rows.map((r) => ({ ...r, pinned: pins.has(r.id) }));
+    const { pins } = loadPinSet(prevState, REPO_ROOT);
+    const users = agentPinUsers(REPO_ROOT);
+    out.models = rows.map((r) => ({ ...r, pinned: pins.has(r.id), agentUsers: users.get(r.id) || [] }));
   } catch {
     out.models = rows;
   }
   out.counts = prevState.counts || summarize(rows);
+  return out;
+}
+
+// Pin/unpin runner: edits the state file's `pins` array (sorted, deduped).
+// A seed is persisted when the state file had no pins key yet. Pinned ids
+// drive findPinConflicts(); the panel's PIN toggle calls these verbs.
+async function runPinToggle(args) {
+  const out = finalizeReport();
+  const prevState = readStateOrEmpty(args.stateFile);
+  const { pins, seeded } = loadPinSet(prevState, REPO_ROOT);
+  const adding = args.verb === '--pin';
+  const knownIds = new Set((prevState.models || []).map((m) => m && m.id).filter(Boolean));
+  const users = agentPinUsers(REPO_ROOT);
+  const warnings = [];
+  for (const id of args.ids) {
+    if (adding && !knownIds.has(id)) {
+      warnings.push(`${id} is not in the synced catalog; pinning anyway (it will guard once the id appears)`);
+    }
+    if (adding) pins.add(id);
+    else if (!pins.has(id)) warnings.push(`${id} was not pinned; no change`);
+    else pins.delete(id);
+  }
+  const pinList = normalizePinList([...pins]);
+  if (!args.dryRun) {
+    // Persist pins. When the state file has no rows yet (never synced), keep
+    // the empty shell and attach the pins so they survive until the next sync.
+    const base = (prevState && Array.isArray(prevState.models) && prevState.models.length > 0)
+      ? prevState
+      : { synced_at: '', source: 'state', models: [], counts: { chat: 0, non_chat: 0, enabled: 0, recommended: 0 } };
+    writeState(args.stateFile, { ...base, pins: pinList });
+  }
+  out.synced_at = prevState.synced_at || '';
+  out.pins = pinList;
+  out.pins_changed = args.ids.map((id) => ({ id, pinned: pins.has(id), agentUsers: users.get(id) || [] }));
+  out.warnings = warnings;
+  out.models = (prevState.models || []).map((r) => ({ ...r, pinned: pins.has(r.id), agentUsers: users.get(r.id) || [] }));
+  out.counts = prevState.counts || summarize(prevState.models || []);
   return out;
 }
 
@@ -891,6 +1043,7 @@ async function runRestoreBackup(args) {
       synced_at: new Date().toISOString(),
       source: 'restore',
       models: rows,
+      pins: loadPinSet(readStateOrEmpty(args.stateFile), REPO_ROOT).pins,
       counts: summarize(rows)
     };
     writeState(args.stateFile, state);
@@ -921,7 +1074,8 @@ async function main() {
   args.relevancePath = DEFAULT_RELEVANCE_PATH;
   args.modelsFile    = args.modelsFile ? resolve(args.modelsFile) : DEFAULT_MODELS_FILE;
   args.stateFile     = args.stateFile  ? resolve(args.stateFile)  : DEFAULT_STATE_FILE;
-  args.storeFile     = DEFAULT_STORE_FILE;
+  args.storeFile     = args.storeFile  ? resolve(args.storeFile)  : DEFAULT_STORE_FILE;
+  args.storeBackupDir = join(dirname(args.backupDir ? resolve(args.backupDir) : DEFAULT_BACKUP_DIR), 'nvidia-models-store');
   args.keysFile      = args.keysFile   ? resolve(args.keysFile)   : DEFAULT_KEYS_FILE;
   args.backupDir     = args.backupDir  ? resolve(args.backupDir)  : DEFAULT_BACKUP_DIR;
 
@@ -941,6 +1095,7 @@ async function main() {
     else if (args.verb === '--status') report = await runStatus(args);
     else if (args.verb === '--apply-recommended') report = await runApplyRecommended(args);
     else if (args.verb === '--enable' || args.verb === '--disable') report = await runEnableDisable(args);
+    else if (args.verb === '--pin' || args.verb === '--unpin') report = await runPinToggle(args);
     else if (args.verb === '--restore-backup') report = await runRestoreBackup(args);
     else throw new Error(`unknown verb ${args.verb}`);
   } catch (e) {
@@ -990,7 +1145,10 @@ export {
   diffFromState,
   decideEnabledRows,
   findPinConflicts,
-  discoverPins,
+  agentPinUsers,
+  loadPinSet,
+  seedPinList,
+  pruneStore,
   liveEnabledSet,
   HARD_PINNED_IDS,
   TIER_WHY,
@@ -998,6 +1156,7 @@ export {
   DEFAULT_MODELS_FILE,
   DEFAULT_STATE_FILE,
   DEFAULT_BACKUP_DIR,
+  DEFAULT_STORE_BACKUP_DIR,
   readJson,
   writeJsonAtomic,
   rebuildModelsJson,

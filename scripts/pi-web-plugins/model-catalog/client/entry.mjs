@@ -87,6 +87,9 @@ const STYLE_CSS = `
 .nv-pill-r{color:var(--accent)}
 .nv-pill-v{color:var(--amber)}
 .nv-pill-pin{color:var(--amber)}
+.nv-pill-pin-on{color:var(--amber);background:color-mix(in srgb, var(--amber) 18%, transparent);cursor:pointer}
+.nv-pill-pin-off{color:var(--text-faint);cursor:pointer}
+.nv-pill-agents{color:var(--accent)}
 .nv-pill-picker{color:var(--text-faint)}
 .nv-pill-fail{color:var(--red)}
 .nv-notice{border:1px solid var(--amber);background:var(--bg-elev);border-radius:8px;padding:8px 10px;font-size:11.5px;color:var(--text);display:flex;flex-direction:column;gap:4px}
@@ -169,6 +172,7 @@ function createInstance(container, ctx) {
     error: null,
     loading: true,
     busy: null, // "sync" | "bulk:recommended" | "bulk:all" | "bulk:none" | "restore"
+    modelPinOverride: new Map(), // id -> boolean (optimistic, reconciled by /pin response)
     openTiers: new Set(),
     modelEnabledOverride: new Map(), // id -> boolean (optimistic, reconciled by /set response)
     notice: null, // sticky action result notice; survives polls, cleared by the next successful action
@@ -328,6 +332,15 @@ function createInstance(container, ctx) {
         state.payload = payload;
       }
       state.error = null;
+      // Advisory, non-blocking: name the agents that reference a model the
+      // user just disabled so the trade-off is visible without a refusal.
+      const disabledNow = !next;
+      const fresh = (Array.isArray(payload.models) ? payload.models : []).find((m) => m && m.id === id);
+      const users = fresh && Array.isArray(fresh.agentUsers) ? fresh.agentUsers : [];
+      if (disabledNow && users.length > 0) {
+        state.notice = `Disabled ${id}; referenced by: ${users.join(", ")}. Those agents fall back until it is re-enabled.`;
+        state.noticeKind = "info";
+      }
       // A pin-guard refusal comes back ok:true with blocked[] naming this
       // id. Keep it visible as a sticky notice (the payload's blocked box
       // is wiped by the next poll) so the flip-back is explained, not silent.
@@ -340,6 +353,37 @@ function createInstance(container, ctx) {
         state.notice = null;
         state.rowMarks.delete(id);
       }
+      state.diag.lastWrite = `${id} @ ${new Date().toLocaleTimeString()}`;
+    }
+    render();
+  }
+
+  /** Pin/unpin one model. Optimistic update; reconciled by the response. */
+  async function pinToggle(id, next) {
+    const prevPin = state.modelPinOverride.get(id);
+    state.modelPinOverride.set(id, next);
+    state.diag.lastAction = `pin:${id}=${next}`;
+    state.diag.lastAt = new Date().toLocaleTimeString();
+    render();
+    const payload = await postJson("/pin", { id, pinned: next });
+    if (state.destroyed) return;
+    if (!payload || payload.ok === false) {
+      if (prevPin === undefined) state.modelPinOverride.delete(id);
+      else state.modelPinOverride.set(id, prevPin);
+      state.error = payload?.error ?? "unknown error";
+      state.notice = `Could not ${next ? "pin" : "unpin"} ${id}: ${state.error}. The pin state was restored to the engine's current state.`;
+      state.noticeKind = "error";
+      state.rowMarks.set(id, state.error);
+      state.diag.lastWrite = `${id} FAILED`;
+    } else {
+      state.modelPinOverride.delete(id);
+      if (Array.isArray(payload.models)) {
+        state.payload = payload;
+      }
+      state.error = null;
+      state.notice = next ? `Pinned ${id}: the pin guard now refuses to disable it.` : `Unpinned ${id}: it can now be disabled freely.`;
+      state.noticeKind = "info";
+      state.rowMarks.delete(id);
       state.diag.lastWrite = `${id} @ ${new Date().toLocaleTimeString()}`;
     }
     render();
@@ -389,13 +433,28 @@ function createInstance(container, ctx) {
     }
     row.appendChild(name);
 
-    // Pills (tier, pin, picker, reasoning, vision).
+    // Pills (tier, pin toggle, agents, picker, reasoning, vision).
     const pills = el("div", "nv-pills");
     pills.appendChild(el("span", `nv-pill nv-pill-${model.tier ?? "X"}`, model.tier ?? "?"));
-    if (model.pinned) {
-      const pin = el("span", "nv-pill nv-pill-pin", "PIN");
-      pin.title = "Pinned: the engine's pin guard refuses to disable this model";
-      pills.appendChild(pin);
+    const effectivePinned = state.modelPinOverride.has(id)
+      ? state.modelPinOverride.get(id)
+      : !!model.pinned;
+    const pinBtn = el("button", `nv-pill nv-pill-pin ${effectivePinned ? "nv-pill-pin-on" : "nv-pill-pin-off"}`, "PIN");
+    pinBtn.type = "button";
+    pinBtn.title = effectivePinned
+      ? "Pinned: the pin guard refuses to disable this model. Click to unpin (then it can be disabled)."
+      : "Not pinned. Click to pin: the pin guard will then refuse to disable it.";
+    pinBtn.setAttribute("aria-label", `${effectivePinned ? "Unpin" : "Pin"} ${id}`);
+    pinBtn.disabled = state.busy !== null;
+    pinBtn.addEventListener("click", () => {
+      void pinToggle(id, !effectivePinned);
+    });
+    pills.appendChild(pinBtn);
+    const agentUsers = Array.isArray(model.agentUsers) ? model.agentUsers : [];
+    if (agentUsers.length > 0) {
+      const ag = el("span", "nv-pill nv-pill-agents", `AGENTS: ${agentUsers.length}`);
+      ag.title = `Referenced by: ${agentUsers.join(", ")}. Disabling still works; those agents fall back until re-enabled.`;
+      pills.appendChild(ag);
     }
     if (state.rowMarks.has(id)) {
       const fail = el("span", "nv-pill nv-pill-fail", "!");
@@ -445,7 +504,7 @@ function createInstance(container, ctx) {
 
   function noticeNode() {
     const wrap = el("div", "nv-notice");
-    const title = el("div", "nv-notice-title", state.noticeKind === "error" ? "Action failed" : "Engine refused");
+    const title = el("div", "nv-notice-title", state.noticeKind === "error" ? "Action failed" : state.noticeKind === "info" ? "Pin updated" : "Engine refused");
     wrap.appendChild(title);
     wrap.appendChild(el("div", undefined, state.notice));
     const dismiss = el("button", "nv-notice-dismiss", "dismiss");
@@ -492,7 +551,7 @@ function createInstance(container, ctx) {
       p ? String(p.synced_at || "") : "no-payload",
       (p && Array.isArray(p.blocked) ? p.blocked : []).map((b) => `${b?.id}:${b?.reason ?? ""}`).join("|"),
       models
-        .map((m) => `${m.id}|${m.tier ?? ""}|${m.enabled ? 1 : 0}|${m.pinned ? 1 : 0}|${state.modelEnabledOverride.has(m.id) ? (state.modelEnabledOverride.get(m.id) ? 1 : 2) : 0}`)
+        .map((m) => `${m.id}|${m.tier ?? ""}|${m.enabled ? 1 : 0}|${m.pinned ? 1 : 0}|${state.modelEnabledOverride.has(m.id) ? (state.modelEnabledOverride.get(m.id) ? 1 : 2) : 0}|${state.modelPinOverride.has(m.id) ? (state.modelPinOverride.get(m.id) ? 1 : 2) : 0}|${Array.isArray(m.agentUsers) ? m.agentUsers.length : 0}`)
         .join(";"),
       models.length,
       [...state.rowMarks.entries()].map(([k, v]) => `${k}:${v}`).join("|"),

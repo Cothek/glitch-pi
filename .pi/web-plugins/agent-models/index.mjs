@@ -93,6 +93,34 @@ const BACKUP_DIR = ".pi/agent-models/backups";
  *  for the same reason: the real prices live in <agent-dir>/models*.json, which a
  *  plugin may not read without a directory grant. */
 const COSTS_PATH = ".pi/agent-models/costs.json";
+// The model-catalog panel's state file (workspace-relative, so host.fs.readText
+// reaches it with the fs:read permission - no extra grant). Its enabled rows
+// are the source of truth for models turned on via that panel. The runtime
+// registry behind host.models.list() is a startup snapshot: a model enabled
+// via the catalog panel exists in the state file long before the runtime
+// registry reloads, so without this merge it never shows in the pickers.
+const NVIDIA_STATE_PATH = "data/nvidia-models-state.json";
+
+async function readNvidiaStateCatalog(host) {
+	/** Enabled rows of the model-catalog state file, flattened to
+	 *  [{ id: "nvidia/<nim-id>", vision }]. NIM ids may themselves start with
+	 *  "nvidia/" so a full id can be "nvidia/nvidia/<id>" - that is correct and
+	 *  matches the agent pins; do not dedupe or strip. Missing, corrupt, or
+	 *  unreadable file returns [] and the caller falls back to the runtime list
+	 *  alone (the tests' fs mocks have no such file, keeping them isolated). */
+	try {
+		const doc = JSON.parse(await host.fs.readText(NVIDIA_STATE_PATH));
+		const rows = Array.isArray(doc?.models) ? doc.models : [];
+		const out = [];
+		for (const m of rows) {
+			if (typeof m?.id !== "string" || !m.id || m.enabled !== true) continue;
+			out.push({ id: `nvidia/${m.id}`, vision: Array.isArray(m.input) && m.input.includes("image") });
+		}
+		return out;
+	} catch {
+		return [];
+	}
+}
 /** Report cache: cheap to rebuild, but /state is polled by the tab. */
 const STATE_TTL_MS = 5000;
 
@@ -138,6 +166,13 @@ async function readCatalog(host) {
 			if (typeof m?.id !== "string" || !m.id) continue;
 			ids.add(m.id);
 			if (m.vision === true) vision.set(m.id, true);
+		}
+		// Merge the model-catalog state additively: the runtime registry is a
+		// startup snapshot, so a model enabled via the model-catalog panel is
+		// visible here long before the runtime sees it.
+		for (const entry of await readNvidiaStateCatalog(host)) {
+			if (!ids.has(entry.id)) ids.add(entry.id);
+			if (entry.vision && !vision.has(entry.id)) vision.set(entry.id, true);
 		}
 		return { ids, vision };
 	} catch {

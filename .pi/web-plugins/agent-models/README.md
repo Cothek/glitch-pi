@@ -74,7 +74,7 @@ Coverage on this machine, stated plainly:
 
 - `commandcode` - **all 59 configured models are priced**, from Command Code's own published GOAT plan rates ($0.50/$3.00 for Qwen 3.6 Plus, $0.15/$0.50 for glm-5.3-flash). Their docs page embeds a structured catalog; `scripts/commandcode-prices.mjs` extracts it into `config/commandcode-prices.json` (checked in, re-run when prices change). It also carries context window, vision and reasoning per model, and lists 82 models against the 59 pi has configured.
 - `openrouter` - 392 models with real list prices, from the official catalog cache.
-- `nvidia` - 25 curated models (filtered from 56 live NIM ids by `scripts/sync-nvidia-models.mjs`; `NVIDIA_CURATED=0` restores the full list), every field 0 = genuinely free.
+- `nvidia` - the models enabled via the NVIDIA sync engine (`scripts/nvidia-models.mjs --sync` probes the live NIM catalog on session start, removes dead endpoints, auto-enables new chat ids; enable/disable via the built-in model manager or the engine CLI), every field 0 = genuinely free.
 
 Precedence, lowest to highest: `models-store.json`, `models.json`, `config/commandcode-prices.json`, then `.pi/agent-models/prices.json`. Anything still unpriced gets an **openrouter same-slug estimate**, shown with a `~` and named in the tooltip. On this machine that count is legitimately 0 because the docs cover everything, so the path is proven by a synthetic probe instead of by hope.
 

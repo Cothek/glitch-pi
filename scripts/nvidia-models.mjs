@@ -1094,6 +1094,8 @@ async function runStatus(args) {
   const rows = prevState.models;
   out.synced_at = prevState.synced_at || '';
   Object.assign(out, buildBaseReport(rows, prevState));
+  out.pins = normalizePinList(prevState.pins);
+  out.dead = normalizePinList(prevState.dead);
   // Decorate pin state and advisory agent usage at read time so pin and
   // agent-profile changes reflect immediately without a resync. Shallow
   // copies: the diff in buildBaseReport above must keep comparing the raw

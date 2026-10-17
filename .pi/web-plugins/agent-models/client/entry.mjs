@@ -439,21 +439,7 @@ function createInstance(container, ctx) {
 		state.diag.lastAt = new Date().toLocaleTimeString();
 		void load(true);
 	});
-	if (typeof ctx?.setView === "function") {
-		const catalog = el("button", "am-btn", "Model catalog");
-		catalog.type = "button";
-		catalog.title = "Open the NVIDIA model catalog (enable models, resync, bulk actions)";
-		catalog.addEventListener("click", () => {
-			try {
-				ctx.setView("plugin:model-catalog");
-			} catch (err) {
-				console.warn("Failed to open model catalog:", err);
-			}
-		});
-		head.append(title, sub, el("div", "am-spacer"), catalog, refresh);
-	} else {
-		head.append(title, sub, el("div", "am-spacer"), refresh);
-	}
+	head.append(title, sub, el("div", "am-spacer"), refresh);
 
 	const bulkBar = el("div", "am-bulk-bar");
 	const filters = el("div", "am-filters");

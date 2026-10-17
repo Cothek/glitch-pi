@@ -93,16 +93,17 @@ const BACKUP_DIR = ".pi/agent-models/backups";
  *  for the same reason: the real prices live in <agent-dir>/models*.json, which a
  *  plugin may not read without a directory grant. */
 const COSTS_PATH = ".pi/agent-models/costs.json";
-// The model-catalog panel's state file (workspace-relative, so host.fs.readText
+// The NVIDIA sync engine's state file (workspace-relative, so host.fs.readText
 // reaches it with the fs:read permission - no extra grant). Its enabled rows
-// are the source of truth for models turned on via that panel. The runtime
-// registry behind host.models.list() is a startup snapshot: a model enabled
-// via the catalog panel exists in the state file long before the runtime
-// registry reloads, so without this merge it never shows in the pickers.
+// are the source of truth for models turned on via the sync engine or the
+// built-in model manager. The runtime registry behind host.models.list() is a
+// startup snapshot: a model enabled there exists in the state file long before
+// the runtime registry reloads, so without this merge it never shows in the
+// pickers.
 const NVIDIA_STATE_PATH = "data/nvidia-models-state.json";
 
 async function readNvidiaStateCatalog(host) {
-	/** Enabled rows of the model-catalog state file, flattened to
+	/** Enabled rows of the NVIDIA sync state file, flattened to
 	 *  [{ id: "nvidia/<nim-id>", vision }]. NIM ids may themselves start with
 	 *  "nvidia/" so a full id can be "nvidia/nvidia/<id>" - that is correct and
 	 *  matches the agent pins; do not dedupe or strip. Missing, corrupt, or
@@ -167,8 +168,8 @@ async function readCatalog(host) {
 			ids.add(m.id);
 			if (m.vision === true) vision.set(m.id, true);
 		}
-		// Merge the model-catalog state additively: the runtime registry is a
-		// startup snapshot, so a model enabled via the model-catalog panel is
+		// Merge the NVIDIA sync state additively: the runtime registry is a
+		// startup snapshot, so a model enabled via the sync engine is
 		// visible here long before the runtime sees it.
 		for (const entry of await readNvidiaStateCatalog(host)) {
 			if (!ids.has(entry.id)) ids.add(entry.id);

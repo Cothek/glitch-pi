@@ -140,7 +140,7 @@ built from launch-chain greps only and missed a whole consumer generation.
   (launch-integration, inject-providers, lmstudio-context-detector,
   detect-lmstudio-context)
 - `validate-config.mjs` / `.ps1` — validate opencode.json, call glitch.mjs
-- `resolve-models.mjs`, `switch-model.ps1`, `sync-nvidia-models.mjs`
+- `resolve-models.mjs`, `switch-model.ps1` (sync-nvidia-models.mjs retired 2026-10-17: folded into scripts/nvidia-models.mjs, run by .pi/extensions/nvidia-model-sync.ts)
 - `check-review-pass.mjs`, `test-review-pass.mjs`, `write-review-pass.mjs`
 - `test-vision-dispatch.mjs`, `test-vision-logger.mjs`
 - `audit-data.mjs`, `audit-data-review.mjs` — reference model-ui

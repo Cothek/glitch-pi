@@ -42,7 +42,7 @@ const { HARD_PINNED_IDS } = engine;
 // ---------- Fixtures ----------
 
 // Build a synthetic catalog that exercises every tier:
-//  - all 14 Tier A ids (covered by discoverPins for the pin-guard group)
+//  - all 14 Tier A ids (covered by agentPinUsers for the pin-guard group)
 //  - one Tier B id
 //  - one Tier C id
 //  - one Tier X id (matches "guard")
@@ -116,10 +116,15 @@ function runEngine(argsObj) {
   // id list is a single argv the engine splits on commas.
   const cli = [ENGINE_FILE, argsObj.verb];
   if (argsObj.ids) cli.push(argsObj.ids);
+  // Derive the store fixture from the state path when a group did not pass
+  // one: makeFixtureDir writes models-store.json next to state.json. Every
+  // run MUST pass a store file so the prune never touches the live store.
+  const storeFile = argsObj.storeFile ?? join(dirname(argsObj.stateFile), 'models-store.json');
   cli.push(
     '--json',
     '--models-file', argsObj.modelsFile,
     '--state-file',  argsObj.stateFile,
+    '--store-file',  storeFile,
     '--catalog',     argsObj.catalogFile,
     '--backup-dir',  argsObj.backupDir
   );
@@ -132,10 +137,12 @@ function runEngine(argsObj) {
 function runEngineOffline(argsObj) {
   const cli = [ENGINE_FILE, argsObj.verb];
   if (argsObj.ids) cli.push(argsObj.ids);
+  const storeFile = argsObj.storeFile ?? join(dirname(argsObj.stateFile), 'models-store.json');
   cli.push(
     '--json',
     '--models-file', argsObj.modelsFile,
     '--state-file',  argsObj.stateFile,
+    '--store-file',  storeFile,
     '--keys-file',   argsObj.keysFile ?? join(argsObj.dir ?? '.', 'no-such-keys.json'),
     '--backup-dir',  argsObj.backupDir
   );
@@ -162,7 +169,9 @@ function groupTierAssignment() {
     const state = JSON.parse(readFileSync(stateFile, 'utf8'));
     const unknownRow = state.models.find((m) => m.id === 'somevendor/totally-new-model-9000');
     assert.strictEqual(unknownRow.tier, 'C', 'unknown id defaults to Tier C');
-    assert.strictEqual(unknownRow.enabled, false, 'unknown id stays disabled');
+    // Sync reconciliation (2026-10-16): new CHAT ids are auto-enabled so
+    // they reach the picker, even when they classify as Tier C.
+    assert.strictEqual(unknownRow.enabled, true, 'unknown new chat id is auto-enabled by sync');
     const guardRow = state.models.find((m) => m.id === 'nvidia/nemoguard-7b-safety');
     assert.strictEqual(guardRow.tier, 'X', 'tier X by guard pattern');
     assert.strictEqual(guardRow.category, 'guard', 'category guard for "guard" pattern');
@@ -246,19 +255,21 @@ function groupAtomicWriteScope() {
 function groupRestoreBackup() {
   const { dir, stateFile, modelsFile, catalogFile, backupDir } = makeFixtureDir();
   try {
-    const before = readFileSync(modelsFile, 'utf8');
-    // Sync + apply so a backup is created (in temp backupDir).
+    // Sync + apply so backups are created (in temp backupDir). The sync
+    // itself may rewrite models.json (new-id reconciliation), so the
+    // pre-apply baseline is captured AFTER the sync.
     runEngine({ verb: '--sync', modelsFile, stateFile, catalogFile, backupDir });
+    const beforeApply = readFileSync(modelsFile, 'utf8');
     const apply = runEngine({ verb: '--apply-recommended', modelsFile, stateFile, catalogFile, backupDir });
     assert.strictEqual(apply.status, 0, 'apply exit 0');
     const afterApply = readFileSync(modelsFile, 'utf8');
-    assert.notStrictEqual(before, afterApply, 'apply should have changed models.json');
+    assert.notStrictEqual(beforeApply, afterApply, 'apply should have changed models.json');
 
     // Restore from the latest backup (in temp backupDir).
     const restore = runEngine({ verb: '--restore-backup', modelsFile, stateFile, catalogFile, backupDir });
     assert.strictEqual(restore.status, 0, `restore exit 0; stderr=${restore.stderr}`);
     const afterRestore = readFileSync(modelsFile, 'utf8');
-    assert.strictEqual(before, afterRestore, 'restored content equals pre-apply content');
+    assert.strictEqual(beforeApply, afterRestore, 'restored content equals pre-apply content');
   } finally { cleanup(dir); }
 }
 
@@ -356,6 +367,17 @@ function groupStatusPayloadShape() {
     // The 13 frozen keys are still present.
     const frozen = ['ok','synced_at','catalog_total','chat_total','enabled','recommended','added_since_last_sync','missing_from_api','non_chat_total','changed','backup','blocked','error'];
     for (const k of frozen) assert.ok(Object.prototype.hasOwnProperty.call(report, k), `frozen key ${k} missing`);
+    // models_json mirrors the LIVE models.json nvidia list (disk truth for the
+    // agent-models panel merge): bare ids + vision from the input array. The
+    // sync that ran just before auto-enabled every catalog CHAT id, so the
+    // expected list is the catalog minus the tier-X id.
+    assert.ok(Array.isArray(report.models_json), 'models_json is an array');
+    const mjIds = report.models_json.map((m) => m.id).sort();
+    const expectedIds = FIXTURE_CATALOG.map((m) => m.id).filter((id) => id !== 'nvidia/nemoguard-7b-safety').sort();
+    assert.deepStrictEqual(mjIds, expectedIds, 'models_json lists the live models.json ids (catalog chat ids)');
+    for (const m of report.models_json) {
+      assert.ok(typeof m.vision === 'boolean', `models_json ${m.id} carries a boolean vision flag`);
+    }
   } finally { cleanup(fx.dir); }
 }
 
@@ -652,6 +674,268 @@ function groupStateFirstToggleOffline() {
   } finally { cleanup(fx.dir); }
 }
 
+// ---------- Group 13: pin seed migration (state without pins key) ----------
+
+function groupPinSeedMigration() {
+  const fx = makeFixtureDir();
+  try {
+    const sync = runEngine({ verb: '--sync', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(sync.status, 0, 'sync should exit 0');
+    const state = JSON.parse(readFileSync(fx.stateFile, 'utf8'));
+    assert.ok(Array.isArray(state.pins), 'sync persisted a pins array (seeded from HARD_PINNED_IDS + agent scan)');
+    for (const id of HARD_PINNED_IDS) {
+      assert.ok(state.pins.includes(id), `seed contains hard pin ${id}`);
+    }
+    assert.deepStrictEqual(state.pins, [...new Set(state.pins)].sort(), 'pins are sorted and deduped');
+
+    // Pin an unknown id: allowed, with a warning, and persisted.
+    const pin = runEngine({ verb: '--pin', ids: 'somevendor/totally-new-model-9000,somevendor/never-synced', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(pin.status, 0, 'pin should exit 0');
+    const report = JSON.parse(pin.stdout);
+    assert.ok(report.pins.includes('somevendor/totally-new-model-9000'), 'known id pinned');
+    assert.ok(report.pins.includes('somevendor/never-synced'), 'unknown id pinned anyway');
+    assert.ok((report.warnings || []).some((w) => w.includes('somevendor/never-synced')), 'unknown id produced a warning');
+    const state2 = JSON.parse(readFileSync(fx.stateFile, 'utf8'));
+    assert.ok(state2.pins.includes('somevendor/never-synced'), 'pin persisted to the state file');
+
+    // Unpin a non-pinned id: no-op message, not an error.
+    const unpin = runEngine({ verb: '--unpin', ids: 'somevendor/never-pinned', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(unpin.status, 0, 'unpin of a non-pinned id exits 0');
+    const reportUnpin = JSON.parse(unpin.stdout);
+    assert.ok((reportUnpin.warnings || []).some((w) => w.includes('was not pinned')), 'unpin of a non-pinned id warns');
+  } finally { cleanup(fx.dir); }
+}
+
+// ---------- Group 14: unpin allows disable, re-pin re-arms the guard ----------
+
+function groupUnpinAllowsDisable() {
+  const fx = makeFixtureDir();
+  try {
+    runEngine({ verb: '--sync', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    const target = HARD_PINNED_IDS[0]; // z-ai/glm-5.3, seeded as pinned
+
+    // 1. Guard on: refuse the disable.
+    const dis1 = runEngine({ verb: '--disable', ids: target, modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    const rep1 = JSON.parse(dis1.stdout);
+    assert.ok((rep1.blocked || []).some((b) => b.id === target), 'pinned disable refused');
+
+    // 2. Unpin: now the disable goes through.
+    const unpin = runEngine({ verb: '--unpin', ids: target, modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(unpin.status, 0, 'unpin exits 0');
+    const dis2 = runEngine({ verb: '--disable', ids: target, modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    const rep2 = JSON.parse(dis2.stdout);
+    assert.strictEqual((rep2.blocked || []).length, 0, `unpinned disable not blocked, got ${JSON.stringify(rep2.blocked)}`);
+    const after2 = JSON.parse(readFileSync(fx.modelsFile, 'utf8'));
+    assert.ok(!after2.providers.nvidia.models.find((m) => m.id === target), 'unpinned id removed from models.json');
+
+    // 3. Re-pin: guard re-arms.
+    const pin = runEngine({ verb: '--pin', ids: target, modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(pin.status, 0, 're-pin exits 0');
+    const dis3 = runEngine({ verb: '--disable', ids: target, modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    const rep3 = JSON.parse(dis3.stdout);
+    assert.ok((rep3.blocked || []).some((b) => b.id === target), 're-pinned disable refused again');
+  } finally { cleanup(fx.dir); }
+}
+
+// ---------- Group 15: store prune after a models.json write ----------
+
+function groupStorePrune() {
+  const fx = makeFixtureDir();
+  try {
+    runEngine({ verb: '--sync', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    // Extend the fixture store: one more TRACKED id (in the catalog, disabled)
+    // and one CUSTOM id (not tracked). kimi-k3 (tracked, disabled) is already
+    // there from FIXTURE_STORE.
+    const store = JSON.parse(readFileSync(fx.storeFile, 'utf8'));
+    store.nvidia.models.push({ id: 'mistralai/mistral-large-2-instruct', name: 'Mistral Large 2 (store)', contextWindow: 128000, maxTokens: 8192, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    store.nvidia.models.push({ id: 'somevendor/custom-user-addition', name: 'Custom (store)', contextWindow: 8000, maxTokens: 1024, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    store.commandcode = { models: [{ id: 'commandcode/example', name: 'Example', contextWindow: 8000, maxTokens: 2048 }] };
+    writeFileSync(fx.storeFile, JSON.stringify(store, null, 2));
+
+    // Disable the mistral id: models.json keeps glm-5.3 + the ids the sync
+    // auto-enabled (kimi-k3 is tier A chat, so the first sync enabled it and
+    // it must SURVIVE in the store now). Tracked store entries absent from
+    // models.json are pruned; custom + non-nvidia survive.
+    const dis = runEngine({ verb: '--disable', ids: 'mistralai/mistral-large-2-instruct', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(dis.status, 0, 'disable exits 0');
+    const rep = JSON.parse(dis.stdout);
+    assert.deepStrictEqual([...(rep.pruned_store || [])].sort(), ['mistralai/mistral-large-2-instruct'], 'pruned_store lists exactly the tracked+absent ids');
+    const after = JSON.parse(readFileSync(fx.storeFile, 'utf8'));
+    const ids = after.nvidia.models.map((m) => m.id);
+    assert.ok(ids.includes('moonshotai/kimi-k3'), 'store entry for an auto-enabled id survives');
+    assert.ok(!ids.includes('mistralai/mistral-large-2-instruct'), 'tracked store entry pruned');
+    assert.ok(ids.includes('somevendor/custom-user-addition'), 'custom non-tracked store entry survives');
+    assert.ok(after.commandcode && after.commandcode.models.length === 1, 'non-nvidia provider untouched');
+    // A store backup was taken next to the models.json backup dir.
+    const storeBackupDir = join(fx.dir, 'nvidia-models-store');
+    assert.ok(existsSync(storeBackupDir) && readdirSync(storeBackupDir).some((f) => f.startsWith('models-store.json.')), 'store backup written');
+  } finally { cleanup(fx.dir); }
+}
+
+// ---------- Group 16: --status never writes the pins seed ----------
+
+function groupStatusReadOnlyPins() {
+  const fx = makeFixtureDir();
+  try {
+    // Hand-write a state file WITHOUT a pins key.
+    const minimal = {
+      synced_at: '2026-01-01T00:00:00.000Z',
+      source: 'fixture',
+      models: [
+        { id: 'z-ai/glm-5.3', name: 'GLM 5.3', category: 'chat', tier: 'A', relevance: 'relevant', enabled: true, in_models_json: true, in_store: false, contextWindow: 200000, maxTokens: 8192, reasoning: false, input: ['text'], why: 'test' }
+      ],
+      counts: { chat: 1, non_chat: 0, enabled: 1, recommended: 1 }
+    };
+    writeFileSync(fx.stateFile, JSON.stringify(minimal, null, 2));
+    const st = runEngine({ verb: '--status', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(st.status, 0, 'status exits 0');
+    const report = JSON.parse(st.stdout);
+    const row = (report.models || []).find((m) => m.id === 'z-ai/glm-5.3');
+    assert.strictEqual(row && row.pinned, true, 'seeded pin decorated in the report (in memory)');
+    assert.ok(Array.isArray(row && row.agentUsers), 'agentUsers array present');
+    const after = JSON.parse(readFileSync(fx.stateFile, 'utf8'));
+    assert.ok(!('pins' in after), '--status stayed read-only: no pins key written');
+  } finally { cleanup(fx.dir); }
+}
+
+// ---------- Group 17: agentPinUsers advisory map ----------
+
+function groupAgentPinUsers() {
+  const dir = mkdtempSync(join(tmpdir(), 'nvidia-agents-test-'));
+  try {
+    const agentsDir = join(dir, '.pi', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, 'coder.md'), '---\nname: coder\n---\nmodel: nvidia/moonshotai/kimi-k3\n');
+    writeFileSync(join(agentsDir, 'vision.md'), 'model: nvidia/z-ai/glm-5.3-flash\n');
+    writeFileSync(join(agentsDir, 'reviewer.md'), 'model: nvidia/moonshotai/kimi-k3\n');
+    writeFileSync(join(agentsDir, 'other.md'), 'model: opencode/some-other-model\n');
+    writeFileSync(join(agentsDir, 'notes.txt'), 'model: nvidia/ignored-not-markdown\n');
+    const users = engine.agentPinUsers(dir);
+    assert.ok(users instanceof Map, 'returns a Map');
+    assert.deepStrictEqual(users.get('moonshotai/kimi-k3'), ['coder.md', 'reviewer.md'], 'kimi-k3 mapped to both agent files');
+    assert.deepStrictEqual(users.get('z-ai/glm-5.3-flash'), ['vision.md'], 'glm-5.3-flash mapped');
+    assert.ok(!users.has('some-other-model'), 'non-nvidia model lines ignored');
+    assert.ok(!users.has('ignored-not-markdown'), 'non-markdown files ignored');
+  } finally { cleanup(dir); }
+}
+
+// ---------- Group 18: id-list parsing accepts one comma token OR separate tokens ----------
+
+function groupIdListParsing() {
+  // The panel's /bulk path passes one argv token per id; the CLI help
+  // documents one comma-joined token. Both must parse to the same list.
+  const joined = engine.parseArgs(['--disable', 'a/b,c/d', '--json']);
+  assert.deepStrictEqual(joined.ids, ['a/b', 'c/d'], 'comma-joined token parses');
+  const separate = engine.parseArgs(['--enable', 'a/b', 'c/d', '--json']);
+  assert.deepStrictEqual(separate.ids, ['a/b', 'c/d'], 'separate argv tokens parse');
+  const mixed = engine.parseArgs(['--pin', 'a/b', 'c/d,e/f', '--json']);
+  assert.deepStrictEqual(mixed.ids, ['a/b', 'c/d', 'e/f'], 'mixed tokens parse');
+  const stops = engine.parseArgs(['--disable', 'a/b', '--dry-run']);
+  assert.deepStrictEqual(stops.ids, ['a/b'], 'flag token stops the id scan');
+}
+
+// ---------- Group 19: reconcileRows (dead removal + new-endpoint enabling) ----------
+
+function groupReconcileRowsUnit() {
+  const prevState = {
+    models: [
+      { id: 'z-ai/glm-5.3', category: 'chat', tier: 'A', enabled: true },
+      { id: 'mistralai/mistral-large-2-instruct', category: 'chat', tier: 'B', enabled: false }
+    ]
+  };
+  const rows = [
+    { id: 'z-ai/glm-5.3', category: 'chat', tier: 'A', enabled: true },
+    { id: 'mistralai/mistral-large-2-instruct', category: 'chat', tier: 'B', enabled: false },
+    { id: 'moonshotai/kimi-k2.6', category: 'chat', tier: 'A', enabled: true },
+    { id: 'brandnew/fresh-chat-model', category: 'chat', tier: 'C', enabled: false },
+    { id: 'nvidia/some-embed-model', category: 'embedding', tier: 'X', enabled: false }
+  ];
+  const out = engine.reconcileRows(rows, prevState, new Set(['moonshotai/kimi-k2.6']));
+  const ids = out.rows.map((r) => r.id);
+  assert.ok(!ids.includes('moonshotai/kimi-k2.6'), 'dead id removed from rows');
+  assert.strictEqual(out.removedDeadIds.length, 1, 'removedDeadIds reports the dead id');
+  assert.deepStrictEqual(out.addedIds, ['brandnew/fresh-chat-model'], 'addedIds lists only new CHAT ids (picker-relevant)');
+  const fresh = out.rows.find((r) => r.id === 'brandnew/fresh-chat-model');
+  assert.strictEqual(fresh.enabled, true, 'new CHAT id auto-enabled');
+  const embed = out.rows.find((r) => r.id === 'nvidia/some-embed-model');
+  assert.strictEqual(embed.enabled, false, 'new tier X id stays excluded');
+  const kept = out.rows.find((r) => r.id === 'mistralai/mistral-large-2-instruct');
+  assert.strictEqual(kept.enabled, false, 'existing disabled id stays disabled');
+  const alive = out.rows.find((r) => r.id === 'z-ai/glm-5.3');
+  assert.strictEqual(alive.enabled, true, 'existing enabled id stays enabled');
+  // Pins are never touched by reconciliation.
+  assert.ok(!('pins' in out), 'reconcileRows does not modify pins');
+  // Empty deadIds is a no-op on rows.
+  const noop = engine.reconcileRows(rows, prevState, []);
+  assert.strictEqual(noop.rows.length, rows.length, 'no dead ids keeps every row');
+}
+
+// ---------- Group 20: fixture sync stays offline and skips probing ----------
+
+function groupFixtureSyncOffline() {
+  const fx = makeFixtureDir();
+  try {
+    // First sync establishes the state (and may write models.json for new
+    // ids); the SECOND sync must be a no-op: nothing probed, nothing written.
+    runEngine({ verb: '--sync', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    const snapshot = readFileSync(fx.modelsFile, 'utf8');
+    const res = runEngine({ verb: '--sync', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(res.status, 0, 'fixture sync exits 0');
+    const rep = JSON.parse(res.stdout);
+    assert.strictEqual(rep.ok, true, 'fixture sync ok');
+    assert.strictEqual(rep.probe_skipped, true, 'fixture sync skips probing');
+    assert.deepStrictEqual(rep.removed_dead, [], 'no dead removals in fixture mode');
+    assert.strictEqual(rep.added_new.length, 0, 'second sync adds nothing new');
+    const after = readFileSync(fx.modelsFile, 'utf8');
+    assert.strictEqual(after, snapshot, 'unchanged enabled set writes NOTHING to models.json');
+    assert.strictEqual(rep.backup, '', 'no backup created on a no-op refresh');
+    // Known-dead ids survive state rewrites by non-probing verbs.
+    const st1 = JSON.parse(readFileSync(fx.stateFile, 'utf8'));
+    st1.dead = ['somevendor/probed-dead-earlier'];
+    writeFileSync(fx.stateFile, JSON.stringify(st1, null, 2));
+    const res3 = runEngine({ verb: '--disable', ids: 'mistralai/mistral-large-2-instruct', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(res3.status, 0, 'disable exits 0');
+    const st3 = JSON.parse(readFileSync(fx.stateFile, 'utf8'));
+    assert.deepStrictEqual(st3.dead, ['somevendor/probed-dead-earlier'], 'dead list carried through a non-probing verb');
+  } finally { cleanup(fx.dir); }
+}
+
+// ---------- Group 21: new chat endpoints are auto-enabled and written ----------
+
+function groupNewEndpointsAutoEnable() {
+  const fx = makeFixtureDir();
+  try {
+    // No state file yet: every catalog chat id is "new". The fixture
+    // models.json only carries two of them, so the reconciled set grows and
+    // models.json must be rewritten with the new ids enabled.
+    const before = JSON.parse(readFileSync(fx.modelsFile, 'utf8'));
+    const beforeIds = new Set(before.providers.nvidia.models.map((m) => m.id));
+    const catalogChatIds = FIXTURE_CATALOG.map((m) => m.id).filter((id) => !beforeIds.has(id));
+    assert.ok(catalogChatIds.length > 0, 'fixture has ids missing from models.json');
+    const res = runEngine({ verb: '--sync', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    assert.strictEqual(res.status, 0, 'sync exits 0');
+    const rep = JSON.parse(res.stdout);
+    assert.strictEqual(rep.ok, true, 'sync ok');
+    assert.ok(rep.added_new.length >= catalogChatIds.length, `report lists added_new (${rep.added_new.length})`);
+    const after = JSON.parse(readFileSync(fx.modelsFile, 'utf8'));
+    const afterIds = new Set(after.providers.nvidia.models.map((m) => m.id));
+    // The engine's added_new list is the expectation: every reported new
+    // chat id must land in models.json.
+    for (const id of rep.added_new) {
+      assert.ok(afterIds.has(id), `reported new chat id ${id} written to models.json`);
+    }
+    // Non-chat ids must NOT be auto-added by the new-endpoint rule.
+    assert.ok(!afterIds.has('nvidia/nemoguard-7b-safety'), 'tier X id stays excluded from models.json');
+    // A second sync is a no-op: nothing new, nothing written.
+    const snapshot = readFileSync(fx.modelsFile, 'utf8');
+    const res2 = runEngine({ verb: '--sync', modelsFile: fx.modelsFile, stateFile: fx.stateFile, catalogFile: fx.catalogFile, backupDir: fx.backupDir });
+    const rep2 = JSON.parse(res2.stdout);
+    assert.strictEqual(rep2.ok, true, 'second sync ok');
+    assert.strictEqual(rep2.added_new.length, 0, 'second sync adds nothing');
+    assert.strictEqual(readFileSync(fx.modelsFile, 'utf8'), snapshot, 'second sync writes nothing');
+  } finally { cleanup(fx.dir); }
+}
+
 // ---------- Run ----------
 
 const groups = [
@@ -666,7 +950,16 @@ const groups = [
   ['F3 apply force-keeps pinned ids',            groupApplyPinForceKeep],
   ['F5 restore overrides are safe',              groupRestoreOverridesAndSafety],
   ['F6 state-file override isolates state',      groupStateFileIsolation],
-  ['state-first offline toggle',                groupStateFirstToggleOffline]
+  ['state-first offline toggle',                groupStateFirstToggleOffline],
+  ['pin seed migration + pin/unpin verbs',       groupPinSeedMigration],
+  ['unpin allows disable, re-pin re-arms',       groupUnpinAllowsDisable],
+  ['store prune after models.json write',        groupStorePrune],
+  ['status stays read-only on pins',             groupStatusReadOnlyPins],
+  ['agentPinUsers advisory map',                 groupAgentPinUsers],
+  ['id-list parsing accepts both argv styles',   groupIdListParsing],
+  ['reconcileRows dead removal + new enabling',  groupReconcileRowsUnit],
+  ['fixture sync stays offline, no-op writes nothing', groupFixtureSyncOffline],
+  ['new chat endpoints auto-enabled + written',  groupNewEndpointsAutoEnable]
 ];
 
 for (const [name, fn] of groups) {

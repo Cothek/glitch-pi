@@ -61,6 +61,8 @@
  */
 
 import { definePlugin } from "./sdk/index.mjs";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 /**
  * NESTED-IMPORT CACHE (found the hard way, live): the host re-imports THIS entry
@@ -93,8 +95,83 @@ const BACKUP_DIR = ".pi/agent-models/backups";
  *  for the same reason: the real prices live in <agent-dir>/models*.json, which a
  *  plugin may not read without a directory grant. */
 const COSTS_PATH = ".pi/agent-models/costs.json";
+// The NVIDIA sync engine's state file (workspace-relative, so host.fs.readText
+// reaches it with the fs:read permission - no extra grant). Its enabled rows
+// are the source of truth for models turned on via the sync engine or the
+// built-in model manager. The runtime registry behind host.models.list() is a
+// startup snapshot: a model enabled there exists in the state file long before
+// the runtime registry reloads, so without this merge it never shows in the
+// pickers.
+//
+// MIGRATION NOTE (2026): the merge source changed from the stale state file
+// to the live models.json via the engine's --status verb. This ensures that
+// models toggled in the BUILT-IN model manager (which writes ~/.pi/agent/models.json
+// directly + hot-reloads) appear immediately, without waiting for the sync engine's
+// 30-min gate. The engine runs via host.bash as space-free tokens with the repo
+// root as cwd - never a shell string, never an absolute path in the tokens (PM-051).
+// Failures degrade silently to [].
 /** Report cache: cheap to rebuild, but /state is polled by the tab. */
 const STATE_TTL_MS = 5000;
+
+/** Cache for engine status (30s to avoid spamming the engine on every poll). */
+let nvidiaModelsCache = null;
+const NVIDIA_MODELS_TTL_MS = 30_000;
+
+/** Repo root for engine invocations: walk up from cwd to the dir holding
+ *  .pi or .git (same pattern as .pi/extensions/nvidia-model-sync.ts). */
+function resolveEngineRoot() {
+	let dir = process.cwd();
+	for (;;) {
+		try {
+			if (existsSync(join(dir, ".pi")) || existsSync(join(dir, ".git"))) return dir;
+		} catch { /* unreadable dir: keep walking */ }
+		const parent = dirname(dir);
+		if (parent === dir) return process.cwd();
+		dir = parent;
+	}
+}
+
+/** Bundled node first (data/node/node.exe), PATH node as fallback. */
+function pickEngineNode(root) {
+	const bundled = join(root, "data", "node", process.platform === "win32" ? "node.exe" : "node");
+	return existsSync(bundled) ? bundled : process.execPath;
+}
+
+/**
+ * Read NVIDIA models from the live models.json via the engine's --status.
+ * Replaces the stale state-file approach so model toggles made in the
+ * built-in model manager appear immediately. Returns an array of
+ * { id: "nvidia/<id>", vision: boolean }.
+ */
+async function readNvidiaStateCatalog(host) {
+	const now = Date.now();
+	if (nvidiaModelsCache && now - nvidiaModelsCache.at < NVIDIA_MODELS_TTL_MS) {
+		return nvidiaModelsCache.entries;
+	}
+
+	try {
+		const root = resolveEngineRoot();
+		const argv = [pickEngineNode(root), join("scripts", "nvidia-models.mjs"), "--status", "--json"];
+		const result = await host.bash(argv.join(" "), { cwd: root, timeoutMs: 30_000 });
+
+		if (!result || result.ok !== true) {
+			return [];
+		}
+
+		const report = JSON.parse(result.output || "{}");
+		const listed = Array.isArray(report.models_json) ? report.models_json : [];
+		const entries = [];
+		for (const m of listed) {
+			if (typeof m?.id !== "string" || !m.id) continue;
+			entries.push({ id: `nvidia/${m.id}`, vision: m.vision === true });
+		}
+
+		nvidiaModelsCache = { at: now, entries };
+		return entries;
+	} catch {
+		return [];
+	}
+}
 
 /**
  * Named model configurations — snapshots of every agent's model pin that the
@@ -138,6 +215,15 @@ async function readCatalog(host) {
 			if (typeof m?.id !== "string" || !m.id) continue;
 			ids.add(m.id);
 			if (m.vision === true) vision.set(m.id, true);
+		}
+		// Merge the NVIDIA sync state additively: the runtime registry is a
+		// startup snapshot, so a model enabled via the sync engine is
+		// visible here long before the runtime sees it. We now read from the
+		// live models.json via the engine's --status, replacing the stale
+		// state-file approach.
+		for (const entry of await readNvidiaStateCatalog(host)) {
+			if (!ids.has(entry.id)) ids.add(entry.id);
+			if (entry.vision && !vision.has(entry.id)) vision.set(entry.id, true);
 		}
 		return { ids, vision };
 	} catch {

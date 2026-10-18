@@ -42,10 +42,16 @@ const DEFAULT_STORE_FILE     = join(homedir(), '.pi', 'agent', 'models-store.jso
 const DEFAULT_KEYS_FILE      = join(homedir(), '.pi', 'agent', 'provider-keys.json');
 const DEFAULT_STATE_FILE     = join(REPO_ROOT, 'data', 'nvidia-models-state.json');
 const DEFAULT_BACKUP_DIR     = join(REPO_ROOT, 'data', 'backups', 'nvidia-models');
+const DEFAULT_STORE_BACKUP_DIR = join(REPO_ROOT, 'data', 'backups', 'nvidia-models-store');
 const API_HOST               = 'integrate.api.nvidia.com';
 const API_PATH               = '/v1/models';
 const API_TIMEOUT_MS         = 20_000;
 
+// Hard-pinned ids are the SEED for the state file's `pins` array, not a
+// permanent guard. On the first state write after this change the seed is
+// persisted (HARD_PINNED_IDS ∪ every model: nvidia/... line in .pi/agents/*.md);
+// from then on the persisted list is the only guard source and the panel's
+// PIN toggle edits it directly.
 const HARD_PINNED_IDS = [
   'z-ai/glm-5.3',
   'moonshotai/kimi-k3',
@@ -60,7 +66,7 @@ const TIER_WHY = {
   X: 'non-chat (embedding/guard/reward/parser/retrieval/vision utility), excluded from the panel'
 };
 
-const VERBS = ['--sync', '--status', '--apply-recommended', '--enable', '--disable', '--restore-backup'];
+const VERBS = ['--sync', '--status', '--apply-recommended', '--enable', '--disable', '--pin', '--unpin', '--restore-backup'];
 
 function parseArgs(argv) {
   const args = {
@@ -68,6 +74,7 @@ function parseArgs(argv) {
     dryRun: false,
     modelsFile: null,
     stateFile: null,
+    storeFile: null,
     catalog: null,
     keysFile: null,
     backupDir: null,
@@ -81,6 +88,7 @@ function parseArgs(argv) {
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--models-file') { args.modelsFile = argv[++i]; }
     else if (a === '--state-file')  { args.stateFile  = argv[++i]; }
+    else if (a === '--store-file')  { args.storeFile  = argv[++i]; }
     else if (a === '--catalog')     { args.catalog    = argv[++i]; }
     else if (a === '--keys-file')   { args.keysFile   = argv[++i]; }
     else if (a === '--backup-dir')  { args.backupDir  = argv[++i]; }
@@ -88,10 +96,15 @@ function parseArgs(argv) {
     else if (VERBS.includes(a)) {
       if (args.verb) throw new Error(`only one verb allowed, got ${args.verb} and ${a}`);
       args.verb = a;
-      if (a === '--enable' || a === '--disable') {
-        const next = argv[++i];
-        if (!next) throw new Error(`${a} requires a comma-separated id list`);
-        args.ids = next.split(',').map((s) => s.trim()).filter(Boolean);
+      if (['--enable', '--disable', '--pin', '--unpin'].includes(a)) {
+        // Ids may arrive as one comma-joined token or as separate argv
+        // tokens (the plugin's bulk path passes one token per id). Consume
+        // every non-flag token that follows; a flag token stops the scan.
+        const fragments = [];
+        while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) {
+          fragments.push(argv[++i]);
+        }
+        args.ids = fragments.flatMap((s) => s.split(',')).map((s) => s.trim()).filter(Boolean);
         if (args.ids.length === 0) throw new Error(`${a} requires at least one id`);
       }
     } else {
@@ -111,12 +124,15 @@ function printUsage() {
     '  --apply-recommended     rewrite models.json with Tier A enabled',
     '  --enable id1,id2        enable specific ids (pin-guarded)',
     '  --disable id1,id2       disable specific ids (pin-guarded)',
+    '  --pin id1,id2           pin ids: the guard then refuses to disable them',
+    '  --unpin id1,id2         unpin ids: they become freely disableable',
     '  --restore-backup        restore the most recent backup',
     '  --help, -h              print this help and exit 0',
     '',
     'Diagnostics (not used by the plugin):',
     '  --models-file <path>    override models.json path (use a copy)',
     '  --state-file  <path>    override state file path',
+    '  --store-file  <path>    override models-store.json path (use a copy)',
     '  --catalog     <path>    use a fixture catalog instead of the API',
     '  --keys-file   <path>    override provider-keys.json path',
     '  --backup-dir  <path>    override backup directory'
@@ -314,8 +330,11 @@ function summarize(rows) {
   return counts;
 }
 
-function discoverPins(repoRoot) {
-  const pins = new Set(HARD_PINNED_IDS);
+// Advisory scan: which agent files reference which NIM model. The result
+// does NOT drive the pin guard (state pins do); the panel shows it so a
+// disable of an in-use model is an informed choice, not a refusal.
+function agentPinUsers(repoRoot) {
+  const users = new Map();
   const agentsDir = join(repoRoot, '.pi', 'agents');
   if (existsSync(agentsDir)) {
     for (const file of readdirSync(agentsDir)) {
@@ -324,16 +343,47 @@ function discoverPins(repoRoot) {
         const txt = readFileSync(join(agentsDir, file), 'utf8');
         for (const line of txt.split(/\r?\n/)) {
           const m = line.match(/^\s*model:\s*(nvidia\/[^\s]+)\s*$/);
-          if (m) pins.add(m[1].replace(/^nvidia\//, ''));
+          if (m) {
+            const id = m[1].replace(/^nvidia\//, '');
+            if (!users.has(id)) users.set(id, []);
+            if (!users.get(id).includes(file)) users.get(id).push(file);
+          }
         }
-      } catch { /* unreadable agent file: skip, do not fail pin detection */ }
+      } catch { /* unreadable agent file: skip, do not fail the scan */ }
     }
   }
-  return pins;
+  return users;
+}
+
+function normalizePinList(value) {
+  const list = Array.isArray(value) ? value : [];
+  return [...new Set(list.map((s) => String(s).trim()).filter(Boolean))].sort();
+}
+
+// One-time seed: HARD_PINNED_IDS ∪ every agent-file pin. Used when a state
+// file has no pins key yet; the next state write persists it, and after that
+// the persisted list is the only guard source.
+function seedPinList(repoRoot) {
+  const seeded = new Set(HARD_PINNED_IDS);
+  for (const id of agentPinUsers(repoRoot).keys()) seeded.add(id);
+  return normalizePinList([...seeded]);
+}
+
+// Resolve the pin set for a guard or decoration. `seeded` is true when the
+// state file had no pins key and the seed was computed in memory; callers
+// that write state persist it, --status never writes.
+function loadPinSet(state, repoRoot) {
+  if (state && Array.isArray(state.pins)) {
+    return { pins: new Set(normalizePinList(state.pins)), seeded: false };
+  }
+  return { pins: new Set(seedPinList(repoRoot)), seeded: true };
 }
 
 function readStateOrEmpty(stateFile) {
   if (!existsSync(stateFile)) {
+    // NOTE: no `pins` key here on purpose. loadPinSet() seeds when the key is
+    // ABSENT; an explicit empty array would mean "user unpinned everything"
+    // and would defeat the one-time seed on a fresh state file.
     return { synced_at: '', source: 'state', models: [], counts: { chat: 0, non_chat: 0, enabled: 0, recommended: 0 } };
   }
   // Distinguish "file corrupt" from "file missing". F4 requires --status
@@ -350,6 +400,12 @@ function readStateOrEmpty(stateFile) {
 
 function writeState(stateFile, state) {
   writeJsonAtomic(stateFile, state);
+}
+
+// Carry the known-dead list through any state rewrite. Verbs that do not
+// probe (enable/disable/apply/restore) must not forget which ids are dead.
+function carryDead(prevState) {
+  return Array.isArray(prevState && prevState.dead) ? prevState.dead : [];
 }
 
 function diffFromState(prevState, currentRows) {
@@ -373,6 +429,44 @@ function backupModelsJson(modelsFile, backupDir) {
   const dest = join(backupDir, `models.json.${ts}`);
   copyFileSync(modelsFile, dest);
   return dest;
+}
+
+// Reconcile the picker store with panel state. The pi web picker renders the
+// UNION of models.json + pi's built-in catalog + models-store.json, so an id
+// that the panel disabled but the store still lists keeps showing up. Remove
+// only ids that are state-tracked AND absent from the freshly written
+// models.json list; user-added custom entries (not tracked) and non-nvidia
+// providers survive. Backup first, atomic write, restore on failure.
+function pruneStore(storeFile, backupDir, enabledIds, trackedIds, dryRun) {
+  const result = { backup: '', pruned: [], written: false, error: '' };
+  if (!existsSync(storeFile)) return result;
+  let store;
+  try { store = readJson(storeFile); } catch (e) { result.error = `cannot parse store: ${e.message}`; return result; }
+  const section = store && store.nvidia && Array.isArray(store.nvidia.models) ? store.nvidia.models : null;
+  if (!section) return result;
+  const enabled = enabledIds instanceof Set ? enabledIds : new Set(enabledIds || []);
+  const tracked = trackedIds instanceof Set ? trackedIds : new Set(trackedIds || []);
+  const pruned = section.filter((m) => m && m.id && tracked.has(m.id) && !enabled.has(m.id)).map((m) => m.id);
+  if (pruned.length === 0) return result;
+  result.pruned = pruned;
+  if (dryRun) return result;
+  ensureDir(backupDir);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const dest = join(backupDir, `models-store.json.${ts}`);
+  try { copyFileSync(storeFile, dest); } catch (e) { result.error = `store backup failed: ${e.message}`; return result; }
+  result.backup = dest;
+  const keep = section.filter((m) => !m || !m.id || !tracked.has(m.id) || enabled.has(m.id));
+  const next = JSON.parse(JSON.stringify(store));
+  next.nvidia.models = keep;
+  try {
+    writeJsonAtomic(storeFile, next);
+  } catch (e) {
+    result.error = `store write failed: ${e.message}`;
+    try { copyFileSync(dest, storeFile); } catch { /* restore failure ignored: original error surfaces */ }
+    return result;
+  }
+  result.written = true;
+  return result;
 }
 
 function rebuildModelsJson(modelsJson, nvidiaModels) {
@@ -585,8 +679,90 @@ function finalizeReport(partial) {
     blocked: [],
     error: '',
     models: [],
+    pins: [],
+    pins_changed: [],
+    warnings: [],
+    pruned_store: [],
+    removed_dead: [],
+    added_new: [],
+    probe_inconclusive: [],
+    probe_skipped: false,
     counts: { chat: 0, non_chat: 0, enabled: 0, recommended: 0 }
   }, partial || {});
+}
+
+// One-token inference probe. NVIDIA's /v1/models catalog keeps LISTING
+// models whose deployment is gone, so the only trustworthy dead signal is
+// an inference 404 ("Function not found"). Everything else (429, 5xx, 400,
+// timeout, network error) is inconclusive: the model stays.
+async function probeModel(apiKey, id) {
+  try {
+    const res = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: id, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 }),
+      signal: AbortSignal.timeout(15000)
+    });
+    // Drain the body so the socket is released back to the pool.
+    try { await res.text(); } catch { /* body read failure does not change the verdict */ }
+    return { dead: res.status === 404, status: res.status };
+  } catch (e) {
+    return { dead: false, status: 0, error: e && e.message ? e.message : String(e) };
+  }
+}
+
+// Reconcile classified rows against the previous state and a probe result:
+//  - dead ids vanish from the rows entirely (state forgets them; a pin on a
+//    dead id is KEPT, so the guard re-arms automatically if the id returns);
+//  - ids the state has never seen are NEW: chat rows flip enabled=true so
+//    they reach the picker (and only chat ids are reported as added_new -
+//    tier X ids land in state rows but never in the picker),
+//  - everything else keeps its decided enabled state.
+// PURE: no I/O, no fetching.
+function reconcileRows(rows, prevState, deadIds) {
+  const dead = deadIds instanceof Set ? deadIds : new Set(deadIds || []);
+  const known = new Set(((prevState && Array.isArray(prevState.models)) ? prevState.models : []).map((m) => m && m.id).filter(Boolean));
+  const out = [];
+  const addedIds = [];
+  const removedDeadIds = [];
+  for (const r of rows) {
+    if (dead.has(r.id)) { removedDeadIds.push(r.id); continue; }
+    const row = { ...r };
+    if (!known.has(r.id)) {
+      if (row.category === 'chat') {
+        row.enabled = true;
+        addedIds.push(r.id);
+      }
+    }
+    out.push(row);
+  }
+  return { rows: out, addedIds, removedDeadIds };
+}
+
+// Probe the enabled chat models of the live models.json list. Returns
+// { deadIds, inconclusive }. Concurrency-bounded so a full refresh stays
+// well inside the panel's 180s engine timeout.
+async function probeEnabledModels(apiKey, ids) {
+  const deadIds = [];
+  const aliveIds = [];
+  const inconclusive = [];
+  const queue = [...ids];
+  const workers = [];
+  const CONCURRENCY = 4;
+  for (let w = 0; w < Math.min(CONCURRENCY, queue.length); w++) {
+    workers.push((async () => {
+      for (;;) {
+        const id = queue.shift();
+        if (id === undefined) break;
+        const r = await probeModel(apiKey, id);
+        if (r.dead) deadIds.push(id);
+        else if (r.status >= 200 && r.status < 500) aliveIds.push(id);
+        else inconclusive.push({ id, status: r.status, error: r.error || '' });
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return { deadIds: deadIds.sort(), aliveIds, inconclusive };
 }
 
 async function loadCatalog(args) {
@@ -627,17 +803,93 @@ async function runSync(args) {
   // enabled baseline is the live models.json, not prevState, so a
   // first run on an empty state cannot report everything as disabled.
   const liveSet = liveEnabledSet(modelsJson);
-  const rows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, liveSet);
+  let rows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, liveSet);
+  const { pins: pinList } = loadPinSet(prevState, REPO_ROOT);
+
+  // Reconciliation: the catalog keeps LISTING dead deployments, so a real
+  // sync probes every currently enabled chat model and drops the ones that
+  // answer 404; chat ids the state has never seen are enabled so they reach
+  // the picker. Fixture syncs (--catalog, used by the offline tests) skip
+  // probing entirely.
+  let removedDeadIds = [];
+  let addedIds = [];
+  let inconclusive = [];
+  let probeSkipped = false;
+  // Pass 1: mark never-seen chat ids as enabled so the probe set covers
+  // them too (a dead endpoint NVIDIA still lists must not sneak back in as
+  // a "new" model).
+  const marked = reconcileRows(rows, prevState, []);
+  rows = marked.rows;
+  let deadKnown = carryDead(prevState);
+  if (args.catalog) {
+    // Fixture mode (offline tests): skip probing, keep reconciliation so
+    // the pure logic is exercised without network access.
+    probeSkipped = true;
+    addedIds = marked.addedIds;
+  } else {
+    const probeSet = rows.filter((r) => r.tier !== 'X' && r.enabled).map((r) => r.id);
+    if (probeSet.length > 0) {
+      const apiKey = loadApiKey(args.keysFile);
+      const probe = await probeEnabledModels(apiKey, probeSet);
+      inconclusive = probe.inconclusive;
+      const deadSet = new Set(probe.deadIds);
+      const aliveSet = new Set(probe.aliveIds);
+      // Pass 2: drop the probed-dead ids; report the net new chat ids.
+      const final = reconcileRows(rows, prevState, probe.deadIds);
+      rows = final.rows;
+      addedIds = marked.addedIds.filter((id) => !deadSet.has(id));
+      // Report only removals that were actually picker-visible; ids already
+      // known-dead are re-probed for revival but are not news.
+      removedDeadIds = final.removedDeadIds.filter((id) => liveSet.has(id));
+      // Maintain the known-dead list: add probed-dead, clear definitive
+      // revivals (any non-404 HTTP answer proves the deployment exists).
+      deadKnown = normalizePinList([...new Set([...carryDead(prevState), ...probe.deadIds])].filter((id) => !aliveSet.has(id)));
+    } else {
+      addedIds = marked.addedIds;
+    }
+  }
+
+  // Write models.json only when the reconciled enabled set actually differs
+  // from the live file (no backup churn on a no-op refresh). Dead removals
+  // and new chat enables both surface here.
+  const targetSet = new Set(rows.filter((r) => r.enabled && r.tier !== 'X').map((r) => r.id));
+  const setDiffers = targetSet.size !== liveSet.size || [...targetSet].some((id) => !liveSet.has(id));
+  let applied = { backup: '', written: false, count: 0, restored: false, error: '' };
+  let storePrune = { pruned: [], written: false, backup: '', error: '' };
+  if (setDiffers) {
+    applied = applyToModelsJson(args.modelsFile, args.backupDir, rows, args.dryRun);
+    if (applied.error) {
+      out.ok = false;
+      out.error = applied.error;
+      out.removed_dead = removedDeadIds;
+      out.added_new = addedIds;
+      out.probe_inconclusive = inconclusive;
+      out.probe_skipped = probeSkipped;
+      return out;
+    }
+    const trackedIds = new Set([...rows.map((r) => r.id), ...removedDeadIds]);
+    storePrune = pruneStore(args.storeFile, args.storeBackupDir, targetSet, trackedIds, args.dryRun);
+  }
+
   const state = {
     synced_at: new Date().toISOString(),
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
+    pins: normalizePinList([...pinList]),
+    dead: normalizePinList(deadKnown),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, state);
 
   out.synced_at = state.synced_at;
   Object.assign(out, buildBaseReport(rows, prevState));
+  out.pins = normalizePinList([...pinList]);
+  out.removed_dead = removedDeadIds;
+  out.added_new = addedIds;
+  out.probe_inconclusive = inconclusive;
+  out.probe_skipped = probeSkipped;
+  out.backup = applied.backup;
+  out.pruned_store = storePrune.pruned;
   out.models = rows;
   out.counts = summarize(rows);
   return out;
@@ -672,7 +924,7 @@ async function runApplyRecommended(args) {
 
   const currentEnabled = liveEnabledSet(modelsJson);
   const initialRows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, currentEnabled);
-  const pins = discoverPins(REPO_ROOT);
+  const { pins } = loadPinSet(prevState, REPO_ROOT);
   const rows = decideEnabledRows(initialRows, [], '--apply-recommended', currentEnabled, prevState);
 
   // F3 pin guard: force-keep any pinned id that --apply-recommended would
@@ -699,10 +951,18 @@ async function runApplyRecommended(args) {
     return out;
   }
 
+  // Panel state is the picker's source of truth for nvidia ids: prune
+  // state-tracked store entries that this write dropped from models.json.
+  const pruneSet = new Set(rows.filter((r) => r.enabled && r.tier !== 'X').map((r) => r.id));
+  const trackedIds = new Set(rows.map((r) => r.id));
+  const storePrune = pruneStore(args.storeFile, args.storeBackupDir, pruneSet, trackedIds, args.dryRun);
+
   const nextState = {
     synced_at: new Date().toISOString(),
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
+    pins: normalizePinList([...pins]),
+    dead: carryDead(prevState),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, nextState);
@@ -711,6 +971,8 @@ async function runApplyRecommended(args) {
   Object.assign(out, buildBaseReport(rows, prevState));
   out.backup = applied.backup;
   out.blocked = blocked;
+  out.pins = normalizePinList([...pins]);
+  out.pruned_store = storePrune.pruned;
   out.models = rows;
   out.counts = summarize(rows);
   return out;
@@ -766,7 +1028,7 @@ async function runEnableDisable(args) {
     }
     initialRows = buildModelRows(catalogIds, rules, modelsJson, modelsStore, currentEnabled);
   }
-  const pins = discoverPins(REPO_ROOT);
+  const pins = loadPinSet(prevState, REPO_ROOT).pins;
   const blocked = findPinConflicts(initialRows, verb, args.ids, pins);
 
   const rows = decideEnabledRows(initialRows, args.ids, verb, currentEnabled, prevState);
@@ -784,10 +1046,18 @@ async function runEnableDisable(args) {
     return out;
   }
 
+  // Panel state is the picker's source of truth for nvidia ids: prune
+  // state-tracked store entries that this write dropped from models.json.
+  const pruneSet = new Set(rows.filter((r) => r.enabled && r.tier !== 'X').map((r) => r.id));
+  const trackedIds = new Set(rows.map((r) => r.id));
+  const storePrune = pruneStore(args.storeFile, args.storeBackupDir, pruneSet, trackedIds, args.dryRun);
+
   const nextState = {
     synced_at: new Date().toISOString(),
     source: args.catalog ? 'fixture' : 'api',
     models: rows,
+    pins: normalizePinList([...pins]),
+    dead: carryDead(prevState),
     counts: summarize(rows)
   };
   if (!args.dryRun) writeState(args.stateFile, nextState);
@@ -796,6 +1066,8 @@ async function runEnableDisable(args) {
   Object.assign(out, buildBaseReport(rows, prevState));
   out.backup = applied.backup;
   out.blocked = blocked;
+  out.pins = normalizePinList([...pins]);
+  out.pruned_store = storePrune.pruned;
   out.models = rows;
   out.counts = summarize(rows);
   return out;
@@ -822,16 +1094,78 @@ async function runStatus(args) {
   const rows = prevState.models;
   out.synced_at = prevState.synced_at || '';
   Object.assign(out, buildBaseReport(rows, prevState));
-  // Decorate pin state at read time so HARD_PINNED_IDS or agent-profile
-  // changes reflect immediately without a resync. Shallow copies: the
-  // diff in buildBaseReport above must keep comparing the raw state rows.
+  out.pins = normalizePinList(prevState.pins);
+  out.dead = normalizePinList(prevState.dead);
+  // Decorate pin state and advisory agent usage at read time so pin and
+  // agent-profile changes reflect immediately without a resync. Shallow
+  // copies: the diff in buildBaseReport above must keep comparing the raw
+  // state rows. READ-ONLY: a missing pins key seeds in memory, never writes.
   try {
-    const pins = discoverPins(REPO_ROOT);
-    out.models = rows.map((r) => ({ ...r, pinned: pins.has(r.id) }));
+    const { pins } = loadPinSet(prevState, REPO_ROOT);
+    const users = agentPinUsers(REPO_ROOT);
+    out.models = rows.map((r) => ({ ...r, pinned: pins.has(r.id), agentUsers: users.get(r.id) || [] }));
   } catch {
     out.models = rows;
   }
   out.counts = prevState.counts || summarize(rows);
+
+  // Read live models.json to report enabled models from the NVIDIA provider.
+  // This replaces the stale state-file base for the panel, so model toggles
+  // made in the built-in model manager appear immediately.
+  try {
+    if (existsSync(args.modelsFile)) {
+      const modelsJson = readJson(args.modelsFile);
+      const nvidiaModels = (modelsJson && modelsJson.providers && modelsJson.providers.nvidia && Array.isArray(modelsJson.providers.nvidia.models))
+        ? modelsJson.providers.nvidia.models
+        : [];
+      out.models_json = nvidiaModels.map((m) => ({
+        id: m.id,
+        vision: Array.isArray(m.input) && m.input.includes('image')
+      }));
+    } else {
+      out.models_json = [];
+    }
+  } catch {
+    out.models_json = [];
+  }
+
+  return out;
+}
+
+// Pin/unpin runner: edits the state file's `pins` array (sorted, deduped).
+// A seed is persisted when the state file had no pins key yet. Pinned ids
+// drive findPinConflicts(); the panel's PIN toggle calls these verbs.
+async function runPinToggle(args) {
+  const out = finalizeReport();
+  const prevState = readStateOrEmpty(args.stateFile);
+  const { pins, seeded } = loadPinSet(prevState, REPO_ROOT);
+  const adding = args.verb === '--pin';
+  const knownIds = new Set((prevState.models || []).map((m) => m && m.id).filter(Boolean));
+  const users = agentPinUsers(REPO_ROOT);
+  const warnings = [];
+  for (const id of args.ids) {
+    if (adding && !knownIds.has(id)) {
+      warnings.push(`${id} is not in the synced catalog; pinning anyway (it will guard once the id appears)`);
+    }
+    if (adding) pins.add(id);
+    else if (!pins.has(id)) warnings.push(`${id} was not pinned; no change`);
+    else pins.delete(id);
+  }
+  const pinList = normalizePinList([...pins]);
+  if (!args.dryRun) {
+    // Persist pins. When the state file has no rows yet (never synced), keep
+    // the empty shell and attach the pins so they survive until the next sync.
+    const base = (prevState && Array.isArray(prevState.models) && prevState.models.length > 0)
+      ? prevState
+      : { synced_at: '', source: 'state', models: [], counts: { chat: 0, non_chat: 0, enabled: 0, recommended: 0 } };
+    writeState(args.stateFile, { ...base, pins: pinList });
+  }
+  out.synced_at = prevState.synced_at || '';
+  out.pins = pinList;
+  out.pins_changed = args.ids.map((id) => ({ id, pinned: pins.has(id), agentUsers: users.get(id) || [] }));
+  out.warnings = warnings;
+  out.models = (prevState.models || []).map((r) => ({ ...r, pinned: pins.has(r.id), agentUsers: users.get(r.id) || [] }));
+  out.counts = prevState.counts || summarize(prevState.models || []);
   return out;
 }
 
@@ -887,10 +1221,13 @@ async function runRestoreBackup(args) {
       const m = matchTierX(r.id, rules.tierX);
       if (m) { r.tier = 'X'; r.category = categoryForPattern(m, rules.category); r.relevance = 'excluded'; r.why = whyForTier('X'); }
     }
+    const stateBeforeWrite = readStateOrEmpty(args.stateFile);
     const state = {
       synced_at: new Date().toISOString(),
       source: 'restore',
       models: rows,
+      pins: loadPinSet(stateBeforeWrite, REPO_ROOT).pins,
+      dead: carryDead(stateBeforeWrite),
       counts: summarize(rows)
     };
     writeState(args.stateFile, state);
@@ -921,7 +1258,8 @@ async function main() {
   args.relevancePath = DEFAULT_RELEVANCE_PATH;
   args.modelsFile    = args.modelsFile ? resolve(args.modelsFile) : DEFAULT_MODELS_FILE;
   args.stateFile     = args.stateFile  ? resolve(args.stateFile)  : DEFAULT_STATE_FILE;
-  args.storeFile     = DEFAULT_STORE_FILE;
+  args.storeFile     = args.storeFile  ? resolve(args.storeFile)  : DEFAULT_STORE_FILE;
+  args.storeBackupDir = join(dirname(args.backupDir ? resolve(args.backupDir) : DEFAULT_BACKUP_DIR), 'nvidia-models-store');
   args.keysFile      = args.keysFile   ? resolve(args.keysFile)   : DEFAULT_KEYS_FILE;
   args.backupDir     = args.backupDir  ? resolve(args.backupDir)  : DEFAULT_BACKUP_DIR;
 
@@ -941,6 +1279,7 @@ async function main() {
     else if (args.verb === '--status') report = await runStatus(args);
     else if (args.verb === '--apply-recommended') report = await runApplyRecommended(args);
     else if (args.verb === '--enable' || args.verb === '--disable') report = await runEnableDisable(args);
+    else if (args.verb === '--pin' || args.verb === '--unpin') report = await runPinToggle(args);
     else if (args.verb === '--restore-backup') report = await runRestoreBackup(args);
     else throw new Error(`unknown verb ${args.verb}`);
   } catch (e) {
@@ -990,7 +1329,12 @@ export {
   diffFromState,
   decideEnabledRows,
   findPinConflicts,
-  discoverPins,
+  agentPinUsers,
+  loadPinSet,
+  seedPinList,
+  pruneStore,
+  reconcileRows,
+  probeModel,
   liveEnabledSet,
   HARD_PINNED_IDS,
   TIER_WHY,
@@ -998,6 +1342,7 @@ export {
   DEFAULT_MODELS_FILE,
   DEFAULT_STATE_FILE,
   DEFAULT_BACKUP_DIR,
+  DEFAULT_STORE_BACKUP_DIR,
   readJson,
   writeJsonAtomic,
   rebuildModelsJson,

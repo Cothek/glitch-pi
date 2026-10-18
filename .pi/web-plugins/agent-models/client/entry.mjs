@@ -150,7 +150,7 @@ const STYLE_CSS = `
 .am-cost.am-free{color:var(--green);border-color:var(--green)}
 .am-cost.am-paid{color:var(--amber);border-color:var(--amber)}
 .am-cost-note{color:var(--text-faint);font-size:10.5px}
-.am-options{max-height:min(72vh,780px);overflow-y:auto;overscroll-behavior:contain;border:1px solid var(--border-soft);border-radius:7px;background:var(--bg);display:flex;flex-direction:column}
+.am-options{max-height:min(72vh,780px);overflow-y:auto;overscroll-behavior-y:auto;border:1px solid var(--border-soft);border-radius:7px;background:var(--bg);display:flex;flex-direction:column}
 .am-option{text-align:left;background:0 0;border:none;border-bottom:1px solid var(--border-soft);color:var(--text-dim);cursor:pointer;padding:5px 9px;font-size:11.5px;font-family:var(--mono, monospace);display:flex;gap:8px;align-items:center;min-width:0}
 .am-option:last-child{border-bottom:none}
 .am-option:hover{background:var(--bg-elev);color:var(--text)}

@@ -367,6 +367,17 @@ function groupStatusPayloadShape() {
     // The 13 frozen keys are still present.
     const frozen = ['ok','synced_at','catalog_total','chat_total','enabled','recommended','added_since_last_sync','missing_from_api','non_chat_total','changed','backup','blocked','error'];
     for (const k of frozen) assert.ok(Object.prototype.hasOwnProperty.call(report, k), `frozen key ${k} missing`);
+    // models_json mirrors the LIVE models.json nvidia list (disk truth for the
+    // agent-models panel merge): bare ids + vision from the input array. The
+    // sync that ran just before auto-enabled every catalog CHAT id, so the
+    // expected list is the catalog minus the tier-X id.
+    assert.ok(Array.isArray(report.models_json), 'models_json is an array');
+    const mjIds = report.models_json.map((m) => m.id).sort();
+    const expectedIds = FIXTURE_CATALOG.map((m) => m.id).filter((id) => id !== 'nvidia/nemoguard-7b-safety').sort();
+    assert.deepStrictEqual(mjIds, expectedIds, 'models_json lists the live models.json ids (catalog chat ids)');
+    for (const m of report.models_json) {
+      assert.ok(typeof m.vision === 'boolean', `models_json ${m.id} carries a boolean vision flag`);
+    }
   } finally { cleanup(fx.dir); }
 }
 

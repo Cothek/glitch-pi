@@ -1108,6 +1108,27 @@ async function runStatus(args) {
     out.models = rows;
   }
   out.counts = prevState.counts || summarize(rows);
+
+  // Read live models.json to report enabled models from the NVIDIA provider.
+  // This replaces the stale state-file base for the panel, so model toggles
+  // made in the built-in model manager appear immediately.
+  try {
+    if (existsSync(args.modelsFile)) {
+      const modelsJson = readJson(args.modelsFile);
+      const nvidiaModels = (modelsJson && modelsJson.providers && modelsJson.providers.nvidia && Array.isArray(modelsJson.providers.nvidia.models))
+        ? modelsJson.providers.nvidia.models
+        : [];
+      out.models_json = nvidiaModels.map((m) => ({
+        id: m.id,
+        vision: Array.isArray(m.input) && m.input.includes('image')
+      }));
+    } else {
+      out.models_json = [];
+    }
+  } catch {
+    out.models_json = [];
+  }
+
   return out;
 }
 

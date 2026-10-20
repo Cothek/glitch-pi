@@ -19,6 +19,13 @@
  * explaining how to grant access. Write paths (/set-model, /set-models, /restore)
  * resolve through the same helper so validation and backups work under the fallback.
  *
+ * FALLBACK PRESETS + PRICES: saved configs ("Free"/"Standard") and costs.json are
+ * Glitch-global, so under the fallback they resolve to the sibling directory
+ * E:/Glitch AI/glitch-pi/.pi/agent-models via a second lazy grant, read/written
+ * through the host.fs.*Path family (the workspace family rejects absolute paths —
+ * see isAbsPath). In a workspace with its own .pi/agents the workspace-relative
+ * paths are used exactly as before.
+ *
  * SURFACES
  *   0. composer button (chat bar, right of the thinking chip) -> opens the page
  *      via kind:"view": the stock client navigates to view:"plugin:agent-models"
@@ -88,6 +95,11 @@ const AGENTS_DIR = ".pi/agents";
  *  plugins.js allowAbs which accepts paths inside the workspace OR in the
  *  plugin grants table). */
 const FALLBACK_AGENTS_DIR = "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/");
+/** Fallback agent-models directory (saved presets + price table): sibling of the
+ *  fallback agents dir in the glitch-pi repo. Presets are Glitch-global, like the
+ *  roster — a side project reads/writes the SAME file the glitch root uses, via the
+ *  *Path family and its own lazy grant (see resolveAgentsDir). */
+const FALLBACK_MODELS_DIR = "E:/Glitch AI/glitch-pi/.pi/agent-models".replace(/\\/g, "/");
 /** Backups live INSIDE the workspace on purpose: cross-directory writes would
  *  need a separate user directory grant, workspace writes do not. */
 const BACKUP_DIR = ".pi/agent-models/backups";
@@ -124,6 +136,10 @@ async function fsReadText(host, file, max) {
 /** Write, whether workspace-relative or an absolute cross-directory path. */
 async function fsWrite(host, file, data) {
 	return isAbsPath(file) ? host.fs.writePath(file, data) : host.fs.write(file, data);
+}
+/** mkdir, whether workspace-relative or an absolute cross-directory path. */
+async function fsMkdir(host, dir) {
+	return isAbsPath(dir) ? host.fs.mkdirPath(dir) : host.fs.mkdir(dir);
 }
 // The NVIDIA sync engine's state file (workspace-relative, so host.fs.readText
 // reaches it with the fs:read permission - no extra grant). Its enabled rows
@@ -266,9 +282,18 @@ async function readCatalog(host) {
  * "n/a" everywhere and a hint to generate it. Labels are computed HERE and shipped
  * in the payload so the client and the CLI cannot format the same number two ways.
  */
-async function readCosts(host) {
+async function readCosts(host, resolveDir) {
+	// Under the cross-project fallback the price table lives next to the fallback
+	// roster (glitch-pi/.pi/agent-models); otherwise the workspace-relative path.
+	let costsPath = COSTS_PATH;
 	try {
-		const doc = JSON.parse(await host.fs.readText(COSTS_PATH));
+		const { modelsDir } = resolveDir ? await resolveDir(host) : {};
+		if (modelsDir) costsPath = `${modelsDir}/costs.json`;
+	} catch {
+		/* keep workspace-relative */
+	}
+	try {
+		const doc = JSON.parse(await fsReadText(host, costsPath));
 		const table = doc && typeof doc.costs === "object" && doc.costs ? doc.costs : {};
 		const costs = {};
 		for (const [id, cost] of Object.entries(table)) {
@@ -290,14 +315,14 @@ async function readCosts(host) {
 		return {
 			costs,
 			meta: {
-				path: COSTS_PATH,
+				path: costsPath,
 				generatedAt: typeof doc?.generatedAt === "string" ? doc.generatedAt : null,
 				sources: Array.isArray(doc?.sources) ? doc.sources : [],
 				summary: doc?.summary ?? null,
 			},
 		};
 	} catch {
-		return { costs: {}, meta: { path: COSTS_PATH, missing: true, hint: "run: node scripts/agent-model-costs.mjs" } };
+		return { costs: {}, meta: { path: costsPath, missing: true, hint: "run: node scripts/agent-model-costs.mjs" } };
 	}
 }
 
@@ -318,24 +343,41 @@ async function countBackups(host) {
 	return counts;
 }
 
-/** Read saved model configurations. Returns [] if the file is absent or unreadable. */
-async function readConfigs(host) {
+/** Read saved model configurations. Returns [] if the file is absent or unreadable.
+ *  Under the cross-project fallback the presets live in the glitch root's
+ *  agent-models dir (they are Glitch-global), resolved through the *Path family. */
+async function readConfigs(host, resolveDir) {
+	let configsPath = CONFIGS_PATH;
 	try {
-		const doc = JSON.parse(await host.fs.readText(CONFIGS_PATH));
+		const { modelsDir } = resolveDir ? await resolveDir(host) : {};
+		if (modelsDir) configsPath = `${modelsDir}/configs.json`;
+	} catch {
+		/* keep workspace-relative */
+	}
+	try {
+		const doc = JSON.parse(await fsReadText(host, configsPath));
 		return Array.isArray(doc?.configs) ? doc.configs : [];
 	} catch {
 		return [];
 	}
 }
 
-/** Write configs back to disk (workspace-relative, no extra grant needed). */
-async function writeConfigs(host, configs) {
+/** Write configs back to disk. Workspace-relative when the workspace has its own
+ *  agents; under the fallback, into the glitch root (grant-gated, via *Path). */
+async function writeConfigs(host, configs, resolveDir) {
+	let dir = ".pi/agent-models";
 	try {
-		await host.fs.mkdir(".pi/agent-models");
+		const { modelsDir } = resolveDir ? await resolveDir(host) : {};
+		if (modelsDir) dir = modelsDir;
+	} catch {
+		/* keep workspace-relative */
+	}
+	try {
+		await fsMkdir(host, dir);
 	} catch {
 		/* already there */
 	}
-	await host.fs.write(CONFIGS_PATH, JSON.stringify({ configs }, null, 1));
+	await fsWrite(host, `${dir}/configs.json`, JSON.stringify({ configs }, null, 1));
 }
 
 /** Stable slug from a display name: "Free Models" -> "free-models". */
@@ -383,7 +425,7 @@ export default definePlugin({
 		async function resolveAgentsDir(host) {
 			const workspaceFiles = await listAgentFiles(host);
 			if (workspaceFiles.length > 0) {
-				return { dir: AGENTS_DIR, fallbackHint: null };
+				return { dir: AGENTS_DIR, modelsDir: null, fallbackHint: null };
 			}
 
 			// Workspace is empty — try the fallback directory with lazy grant.
@@ -392,12 +434,23 @@ export default definePlugin({
 				try {
 					const granted = await host.fs.requestAccess(FALLBACK_AGENTS_DIR, "Read agent model pins from the glitch-pi repository");
 					if (granted) {
-						fallbackCache = { dir: FALLBACK_AGENTS_DIR, fallbackHint: null };
+						// Same-lazy grant for the sibling presets/price dir. Least privilege:
+						// requested only when the roster fell back; denial degrades to empty
+						// presets (workspace paths keep working), the roster is unaffected.
+						let modelsDir = null;
+						try {
+							if (await host.fs.requestAccess(FALLBACK_MODELS_DIR, "Read and save model presets and the price table from the glitch-pi repository")) {
+								modelsDir = FALLBACK_MODELS_DIR;
+							}
+						} catch {
+							/* presets stay workspace-bound */
+						}
+						fallbackCache = { dir: FALLBACK_AGENTS_DIR, modelsDir, fallbackHint: null };
 					} else {
-						fallbackCache = { dir: FALLBACK_AGENTS_DIR, fallbackHint: `Access to the fallback agents directory (${FALLBACK_AGENTS_DIR}) was denied. Grant it in Settings > Interface Plugins > Agent Models to see the glitch-pi agent roster.` };
+						fallbackCache = { dir: FALLBACK_AGENTS_DIR, modelsDir: null, fallbackHint: `Access to the fallback agents directory (${FALLBACK_AGENTS_DIR}) was denied. Grant it in Settings > Interface Plugins > Agent Models to see the glitch-pi agent roster.` };
 					}
 				} catch (err) {
-					fallbackCache = { dir: FALLBACK_AGENTS_DIR, fallbackHint: `Failed to request access to the fallback agents directory: ${err?.message ?? err}` };
+					fallbackCache = { dir: FALLBACK_AGENTS_DIR, modelsDir: null, fallbackHint: `Failed to request access to the fallback agents directory: ${err?.message ?? err}` };
 				}
 			}
 			return fallbackCache;
@@ -408,7 +461,7 @@ export default definePlugin({
 			const { dir: agentsDir, fallbackHint } = await resolveAgentsDir(host);
 			const catalog = await readCatalog(host);
 			catalogSize = catalog.ids.size;
-			const priceData = await readCosts(host);
+			const priceData = await readCosts(host, resolveAgentsDir);
 			const backupCounts = await countBackups(host);
 			const agents = [];
 			const unreadable = [];
@@ -501,7 +554,7 @@ export default definePlugin({
 				row.backups = backupCounts.get(row.name) ?? 0;
 			}
 			// Saved configurations summary (no pins) — the client polls /state.
-			report.configs = (await readConfigs(host)).map(configSummary);
+			report.configs = (await readConfigs(host, resolveAgentsDir)).map(configSummary);
 			return report;
 		}
 
@@ -791,7 +844,7 @@ export default definePlugin({
 		cleanup.push(
 			host.route("GET", "/configs", async (_req, res) => {
 				try {
-					const configs = await readConfigs(host);
+					const configs = await readConfigs(host, resolveAgentsDir);
 					json(res, 200, { ok: true, configs });
 				} catch (err) {
 					json(res, 500, { ok: false, error: err?.message ?? String(err) });
@@ -815,7 +868,7 @@ export default definePlugin({
 						return json(res, 400, { ok: false, error: "name is required (max 80 chars)" });
 					}
 
-					const existing = await readConfigs(host);
+					const existing = await readConfigs(host, resolveAgentsDir);
 					const now = new Date().toISOString();
 
 					let config;
@@ -841,7 +894,7 @@ export default definePlugin({
 						const updated = existing.filter((c) => c.id !== editId);
 						updated.push(config);
 						updated.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
-						await writeConfigs(host, updated);
+						await writeConfigs(host, updated, resolveAgentsDir);
 						host.log("edited config: " + prev.name + " -> " + name + " (" + editId + ") - " + Object.keys(pins).length + " pins re-captured");
 						// `report` was built BEFORE configs.json changed, so its configs list still
 						// holds the pre-edit name. The client adopts report.configs for the dropdown
@@ -864,7 +917,7 @@ export default definePlugin({
 						const updated = existing.filter((c) => c.id !== id);
 						updated.push(config);
 						updated.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
-						await writeConfigs(host, updated);
+						await writeConfigs(host, updated, resolveAgentsDir);
 						host.log("saved config: " + name + " (" + id + ") - " + Object.keys(pins).length + " pins");
 						json(res, 200, {
 							ok: true,
@@ -896,7 +949,7 @@ export default definePlugin({
 						return json(res, 400, { ok: false, error: "config id is required" });
 					}
 
-					const configs = await readConfigs(host);
+					const configs = await readConfigs(host, resolveAgentsDir);
 					const config = configs.find((c) => c.id === id);
 					if (!config) {
 						return json(res, 404, { ok: false, error: `config not found: ${id}` });
@@ -979,12 +1032,12 @@ export default definePlugin({
 					if (!id) {
 						return json(res, 400, { ok: false, error: "config id is required" });
 					}
-					const configs = await readConfigs(host);
+					const configs = await readConfigs(host, resolveAgentsDir);
 					const remaining = configs.filter((c) => c.id !== id);
 					if (remaining.length === configs.length) {
 						return json(res, 404, { ok: false, error: `config not found: ${id}` });
 					}
-					await writeConfigs(host, remaining);
+					await writeConfigs(host, remaining, resolveAgentsDir);
 					host.log(`deleted config ${id}`);
 					json(res, 200, { ok: true, deleted: id, configs: remaining.map(configSummary) });
 				} catch (err) {

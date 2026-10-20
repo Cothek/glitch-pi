@@ -95,6 +95,36 @@ const BACKUP_DIR = ".pi/agent-models/backups";
  *  for the same reason: the real prices live in <agent-dir>/models*.json, which a
  *  plugin may not read without a directory grant. */
 const COSTS_PATH = ".pi/agent-models/costs.json";
+/** Absolute-path discriminator: win32 drive (E:/, E:\), UNC (\\srv\share), POSIX root (/x).
+ *
+ *  WHY THIS EXISTS (2026-10-19, live bug): host.fs.{list,read,readText,write} anchor the
+ *  CURRENT WORKSPACE via WorkspaceFS.abs(), which rejects anything outside it with
+ *  "路径越界" — even a valid absolute path, because resolve(root, abs) returns abs and
+ *  the startsWith(root) check then fails. So the cross-project fallback could never
+ *  read the glitch-pi agents dir: host.fs.list(FALLBACK) threw, the caller's
+ *  `catch { files = [] }` swallowed it, and the page rendered silently blank with no
+ *  agents, no list and no models.
+ *
+ *  host.fs.{list,read,readText,write}Path is the cross-directory family: it routes
+ *  through crossDirFs/allowAbs, which accepts paths inside the workspace OR in the
+ *  plugin's grant table. Same permission gate (fs:read / fs:write), different anchor.
+ *  So: workspace-relative paths keep the plain family, absolute paths take *Path. */
+function isAbsPath(p) {
+	const s = String(p ?? "");
+	return /^[a-zA-Z]:[\\/]/.test(s) || s.startsWith("\\\\") || s.startsWith("/");
+}
+/** List a directory, whether workspace-relative or an absolute cross-directory path. */
+async function fsList(host, dir) {
+	return isAbsPath(dir) ? host.fs.listPath(dir) : host.fs.list(dir);
+}
+/** Read text, whether workspace-relative or an absolute cross-directory path. */
+async function fsReadText(host, file, max) {
+	return isAbsPath(file) ? host.fs.readTextPath(file, max) : host.fs.readText(file, max);
+}
+/** Write, whether workspace-relative or an absolute cross-directory path. */
+async function fsWrite(host, file, data) {
+	return isAbsPath(file) ? host.fs.writePath(file, data) : host.fs.write(file, data);
+}
 // The NVIDIA sync engine's state file (workspace-relative, so host.fs.readText
 // reaches it with the fs:read permission - no extra grant). Its enabled rows
 // are the source of truth for models turned on via the sync engine or the
@@ -385,7 +415,7 @@ export default definePlugin({
 
 			let files = [];
 			try {
-				const entries = await host.fs.list(agentsDir);
+				const entries = await fsList(host, agentsDir);
 				files = entries
 					.filter((e) => e.type === "file" && e.name.endsWith(".md"))
 					.map((e) => e.name)
@@ -397,7 +427,7 @@ export default definePlugin({
 
 			for (const name of files) {
 				try {
-					agents.push(parseAgentFile(await host.fs.readText(`${agentsDir}/${name}`), name));
+					agents.push(parseAgentFile(await fsReadText(host, `${agentsDir}/${name}`), name));
 				} catch {
 					unreadable.push(name);
 				}
@@ -519,7 +549,7 @@ export default definePlugin({
 					const { dir: agentsDir } = await resolveAgentsDir(host);
 					let files = [];
 					try {
-						const entries = await host.fs.list(agentsDir);
+						const entries = await fsList(host, agentsDir);
 						files = entries
 							.filter((e) => e.type === "file" && e.name.endsWith(".md"))
 							.map((e) => e.name)
@@ -541,7 +571,7 @@ export default definePlugin({
 					}
 
 					const file = `${agentsDir}/${agent}.md`;
-					const before = await host.fs.readText(file);
+					const before = await fsReadText(host, file);
 					const edit = setModelInFrontmatter(before, model || null);
 					if (!edit.ok) return json(res, 400, { ok: false, error: edit.reason });
 
@@ -555,7 +585,7 @@ export default definePlugin({
 							/* already there */
 						}
 						await host.fs.write(backup, before);
-						await host.fs.write(file, edit.text);
+						await fsWrite(host, file, edit.text);
 						host.log(`set ${agent} model -> ${model || "(inherit)"} (was ${edit.previous ?? "none"}); backup ${backup}`);
 					}
 
@@ -615,7 +645,7 @@ export default definePlugin({
 					const { dir: agentsDir } = await resolveAgentsDir(host);
 					let files = [];
 					try {
-						const entries = await host.fs.list(agentsDir);
+						const entries = await fsList(host, agentsDir);
 						files = entries
 							.filter((e) => e.type === "file" && e.name.endsWith(".md"))
 							.map((e) => e.name)
@@ -644,7 +674,7 @@ export default definePlugin({
 					for (const agent of agents) {
 						const file = `${agentsDir}/${agent}.md`;
 						try {
-							const before = await host.fs.readText(file);
+							const before = await fsReadText(host, file);
 							const edit = setModelInFrontmatter(before, model || null);
 							if (!edit.ok) {
 								results.push({ agent, ok: false, changed: false, reason: edit.reason });
@@ -659,7 +689,7 @@ export default definePlugin({
 									/* already there */
 								}
 								await host.fs.write(backup, before);
-								await host.fs.write(file, edit.text);
+								await fsWrite(host, file, edit.text);
 								host.log(`set ${agent} model -> ${model || "(inherit)"} (was ${edit.previous ?? "none"}); backup ${backup}`);
 							}
 							results.push({ agent, ok: true, model: model || null, previous: edit.previous, changed: edit.changed, reason: edit.reason, backup });
@@ -704,7 +734,7 @@ export default definePlugin({
 					const { dir: agentsDir } = await resolveAgentsDir(host);
 					let files = [];
 					try {
-						const entries = await host.fs.list(agentsDir);
+						const entries = await fsList(host, agentsDir);
 						files = entries
 							.filter((e) => e.type === "file" && e.name.endsWith(".md"))
 							.map((e) => e.name)
@@ -735,7 +765,7 @@ export default definePlugin({
 					}
 
 					const file = `${agentsDir}/${agent}.md`;
-					const current = await host.fs.readText(file);
+					const current = await fsReadText(host, file);
 					const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 					const safety = `${BACKUP_DIR}/${agent}-${stamp}.md`;
 					try {
@@ -745,7 +775,7 @@ export default definePlugin({
 					}
 					await host.fs.write(safety, current);
 					const restored = await host.fs.readText(`${BACKUP_DIR}/${backups[0]}`);
-					await host.fs.write(file, restored);
+					await fsWrite(host, file, restored);
 					host.log(`restored ${agent} from ${backups[0]} (pre-restore state saved as ${safety})`);
 					json(res, 200, { ok: true, agent, restoredFrom: backups[0], safety, report: await state(true) });
 				} catch (err) {
@@ -876,7 +906,7 @@ export default definePlugin({
 					const { dir: agentsDir } = await resolveAgentsDir(host);
 					let files = [];
 					try {
-						const entries = await host.fs.list(agentsDir);
+						const entries = await fsList(host, agentsDir);
 						files = entries
 							.filter((e) => e.type === "file" && e.name.endsWith(".md"))
 							.map((e) => e.name)
@@ -907,7 +937,7 @@ export default definePlugin({
 						}
 
 						const file = `${agentsDir}/${agent}.md`;
-						const before = await host.fs.readText(file);
+						const before = await fsReadText(host, file);
 						const edit = setModelInFrontmatter(before, model || null);
 						if (!edit.ok || !edit.changed) continue;
 
@@ -918,7 +948,7 @@ export default definePlugin({
 						}
 						const backup = `${BACKUP_DIR}/config-apply-${config.id}-${agent}-${stamp}.md`;
 						await host.fs.write(backup, before);
-						await host.fs.write(file, edit.text);
+						await fsWrite(host, file, edit.text);
 						applied.push({ agent, model: model || null, previous: edit.previous, backup });
 					}
 

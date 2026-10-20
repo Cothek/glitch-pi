@@ -79,6 +79,23 @@ tools: read
 skill("something")
 `;
 
+/**
+ * Wrap a host.fs override so the ABSOLUTE-path family (*Path) resolves to the same
+ * fixture impls as the relative family.
+ *
+ * Needed since the plugin routes cross-directory paths through host.fs.listPath /
+ * readTextPath / writePath (WorkspaceFS throws 路径越界 on absolute paths, while
+ * crossDirFs/allowAbs honors the grant). createMockHost does Object.assign(host.fs,
+ * override), so an override that defines only `list` leaves the mock *Path stubs
+ * intact — which always returned [] — and every fixture that expressed the
+ * fallback roster through `list(fallbackDir)` went dark.
+ *
+ * One fixture table, two entry points: the same impls answer for both members.
+ */
+function withPathFamily(fs) {
+	return { ...fs, listPath: fs.list, readPath: fs.readText, readTextPath: fs.readText, writePath: fs.write };
+}
+
 function fixtureWorkspace() {
 	const root = mkdtempSync(join(tmpdir(), "agent-models-test-"));
 	const dir = join(root, ".pi", "agents");
@@ -173,7 +190,7 @@ describe("plugin: fallback to glitch-pi agents directory", () => {
 
 		host = createMockHost({
 			cwd: root,
-			fs: {
+			fs: withPathFamily({
 				list: async (rel) => {
 					if (rel === ".pi/agents") {
 						// Workspace is empty
@@ -229,7 +246,7 @@ model: opencode/mimo-v2.5-free
 					if (requestedDir === fallbackDir) return true;
 					return false;
 				},
-			},
+			}),
 			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
 		});
 
@@ -269,7 +286,7 @@ model: opencode/mimo-v2.5-free
 		let grantDenied = false;
 		const deniedHost = createMockHost({
 			cwd: root,
-			fs: {
+			fs: withPathFamily({
 				list: async (rel) => {
 					if (rel === ".pi/agents") return [];
 					if (rel === fallbackDir) {
@@ -302,7 +319,7 @@ body
 					grantDenied = true;
 					return false; // DENIED
 				},
-			},
+			}),
 			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
 		});
 
@@ -398,7 +415,7 @@ body
 		const writtenFiles = new Map();
 		const writeHost = createMockHost({
 			cwd: root,
-			fs: {
+			fs: withPathFamily({
 				list: async (rel) => {
 					if (rel === ".pi/agents") return [];
 					if (rel === fallbackDir) {
@@ -429,7 +446,7 @@ body
 				},
 				mkdir: async () => {},
 				requestAccess: async (d) => d === fallbackDir,
-			},
+			}),
 			models: { list: async () => [...CATALOG, "nvidia/x"].map((id) => ({ id, provider: id.split("/")[0] })) },
 		});
 

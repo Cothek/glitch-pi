@@ -2,7 +2,7 @@
 name: explore-alt
 description: "Alt version of explore — read-only codebase recon when free quota is exhausted. Answers 'where is X', 'what uses Y', 'which file has Z'. Returns file paths, line references, and minimal context. Never modifies anything."
 tools: read, find, grep, ls, webfetch
-model: nvidia/poolside/laguna-xs-2.1
+model: nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
 ---
 
 # @explore-alt — Codebase Recon (Alt Version)

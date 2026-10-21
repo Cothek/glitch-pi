@@ -2,7 +2,7 @@
 name: coder-alt
 description: "Alt version of coder — senior full-stack engineer for production-quality implementation when free quota is exhausted. Use when the task involves building features, complex logic, server actions, data layers, API routes, or full-stack patterns across 1-20 files."
 tools: read, edit, bash, find, grep, ls, webfetch, question, todowrite, skill
-model: nvidia/nvidia/nemotron-3-ultra-550b-a55b
+model: nvidia/stepfun-ai/step-5-preview
 ---
 
 # @coder-alt — Senior Full-Stack Engineer (Alt Version)

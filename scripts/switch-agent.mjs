@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // switch-agent.mjs — switch the primary agent mode (glitch | glitch-free | glitch-omni | glitch-lightweight).
 //
-// Stages the chosen profile from .pi/agent-profiles/<mode>.md into .pi/SYSTEM.md
-// (project file takes precedence over the user-level one per Pi docs — files
-// with the same name are NOT combined) and records the mode in
-// user/agent-mode.json, which routing.ts reads to decide gate behavior.
+// Records the mode in user/agent-mode.json, which routing.ts reads to decide gate
+// behavior. That file is gitignored, so switching never dirties the repo.
 //
-// Takes effect on the NEXT session start (Pi fixes the system prompt at
-// startup — no mid-session hot swap).
+// .pi/SYSTEM.md is deliberately NOT staged here anymore. The mode is carried by
+// user/agent-mode.json plus the extension's session entries; the live
+// /agent path (agent-switcher.ts) installs the profile via before_agent_start
+// on every turn, so no file copy is needed.
 //
 // MID-SESSION SWITCHING: use the /agent extension (agent-switcher.ts) inside
 // a live Pi session instead — no restart needed. This script remains the
@@ -15,7 +15,7 @@
 //
 // Usage: node scripts/switch-agent.mjs <glitch|glitch-free|glitch-omni|glitch-lightweight> [--status]
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -24,7 +24,6 @@ const __dirname = dirname(__filename);
 const ROOT_DIR = resolve(__dirname, '..');
 
 const PROFILES_DIR = join(ROOT_DIR, '.pi', 'agent-profiles');
-const SYSTEM_PATH = join(ROOT_DIR, '.pi', 'SYSTEM.md');
 const MODE_FILE = join(ROOT_DIR, 'user', 'agent-mode.json');
 
 const MODES = [
@@ -100,9 +99,6 @@ function switchMode(modeId) {
     log(YELLOW, `Ask Glitch to author "${mode.file}" first.`);
     process.exit(1);
   }
-
-  // Stage the profile into .pi/SYSTEM.md (project file wins per Pi docs).
-  copyFileSync(profilePath, SYSTEM_PATH);
 
   // Record the mode for routing.ts gate behavior.
   const prev = currentMode();

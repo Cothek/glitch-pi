@@ -11,7 +11,9 @@
  * MECHANICS: a switch sends "/agent <mode>" into the ACTIVE conversation via
  * host.prompt() → the pi extension (glitch-pi/.pi/extensions/agent-switcher.ts)
  * executes the command: swaps the system prompt mid-session, updates
- * user/agent-mode.json, stages .pi/SYSTEM.md, records session state.
+ * user/agent-mode.json, records session state.
+ * .pi/SYSTEM.md is no longer staged — the mode travels through the gitignored
+ * marker and session entries so a switch never dirties a tracked file.
  * This plugin only reads workspace files (modes + current mode marker) and
  * delivers the command — the pi extension owns the actual switch.
  *
@@ -43,7 +45,6 @@ import { glitchRoot } from "../../lib/root.mjs";
 /** Absolute, root-anchored. See the import note above. */
 const PROFILES_DIR = join(glitchRoot(), ".pi", "agent-profiles");
 const MODE_FILE = join(glitchRoot(), "user", "agent-mode.json");
-const SYSTEM_MD = join(glitchRoot(), ".pi", "SYSTEM.md");
 const globalDir = () => process.env.AGENT_SWITCHER_GLOBAL_DIR || PROFILES_DIR;
 const ITEM_ID = "agent-mode";
 /** Composer button action — the client opens a dd-menu clone styled like the thinking chip. */
@@ -245,11 +246,10 @@ export default definePlugin({
 						2,
 					),
 				);
-				// Stage the profile so a restart lands in the same mode (body only).
-				const profile = profilesById.get(mode);
-				if (profile?.body) {
-					writeFileSync(SYSTEM_MD, profile.body, "utf-8");
-				}
+				// No .pi/SYSTEM.md staging: the mode is carried by user/agent-mode.json
+				// (gitignored) plus session entries, and the pi extension installs the
+				// profile via before_agent_start every turn. Writing the tracked file
+				// here only dirtied the repo on every switch.
 				current = mode;
 				syncLabel(mode);
 				host.notify("info", `Agent switched to ${mode}`, `Agent switched to ${mode}`);

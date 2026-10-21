@@ -114,27 +114,38 @@ describe("agent-switcher plugin", () => {
 		assert.equal(item.options, undefined);
 	});
 
-	it("ignores a profile body's frontmatter and exposes the prompt text", async () => {
+	it("leaves .pi/SYSTEM.md untouched and carries the mode only in the marker", async () => {
 		const { host } = makeHost(root);
 		await plugin.activate(host);
-		const state = { modes: (await plugin.activate(host)) ?? null };
-		void state;
-		// switch to glitch and check the staged SYSTEM.md is the frontmatter-free body
+		// Sentinel in the tracked file: a switch must NOT rewrite it.
+		const sentinel = "# SENTINEL - do not overwrite\n";
+		writeFileSync(join(root, ".pi", "SYSTEM.md"), sentinel, "utf-8");
 		host.mock.emit("onMessage", { action: "agent-switcher:switch", value: "glitch" }, "c1");
 		await new Promise((r) => setTimeout(r, 30));
-		const staged = readFileSync(join(root, ".pi", "SYSTEM.md"), "utf-8");
-		assert.ok(staged.startsWith("# Glitch"), `staged SYSTEM.md should start with the body, got: ${staged.slice(0, 40)}`);
-		assert.ok(!staged.includes("description:"), "frontmatter must be stripped");
+		assert.equal(readMarker(root)?.mode, "glitch", "marker carries the mode");
+		assert.equal(readMarker(root)?.previous_mode, "glitch-omni");
+		assert.equal(
+			readFileSync(join(root, ".pi", "SYSTEM.md"), "utf-8"),
+			sentinel,
+			".pi/SYSTEM.md must not be rewritten on a switch",
+		);
 	});
 
-	it("switches by writing the marker + staging SYSTEM.md (onMessage path)", async () => {
+	it("switches by writing the marker only, never .pi/SYSTEM.md (onMessage path)", async () => {
 		const { host } = makeHost(root);
 		await plugin.activate(host);
+		const sentinel = "# SENTINEL - do not overwrite\n";
+		writeFileSync(join(root, ".pi", "SYSTEM.md"), sentinel, "utf-8");
 		host.mock.emit("onMessage", { action: "agent-switcher:switch", value: "glitch-lightweight" }, "c1");
 		await new Promise((r) => setTimeout(r, 30));
 		const marker = readMarker(root);
 		assert.equal(marker?.mode, "glitch-lightweight");
 		assert.equal(marker?.previous_mode, "glitch-omni");
+		assert.equal(
+			readFileSync(join(root, ".pi", "SYSTEM.md"), "utf-8"),
+			sentinel,
+			"a switch must not dirty the tracked system prompt",
+		);
 	});
 
 	it("rejects unknown modes and leaves the marker untouched", async () => {
@@ -210,11 +221,17 @@ describe("agent-switcher plugin", () => {
 			await getState.handler({ body: {}, url: "/state" }, res);
 			const state = JSON.parse(res.body);
 			assert.deepEqual(state.modes.map((m) => m.id), ["glitch", "glitch-free"]);
-			// Switching from a global profile stages its body in the bare workspace.
+			// Switching from a global profile must not stage .pi/SYSTEM.md either.
+			const sentinel = "# SENTINEL bare\n";
+			writeFileSync(join(bareRoot, ".pi", "SYSTEM.md"), sentinel, "utf-8");
 			host.mock.emit("onMessage", { action: "agent-switcher:switch", value: "glitch" }, "c1");
 			await new Promise((r) => setTimeout(r, 30));
-			const staged = readFileSync(join(bareRoot, ".pi", "SYSTEM.md"), "utf-8");
-			assert.ok(staged.startsWith("# Glitch"), `global profile body should be staged, got: ${staged.slice(0, 40)}`);
+			assert.equal(readMarker(bareRoot)?.mode, "glitch", "marker carries the mode in the bare workspace");
+			assert.equal(
+				readFileSync(join(bareRoot, ".pi", "SYSTEM.md"), "utf-8"),
+				sentinel,
+				"a switch in a workspace with no local profiles must not stage the system prompt",
+			);
 		} finally {
 			rmSync(bareRoot, { recursive: true, force: true });
 		}

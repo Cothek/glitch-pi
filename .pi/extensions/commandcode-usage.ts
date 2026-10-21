@@ -20,8 +20,11 @@
  *   - `/cc-usage` forces a refresh and toasts the percent + dollar detail.
  *   - Sub-agents (GLITCH_SUBAGENT=1) skip entirely — the primary session owns
  *     the poll. Nothing here may ever throw (tunnel-keeper rule).
- *
- * Registered in .pi/settings.json (that list gates project extension loading).
+ *   - Provider-aware: the chip renders only while a "commandcode" model is
+ *     selected in the chat card (ctx.model.provider). Selecting another
+ *     provider clears the chip immediately via the model_select event, and the
+ *     2-min poll only hits the API while commandcode is selected.
+ *   - Registered in .pi/settings.json (that list gates project extension loading).
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -32,12 +35,24 @@ import {
 	type UsageSnapshot,
 } from "../../scripts/lib/commandcode-usage.mjs";
 
+const TARGET_PROVIDER = "commandcode";
+
+/** Provider id of the model selected in the chat card (null when unknown). */
+function selectedProvider(ctx: ExtensionContext | null): string | null {
+	try {
+		const provider = ctx?.model?.provider;
+		return typeof provider === "string" && provider ? provider : null;
+	} catch {
+		return null;
+	}
+}
+
 const WIDGET_KEY = "commandcode-usage";
 const STATUS_KEY = "cc-usage";
 const POLL_INTERVAL_MS = 2 * 60 * 1000;
 const RENDER_INTERVAL_MS = 30 * 1000;
 
-type AnyCtx = Pick<ExtensionContext, "ui">;
+type AnyCtx = ExtensionContext;
 
 export default function commandcodeUsageExtension(pi: ExtensionAPI) {
 	// Sub-agents inherit the primary session's monitor — skip to avoid poll stampedes.
@@ -47,12 +62,16 @@ export default function commandcodeUsageExtension(pi: ExtensionAPI) {
 	let snap: UsageSnapshot | null = null;
 	let inflight = false;
 
-	/** Push the current snapshot (or clear when there is none) into widget + status. */
 	/** Push the current snapshot into the footer chip, or clear it when there is none. */
 	function paint(): void {
 		const c = ctx;
 		if (!c) return;
 		try {
+			// Provider-aware: only show the chip when a commandcode model is selected.
+			if (selectedProvider(c) !== TARGET_PROVIDER) {
+				c.ui.setStatus(STATUS_KEY, undefined);
+				return;
+			}
 			c.ui.setStatus(STATUS_KEY, snap ? renderStatusText(snap, new Date()) : undefined);
 		} catch {
 			// A status problem must never break a session.
@@ -89,7 +108,9 @@ export default function commandcodeUsageExtension(pi: ExtensionAPI) {
 		} catch {
 			// Never fatal.
 		}
-		void refresh();
+		// Only fetch when the selected model is a commandcode one — a session that
+		// starts on another provider must not spend a Command Code API call.
+		if (selectedProvider(ctx) === TARGET_PROVIDER) void refresh();
 		paint();
 	});
 
@@ -99,17 +120,27 @@ export default function commandcodeUsageExtension(pi: ExtensionAPI) {
 		paint();
 	});
 
-	// A reply just finished — spend likely moved. Fire-and-forget.
+	// A reply just finished — spend likely moved. Gate as well: a turn that ran on
+	// another provider changed no Command Code spend, so no call is warranted.
 	pi.on("agent_end", (_event, c) => {
 		ctx = (c as unknown) as AnyCtx;
-		void refresh();
+		if (selectedProvider(ctx) === TARGET_PROVIDER) void refresh();
+	});
+
+	// Model switched in the chat card — re-gate the chip immediately.
+	pi.on("model_select", (_event, c) => {
+		ctx = (c as unknown) as AnyCtx;
+		if (selectedProvider(ctx) === TARGET_PROVIDER) void refresh();
+		paint();
 	});
 
 	// Countdown ticks from cache between fetches (no network).
 	const renderTimer = setInterval(paint, RENDER_INTERVAL_MS);
 	if (typeof renderTimer.unref === "function") renderTimer.unref();
 
-	const pollTimer = setInterval(() => void refresh(), POLL_INTERVAL_MS);
+	const pollTimer = setInterval(() => {
+		if (selectedProvider(ctx) === TARGET_PROVIDER) void refresh();
+	}, POLL_INTERVAL_MS);
 	if (typeof pollTimer.unref === "function") pollTimer.unref();
 
 	// ---- /cc-usage command --------------------------------------------------

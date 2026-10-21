@@ -104,6 +104,16 @@ Tool-pattern monitoring writes `data/.stuck-signal.<sessionID>.json` on 5 rule t
 ## R22: Process Isolation — Never Run Blocking Commands in the Bash Tool
 Foreground blocking/long-running commands (servers, ComfyUI, test generators) hang the bash tool. For ANY long-running process, use `scripts/start-detached.ps1 -Command "<cmd>" -Name <label>` (returns immediately with a PID, logs to `data/logs/`). Never kill by process name — only by captured PID.
 
+## R24: Self-Restart Discipline (HARD)
+I run inside pi-web-ui. Killing the stack kills my own session, so restart is a scripted handoff, not a kill. The only sanctioned self-restart is:
+`data/node/node.exe scripts/restart-request.mjs --resume --note "<one-line task>" --delay 15 --json`
+Then read `data/monitor/restart-status.json` ONCE and report the outcome. Never poll in a loop from the bash tool.
+1. Never kill the stack myself: no Stop-Process, no taskkill, never by process name or by port (R22, PM-004).
+2. Never run `scripts/restart-pi-stack.ps1` in the foreground of the bash tool. `restart-request.mjs` hands it to `start-detached.ps1`, which detaches the engine from my Job Object so it survives the kill, and launches `restart-watchdog.mjs`, which verifies the stack returns.
+3. `--resume` requires `--session <jsonl>` (or PI_SESSION_FILE). Without a continuation the conversation does not resume (PM-048 root cause).
+4. A plain restart without `--resume` is allowed only when no live conversation needs to continue.
+5. In any subagent brief about restarts, put the prohibition on the FIRST line and make every command line carry `--dry-run` (PM-048 prevention).
+
 ## Available Tools (Bash-Accessible)
 
 **FTS5 Memory Search**

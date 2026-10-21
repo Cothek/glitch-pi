@@ -79,6 +79,23 @@ tools: read
 skill("something")
 `;
 
+/**
+ * Wrap a host.fs override so the ABSOLUTE-path family (*Path) resolves to the same
+ * fixture impls as the relative family.
+ *
+ * Needed since the plugin routes cross-directory paths through host.fs.listPath /
+ * readTextPath / writePath (WorkspaceFS throws 路径越界 on absolute paths, while
+ * crossDirFs/allowAbs honors the grant). createMockHost does Object.assign(host.fs,
+ * override), so an override that defines only `list` leaves the mock *Path stubs
+ * intact — which always returned [] — and every fixture that expressed the
+ * fallback roster through `list(fallbackDir)` went dark.
+ *
+ * One fixture table, two entry points: the same impls answer for both members.
+ */
+function withPathFamily(fs) {
+	return { ...fs, listPath: fs.list, readPath: fs.readText, readTextPath: fs.readText, writePath: fs.write };
+}
+
 function fixtureWorkspace() {
 	const root = mkdtempSync(join(tmpdir(), "agent-models-test-"));
 	const dir = join(root, ".pi", "agents");
@@ -173,7 +190,7 @@ describe("plugin: fallback to glitch-pi agents directory", () => {
 
 		host = createMockHost({
 			cwd: root,
-			fs: {
+			fs: withPathFamily({
 				list: async (rel) => {
 					if (rel === ".pi/agents") {
 						// Workspace is empty
@@ -223,13 +240,15 @@ model: opencode/mimo-v2.5-free
 				write: async () => {},
 				mkdir: async () => {},
 				requestAccess: async (requestedDir, reason) => {
-					// Track the call
+					// Track every call: the fallback now lazily grants BOTH the roster dir
+					// and the sibling presets/price dir, so "last call" is not a stable fact.
+					host.mock._requestAccessCalls ??= [];
+					host.mock._requestAccessCalls.push({ dir: requestedDir, reason });
 					host.mock._lastRequestAccess = { dir: requestedDir, reason };
-					// By default, grant access for the fallback dir
-					if (requestedDir === fallbackDir) return true;
-					return false;
+					// By default, grant access for the fallback dirs
+					return requestedDir === fallbackDir || requestedDir === "E:/Glitch AI/glitch-pi/.pi/agent-models".replace(/\\/g, "/");
 				},
-			},
+			}),
 			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
 		});
 
@@ -243,8 +262,12 @@ model: opencode/mimo-v2.5-free
 		assert.equal(payload.ok, true);
 		// The fallback should have been requested
 		assert.ok(host.mock._lastRequestAccess, "requestAccess should have been called");
-		assert.equal(host.mock._lastRequestAccess.dir, "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/"));
-		assert.match(host.mock._lastRequestAccess.reason, /glitch-pi/);
+		// The roster dir must be among the requested dirs (the sibling presets dir is
+		// requested too; asserting membership instead of last-call keeps this test
+		// honest about the multi-grant contract).
+		const rosterCall = (host.mock._requestAccessCalls ?? []).find((c) => c.dir === "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/"));
+		assert.ok(rosterCall, "requestAccess should have been called for the roster dir");
+		assert.match(rosterCall.reason, /glitch-pi/);
 	});
 
 	it("returns the fallback agents in the roster when grant is approved", async () => {
@@ -254,6 +277,48 @@ model: opencode/mimo-v2.5-free
 		assert.ok(payload.agentsDir.includes("glitch-pi"));
 		assert.ok(payload.rows.some((r) => r.name === "coder"));
 		assert.ok(payload.rows.some((r) => r.name === "reviewer"));
+	});
+
+	it("resolves saved presets and costs from the glitch root when fallback is active", async () => {
+		// Regression (2026-10-20): presets ("Free"/"Standard") and the price table were
+		// workspace-anchored, so a side project showed an empty presets list even with
+		// the roster fallback fixed. They must follow the fallback root.
+		const { mkdtempSync, mkdirSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		const { tmpdir: osTmpdir } = await import("node:os");
+		const fallbackDir = "E:/Glitch AI/glitch-pi/.pi/agents".replace(/\\/g, "/");
+		const modelsDir = "E:/Glitch AI/glitch-pi/.pi/agent-models".replace(/\\/g, "/");
+		const root = mkdtempSync(join(osTmpdir(), "agent-models-fallback-presets-"));
+		mkdirSync(join(root, ".pi", "agents"), { recursive: true }); // empty workspace roster
+
+		const presetsHost = createMockHost({
+			cwd: root,
+			fs: withPathFamily({
+				list: async () => [],
+				readText: async (p) => {
+					if (p === `${modelsDir}/configs.json`) {
+						return JSON.stringify({ configs: [{ id: "free", name: "Free", pins: { coder: "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" } }] });
+					}
+					if (p === `${modelsDir}/costs.json`) {
+						return JSON.stringify({ generatedAt: "t", costs: { "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b": { in: 0, out: 0, tier: "free" } } });
+					}
+					throw new Error("ENOENT " + p);
+				},
+				write: async () => {},
+				mkdir: async () => {},
+				requestAccess: async (d) => d === fallbackDir || d === modelsDir,
+			}),
+			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
+		});
+
+		await plugin.activate(presetsHost);
+		const presetsRoute = presetsHost.mock.routes.find((r) => r.path === "/state");
+		const payload = await callStateRoute(presetsHost, presetsRoute);
+
+		assert.equal(payload.ok, true);
+		assert.ok(Array.isArray(payload.configs) && payload.configs.length === 1, "presets must come from the glitch root under fallback");
+		assert.equal(payload.configs[0].id, "free");
+		assert.ok(payload.costs && payload.costs["nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"], "price table must come from the glitch root under fallback");
 	});
 
 	it("includes fallbackHint when requestAccess is denied", async () => {
@@ -269,7 +334,7 @@ model: opencode/mimo-v2.5-free
 		let grantDenied = false;
 		const deniedHost = createMockHost({
 			cwd: root,
-			fs: {
+			fs: withPathFamily({
 				list: async (rel) => {
 					if (rel === ".pi/agents") return [];
 					if (rel === fallbackDir) {
@@ -302,7 +367,7 @@ body
 					grantDenied = true;
 					return false; // DENIED
 				},
-			},
+			}),
 			models: { list: async () => [...CATALOG].map((id) => ({ id, provider: id.split("/")[0] })) },
 		});
 
@@ -398,7 +463,7 @@ body
 		const writtenFiles = new Map();
 		const writeHost = createMockHost({
 			cwd: root,
-			fs: {
+			fs: withPathFamily({
 				list: async (rel) => {
 					if (rel === ".pi/agents") return [];
 					if (rel === fallbackDir) {
@@ -429,7 +494,7 @@ body
 				},
 				mkdir: async () => {},
 				requestAccess: async (d) => d === fallbackDir,
-			},
+			}),
 			models: { list: async () => [...CATALOG, "nvidia/x"].map((id) => ({ id, provider: id.split("/")[0] })) },
 		});
 

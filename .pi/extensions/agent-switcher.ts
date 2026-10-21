@@ -31,8 +31,11 @@
  *                                       #   from the prompt — for small-
  *                                       #   context local models
  *     ---
- *   Body = full system prompt for that mode (same content switch-agent.mjs
- *   stages into .pi/SYSTEM.md).
+ *   Body = full system prompt for that mode. This body is what the
+ *   before_agent_start hook installs as customPrompt on every turn.
+ *   .pi/SYSTEM.md is NO LONGER staged on switch; the mode travels via
+ *   user/agent-mode.json plus session entries, so switching never dirties
+ *   a tracked file.
  *
  * USAGE
  *   /agent              picker (works in TUI and web UI / RPC)
@@ -235,16 +238,10 @@ export default function agentSwitcherExtension(pi: ExtensionAPI) {
 		// Runtime pins (model / thinking / tools)
 		await applyRuntimePins(profile, ctx);
 
-		// Repo-global mode marker (routing.ts gate contract)
+		// Repo-global mode marker (routing.ts gate contract). This plus the session
+		// entry below is what carries the mode across a restart — .pi/SYSTEM.md is
+		// deliberately NOT rewritten, so switching never dirties a tracked file.
 		writeModeFile(join(repoRoot, "user", "agent-mode.json"), modeId, previous);
-
-		// Stage .pi/SYSTEM.md (body only — frontmatter is config, not prompt)
-		// so a restart lands in the same mode
-		try {
-			writeFileSync(join(repoRoot, ".pi", "SYSTEM.md"), profile.text, "utf-8");
-		} catch {
-			// non-fatal: in-session prompt switching still works
-		}
 
 		// Session persistence (mode survives resume even before first turn)
 		pi.appendEntry("agent-mode-state", { mode: modeId });

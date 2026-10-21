@@ -75,6 +75,17 @@ const CSS = `
   right: 0;
   transform: none;
 }
+/* plugin-menu error line: the host ships no .pm-sub rule, so a long
+   validation message wrapped inside the fixed 38px row, overflowed the
+   panel and collided with the badge column. Clamp it like .pm-name. */
+.pm-sub {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* == end tooltip-overflow-fix ========================================== */
 `;
 

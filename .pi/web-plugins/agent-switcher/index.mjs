@@ -29,6 +29,11 @@
  * AGENT_SWITCHER_GLOBAL_DIR overrides, for tests), so the chip appears in
  * every project folder even without a local .pi/agent-profiles. A same-id
  * workspace profile overrides the global entry.
+ *
+ * ROOT OVERRIDE: every path below is anchored at glitchRoot() (see the fs note).
+ * AGENT_SWITCHER_ROOT relocates that root — the test suite sets it to a temp dir
+ * so a test run cannot touch the live marker or profiles. Production never sets
+ * it, so behaviour is unchanged.
  */
 
 import { definePlugin } from "./sdk/index.mjs";
@@ -42,10 +47,20 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { glitchRoot } from "../../lib/root.mjs";
 
-/** Absolute, root-anchored. See the import note above. */
-const PROFILES_DIR = join(glitchRoot(), ".pi", "agent-profiles");
-const MODE_FILE = join(glitchRoot(), "user", "agent-mode.json");
-const globalDir = () => process.env.AGENT_SWITCHER_GLOBAL_DIR || PROFILES_DIR;
+/**
+ * The root every path is anchored at. glitchRoot() by default, so production is
+ * byte-identical to before. AGENT_SWITCHER_ROOT overrides it — the test suite sets
+ * it to a temp dir so a test run cannot read or write the live marker and profiles.
+ * It previously did both, which is what made the suite red and left the repo dirty.
+ *
+ * Resolved per call rather than cached: discovery already re-runs on cwd change, so
+ * a stale module-level const would be the only real risk.
+ */
+const agentRoot = () => process.env.AGENT_SWITCHER_ROOT || glitchRoot();
+const profilesDir = () => join(agentRoot(), ".pi", "agent-profiles");
+const modeFile = () => join(agentRoot(), "user", "agent-mode.json");
+/** Global fallback dir: explicit env override, else the resolved profiles dir. */
+const globalDir = () => process.env.AGENT_SWITCHER_GLOBAL_DIR || profilesDir();
 const ITEM_ID = "agent-mode";
 /** Composer button action — the client opens a dd-menu clone styled like the thinking chip. */
 const ACTION_MENU = "agent-switcher:menu";
@@ -84,7 +99,7 @@ function readGlobalModes() {
 	for (const entry of entries) {
 		if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
 		const id = entry.name.replace(/\.md$/, "");
-		// Full read: the body is needed to stage .pi/SYSTEM.md on a switch.
+		// Full read: the body is kept for completeness (no longer staged anywhere).
 		let description;
 		let body;
 		try {
@@ -108,18 +123,22 @@ async function readModes(host) {
 	const merged = new Map();
 	for (const m of readGlobalModes()) merged.set(m.id, m);
 	let entries = [];
+	const dir = profilesDir();
 	try {
-		entries = readdirSync(PROFILES_DIR);
+		// withFileTypes is required: the filter below reads entry.type, and the
+		// non-Dirent form returns plain strings whose .type is always undefined —
+		// which silently dropped every workspace profile.
+		entries = readdirSync(dir, { withFileTypes: true });
 	} catch {
 		if (!merged.size) return [];
 	}
 	for (const entry of entries) {
-		if (entry.type !== "file" || !entry.name.endsWith(".md")) continue;
-		// Full read: the body is needed to stage .pi/SYSTEM.md on a switch.
+		if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+		// Full read: the body is kept for completeness (no longer staged anywhere).
 		let description;
 		let body;
 		try {
-			const parsed = parseProfile(readFileSync(join(PROFILES_DIR, entry.name), "utf-8"));
+			const parsed = parseProfile(readFileSync(join(dir, entry.name), "utf-8"));
 			description = parsed.description;
 			body = parsed.body;
 		} catch {
@@ -132,7 +151,7 @@ async function readModes(host) {
 
 async function readCurrent(host) {
 	try {
-		const raw = JSON.parse(stripBom(readFileSync(MODE_FILE, "utf-8")));
+		const raw = JSON.parse(stripBom(readFileSync(modeFile(), "utf-8")));
 		return typeof raw?.mode === "string" && raw.mode ? raw.mode : null;
 	} catch {
 		return null;
@@ -219,11 +238,13 @@ export default definePlugin({
 		}
 
 		/**
-		 * Switch the mode by writing the marker (user/agent-mode.json) and staging
-		 * .pi/SYSTEM.md. The pi extension (glitch-pi/.pi/extensions/agent-switcher.ts)
-		 * reconciles from the marker at the start of the next turn, so this needs no
-		 * conversation id — host.prompt()/getActiveConversation() proved ambiguous
-		 * with several attached clients ("unknown conversation: c1").
+		 * Switch the mode by writing the marker (user/agent-mode.json). The pi extension
+		 * (glitch-pi/.pi/extensions/agent-switcher.ts) reconciles from the marker at the
+		 * start of the next turn, so this needs no conversation id —
+		 * host.prompt()/getActiveConversation() proved ambiguous with several attached
+		 * clients ("unknown conversation: c1").
+		 * .pi/SYSTEM.md is deliberately NOT written: the switch must never dirty a
+		 * tracked file, and the in-memory prompt swap does not need it.
 		 */
 		async function switchMode(mode) {
 			if (!mode || !modes.some((m) => m.id === mode)) {
@@ -233,7 +254,7 @@ export default definePlugin({
 			try {
 				const previous = current;
 				writeFileSync(
-					MODE_FILE,
+					modeFile(),
 					JSON.stringify(
 						{
 							mode,

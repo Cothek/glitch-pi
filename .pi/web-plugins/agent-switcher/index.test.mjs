@@ -1,15 +1,23 @@
 /**
  * agent-switcher plugin — unit tests via the SDK's createMockHost.
  *
- * The switch is marker-based: switchMode() writes user/agent-mode.json and
- * stages .pi/SYSTEM.md through host.fs (the pi extension reconciles from the
- * marker each turn). No host.prompt()/conversation id is involved — that path
- * proved ambiguous with several attached clients ("unknown conversation: c1").
+ * The switch is marker-based: switchMode() writes user/agent-mode.json and nothing
+ * else. The pi extension reconciles from the marker each turn, and it installs the
+ * profile as the system prompt in memory, so no tracked file is ever staged.
+ * No host.prompt()/conversation id is involved — that path proved ambiguous with
+ * several attached clients ("unknown conversation: c1").
+ *
+ * HERMETICITY: beforeEach sets AGENT_SWITCHER_ROOT to the fixture workspace. The
+ * plugin deliberately anchors on glitchRoot() in production (see the note in
+ * index.mjs), so without that override a test run reads and WRITES the real repo's
+ * user/agent-mode.json and .pi/agent-profiles. The "never writes the live repo
+ * marker or system prompt" test below is the guard against that regressing.
  *
  * Run: node --test index.test.mjs
  */
 
 import { describe, it, beforeEach, afterEach } from "node:test";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -95,6 +103,11 @@ describe("agent-switcher plugin", () => {
 
 	beforeEach(() => {
 		root = fixtureWorkspace();
+		// Isolate the plugin's whole root per test. Without this the plugin (correctly)
+		// anchors on glitchRoot() and a test run reads and WRITES the real
+		// user/agent-mode.json plus the real .pi/agent-profiles — which is what made
+		// this suite red and left the repo dirty.
+		process.env.AGENT_SWITCHER_ROOT = root;
 		// Isolate the global fallback dir per test (env override; empty by default).
 		globalRoot = mkdtempSync(join(tmpdir(), "agent-switcher-global-"));
 		process.env.AGENT_SWITCHER_GLOBAL_DIR = globalRoot;
@@ -103,6 +116,7 @@ describe("agent-switcher plugin", () => {
 	afterEach(() => {
 		rmSync(globalRoot, { recursive: true, force: true });
 		delete process.env.AGENT_SWITCHER_GLOBAL_DIR;
+		delete process.env.AGENT_SWITCHER_ROOT;
 	});
 
 	it("registers a composer action chip with the current mode label", async () => {
@@ -146,6 +160,34 @@ describe("agent-switcher plugin", () => {
 			sentinel,
 			"a switch must not dirty the tracked system prompt",
 		);
+	});
+
+	it("never writes the live repo marker or system prompt", async () => {
+		// The regression guard for the bug that made this suite both red and dangerous:
+		// AGENT_SWITCHER_ROOT is set to a fixture above, so a switch must land there
+		// and nowhere near the real glitchRoot() paths.
+		const { glitchRoot } = await import("../../lib/root.mjs");
+		const liveRoot = glitchRoot();
+		const sha = async (p) => {
+			try {
+				return createHash("sha256").update(readFileSync(p)).digest("hex");
+			} catch {
+				return "(absent)";
+			}
+		};
+		const liveMarker = join(liveRoot, "user", "agent-mode.json");
+		const liveSystem = join(liveRoot, ".pi", "SYSTEM.md");
+		const before = { marker: await sha(liveMarker), system: await sha(liveSystem) };
+
+		const { host } = makeHost(root);
+		await plugin.activate(host);
+		host.mock.emit("onMessage", { action: "agent-switcher:switch", value: "glitch-lightweight" }, "c1");
+		await new Promise((r) => setTimeout(r, 30));
+		// Sanity: the switch DID happen, in the fixture.
+		assert.equal(readMarker(root)?.mode, "glitch-lightweight");
+
+		assert.equal(await sha(liveMarker), before.marker, "live user/agent-mode.json must not be written");
+		assert.equal(await sha(liveSystem), before.system, "live .pi/SYSTEM.md must not be written");
 	});
 
 	it("rejects unknown modes and leaves the marker untouched", async () => {
@@ -211,6 +253,8 @@ describe("agent-switcher plugin", () => {
 		const bareRoot = mkdtempSync(join(tmpdir(), "agent-switcher-bare-"));
 		mkdirSync(join(bareRoot, ".pi"), { recursive: true });
 		mkdirSync(join(bareRoot, "user"), { recursive: true });
+		// This test's workspace is bareRoot, not the beforeEach fixture.
+		process.env.AGENT_SWITCHER_ROOT = bareRoot;
 		try {
 			const { host } = makeHost(bareRoot);
 			await plugin.activate(host);
@@ -253,6 +297,8 @@ describe("agent-switcher plugin", () => {
 
 	it("hides the chip when the workspace has no profiles", async () => {
 		const emptyRoot = mkdtempSync(join(tmpdir(), "agent-switcher-empty-"));
+		// Point the plugin at the empty dir, not the beforeEach fixture.
+		process.env.AGENT_SWITCHER_ROOT = emptyRoot;
 		const { host } = makeHost(emptyRoot);
 		await plugin.activate(host);
 		assert.equal(host.mock.calls("ui.register").length, 0);

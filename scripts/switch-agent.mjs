@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// switch-agent.mjs — switch the primary agent mode (glitch | glitch-free | glitch-omni | glitch-lightweight).
+// switch-agent.mjs — switch the primary agent mode (glitch | glitch-omni | glitch-lightweight).
 //
 // Records the mode in user/agent-mode.json, which routing.ts reads to decide gate
 // behavior. That file is gitignored, so switching never dirties the repo.
@@ -13,7 +13,7 @@
 // a live Pi session instead — no restart needed. This script remains the
 // offline/fallback path.
 //
-// Usage: node scripts/switch-agent.mjs <glitch|glitch-free|glitch-omni|glitch-lightweight> [--status]
+// Usage: node scripts/switch-agent.mjs <glitch|glitch-omni|glitch-lightweight> [--status]
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname, resolve } from 'path';
@@ -28,7 +28,6 @@ const MODE_FILE = join(ROOT_DIR, 'user', 'agent-mode.json');
 
 const MODES = [
   { id: 'glitch', file: 'glitch.md', desc: 'Full Glitch — dispatch-first workflow, sub-agent delegation, complete rules system' },
-  { id: 'glitch-free', file: 'glitch-free.md', desc: 'Free-NVIDIA dispatch mode — all sub-agent work on free NIM models from the enabled pool' },
   { id: 'glitch-omni', file: 'glitch-omni.md', desc: 'Direct execution — no dispatching, self-fulfilled memory, full tool access' },
   { id: 'glitch-lightweight', file: 'glitch-lightweight.md', desc: 'Trimmed rules — identity + honesty core, minimal payload' },
 ];

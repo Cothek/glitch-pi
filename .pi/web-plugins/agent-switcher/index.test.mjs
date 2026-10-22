@@ -124,7 +124,7 @@ describe("agent-switcher plugin", () => {
 		await plugin.activate(host);
 		const item = registeredChip(host);
 		assert.equal(item.slot, "composer.actions");
-		assert.equal(item.label, "Agent: glitch-omni");
+		assert.equal(item.label, "glitch-omni");
 		assert.equal(item.options, undefined);
 	});
 
@@ -244,7 +244,7 @@ describe("agent-switcher plugin", () => {
 		await new Promise((r) => setTimeout(r, 30));
 		const update = host.mock.calls("ui.update").at(-1);
 		assert.ok(update, "ui.update should have been called");
-		assert.equal(update.args[1]?.label, "Agent: glitch");
+		assert.equal(update.args[1]?.label, "glitch");
 	});
 
 	it("falls back to global profiles when the workspace has none", async () => {
@@ -259,7 +259,7 @@ describe("agent-switcher plugin", () => {
 			const { host } = makeHost(bareRoot);
 			await plugin.activate(host);
 			const item = registeredChip(host);
-			assert.equal(item.label, "Agent: glitch");
+			assert.equal(item.label, "glitch");
 			const getState = host.mock.routes.find((r) => r.method === "GET" && r.path === "/state");
 			const res = { status: 0, body: "", writeHead(s) { this.status = s; }, end(b) { this.body = b; } };
 			await getState.handler({ body: {}, url: "/state" }, res);

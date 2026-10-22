@@ -31,8 +31,8 @@ function onUiAction(action, handler) {
 const ACTION_MENU = "agent-switcher:menu";
 const ACTION_SWITCH = "agent-switcher:switch";
 const API_BASE = "/plugins-api/agent-switcher";
-const BUTTON_SELECTOR = 'button.composer-plugin-action[aria-label^="glitch"]';
-const CHIP_SEL = '.inputbox button.composer-plugin-action[aria-label^="glitch"]';
+const BUTTON_SELECTOR = 'button.composer-plugin-action[aria-label^="Agent:"]';
+const CHIP_SEL = '.inputbox button.composer-plugin-action[aria-label^="Agent:"]';
 const OPEN_BODY_CLASS = "agent-switcher-menu-open";
 
 // --- diagnostics (never throws; proves the module executed) -------------------

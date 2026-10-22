@@ -198,8 +198,17 @@ export function isCloudflaredRunning() {
 
 // ensureTunnel(log) — log(message, level) with level ∈ 'info' | 'ok' | 'warn' | 'dim'.
 export async function ensureTunnel(log = (msg) => console.log(msg)) {
-  if (isCloudflaredRunning()) {
-    log('cloudflared already running — leaving tunnel as-is', 'ok');
+  // Ownership matters, not just existence. A cloudflared we did NOT start
+  // (source 'process', no pidfile) may belong to another repo and carry a
+  // config that routes the hostname to a dead origin port. That is exactly
+  // how glitch.cotekdesigns.com served 502 while "cloudflared: UP" reported
+  // healthy (PM-063 / PM-064). Flag it loudly instead of trusting silently.
+  const existing = tunnelStatus();
+  if (existing.running) {
+    if (existing.source !== 'pidfile') {
+      log(`cloudflared PID ${existing.pid} was NOT started by this stack (no pidfile). It may hold a stale config with a dead origin port. Verify its config with: powershell "Get-CimInstance Win32_Process -Filter \\"Name='cloudflared.exe'\\" | Select ProcessId,CommandLine"`, 'warn');
+    }
+    log('cloudflared already running - leaving tunnel as-is', 'ok');
     return { running: true, started: false, reason: 'already-running' };
   }
   // The tunnel only makes sense with the web stack up: glitch.cothekdesigns.com

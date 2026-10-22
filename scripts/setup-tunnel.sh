@@ -66,8 +66,11 @@ write_config() {
 
 tunnel: $uuid
 ingress:
+  # ORIGIN 4103, NOT 4100: 4100 is the dead OpenCode-era auth-proxy port.
+  # The live stack is pi-web-ui :8787 behind auth-proxy :4103. Port 4100 here
+  # is what served 502 Bad Gateway on glitch.cotekdesigns.com (PM-063/PM-065).
   - hostname: $hostname
-    service: http://localhost:4100
+    service: http://localhost:4103
   - service: http_status:404
 EOF
 

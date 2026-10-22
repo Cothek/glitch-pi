@@ -214,7 +214,7 @@ export default definePlugin({
 			unregisterUi = host.ui.register({
 				slot: "composer.actions",
 				id: ITEM_ID,
-				label: current && modes.some((m) => m.id === current) ? current : modes[0].id,
+				label: current && modes.some((m) => m.id === current) ? `Agent: ${current}` : `Agent: ${modes[0].id}`,
 				kind: "action",
 				action: ACTION_MENU,
 				hint: "Switch the primary agent mode",
@@ -231,7 +231,7 @@ export default definePlugin({
 		/** Keep the composer button label in sync with the marker. */
 		function syncLabel(mode) {
 			try {
-				host.ui.update(ITEM_ID, { label: mode });
+				host.ui.update(ITEM_ID, { label: `Agent: ${mode}` });
 			} catch {
 				/* UI item may be gone after a reload */
 			}

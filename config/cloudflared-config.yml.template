@@ -17,14 +17,13 @@ ingress:
   - hostname: glitch-trader-api.cothekdesigns.com
     service: http://localhost:4120
 
-  # Pi web UI alias - same auth-proxy as glitch.cotekdesigns.com
-  - hostname: pi.cotekdesigns.com
+  # Pi web UI alias - same auth-proxy as glitch.cothekdesigns.com
+  - hostname: pi.cothekdesigns.com
     service: http://localhost:4103
 
-  # Tower Audio Recorder (auth-protected on :8721). NOTE the spelling: this ONE
-  # hostname is audio-recorder.cotekhdesigns.com WITH an h, unlike every other
-  # hostname in this file. Do not "fix" it to match the others.
-  - hostname: audio-recorder.cotekhdesigns.com
+  # Tower Audio Recorder (auth-protected on :8721). NOTE: the domain is
+  # cothekdesigns.com for ALL hostnames in this file. Do not "fix" spellings.
+  - hostname: audio-recorder.cothekdesigns.com
     service: http://127.0.0.1:8721
 
   # Catch-all: return 404 for any other hostname
